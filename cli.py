@@ -79,10 +79,21 @@ def _handle_resume(raw: str, manager: SessionManager) -> Session | None:
     return loaded
 
 
-def _create_startup_session(manager: SessionManager) -> Session:
+def _create_or_resume_startup_session(manager: SessionManager) -> tuple[Session, bool]:
+    """Try to resume the current/latest session, or create a new one.
+
+    Returns (session, resumed).
+    """
+    current = manager.load_current_session()
+    if current is not None:
+        return current, True
+    latest = manager.latest_session(prefer_non_empty=True)
+    if latest is not None:
+        manager.set_current_session(latest.session_id)
+        return latest, True
     session = manager.create_session()
     manager.set_current_session(session.session_id)
-    return session
+    return session, False
 
 
 def _handle_new(manager: SessionManager) -> Session:
@@ -121,11 +132,14 @@ def run_repl(
     manager: SessionManager,
 ) -> None:
     """Run the interactive REPL loop."""
-    current_session = _create_startup_session(manager)
+    current_session, resumed = _create_or_resume_startup_session(manager)
 
     print("MiniBot 已启动！")
     _print_help()
-    print(f"已创建新会话: {current_session.session_id}")
+    if resumed:
+        print(f"已自动恢复会话: {current_session.session_id}")
+    else:
+        print(f"已创建新会话: {current_session.session_id}")
     _print_session(current_session)
 
     while True:
