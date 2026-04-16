@@ -30,6 +30,7 @@ class Config:
     compact_token_threshold: int = 40000
     reserved_completion_tokens: int = 4096
     compact_keep_recent: int = 10
+    auto_approve: bool = False
 
     def __post_init__(self) -> None:
         if self.compact_token_threshold <= 0:
@@ -52,8 +53,11 @@ class Config:
             except ValueError as exc:
                 raise ValueError(f"{name} 必须是整数。") from exc
 
+        auto_approve = os.environ.get("MINIBOT_AUTO_APPROVE", "").lower() in {"1", "true", "yes"}
+
         return cls(
             model=os.environ.get("MINIBOT_MODEL", cls.model),
+            auto_approve=auto_approve,
             max_history_turns=_get_int("MINIBOT_MAX_HISTORY_TURNS", cls.max_history_turns),
             compact_token_threshold=_get_int(
                 "MINIBOT_COMPACT_TOKEN_THRESHOLD",

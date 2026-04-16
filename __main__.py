@@ -21,8 +21,10 @@ def main() -> None:
     from .llm import OpenAIClient
     from .loop import TurnEngine
     from .session import SessionManager
+    from .tools import create_default_registry
 
-    manager = SessionManager(Path.cwd())
+    workspace = Path.cwd()
+    manager = SessionManager(workspace)
 
     try:
         llm = OpenAIClient(model=config.model)
@@ -31,11 +33,24 @@ def main() -> None:
         return
 
     emit = lambda msg: print(f"  🔧 {msg}")
-    spec = AgentSpec(default_model=config.model)
+
+    if config.auto_approve:
+        approval = None
+    else:
+        def approval(tool_name: str, args: dict) -> bool:
+            preview = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            answer = input(f"  ⚠️  允许执行 {tool_name}({preview})? [y/N] ").strip().lower()
+            return answer in {"y", "yes"}
+
+    spec = AgentSpec(
+        default_model=config.model,
+        tool_registry=create_default_registry(workspace),
+    )
     runner = AgentRunner(
         llm,
         spec,
         event_handler=emit,
+        approval_handler=approval,
     )
     turn_engine = TurnEngine(
         spec,

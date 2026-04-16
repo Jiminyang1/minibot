@@ -59,10 +59,12 @@ class AgentRunner:
         spec: AgentSpec,
         *,
         event_handler: Callable[[str], None] | None = None,
+        approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         self.llm = llm
         self.spec = spec
         self.event_handler = event_handler
+        self.approval_handler = approval_handler
 
     def run(self, messages: list[dict[str, Any]]) -> tuple[str, list[MessageEvent]]:
         """Run one prepared message list until the model returns a final answer."""
@@ -91,7 +93,12 @@ class AgentRunner:
             for tc in resp.tool_calls:
                 args = _parse_args(tc.arguments)
                 self._emit(f"工具: {tc.name}({args})")
-                result = self.spec.tool_registry.execute(tc.name, args)
+
+                tool = self.spec.tool_registry.get(tc.name)
+                if tool and tool.requires_approval and not self._approve(tc.name, args):
+                    result = f"[用户拒绝] 工具 {tc.name} 未获批准执行。"
+                else:
+                    result = self.spec.tool_registry.execute(tc.name, args)
                 self._emit(f"返回: {_preview(result, 100)}")
 
                 tool_msg: dict[str, Any] = {
@@ -121,6 +128,11 @@ class AgentRunner:
                 for tc in resp.tool_calls
             ]
         return msg
+
+    def _approve(self, tool_name: str, args: dict[str, Any]) -> bool:
+        if self.approval_handler is None:
+            return True
+        return self.approval_handler(tool_name, args)
 
     def _emit(self, message: str) -> None:
         if self.event_handler:
