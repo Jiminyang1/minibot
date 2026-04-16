@@ -50,12 +50,12 @@ python -m minibot
 | `agent.py` | **Agent Core** — 拥有 system prompt、工具集、tool-calling 循环 |
 | `llm.py` | LLM 抽象层 — `LLMClient` 接口 + `OpenAIClient` 实现 |
 | `loop.py` | 对话编排 — 管理 session 状态、历史窗口、压缩触发 |
-| `cli.py` | REPL 交互 — 斜杠命令（`/sessions`, `/resume`, `/compact`） |
+| `cli.py` | REPL 交互 — 启动默认恢复最近会话，斜杠命令（`/sessions`, `/resume`, `/new`, `/delete`, `/compact`） |
 | `compaction.py` | 基于 token 的会话压缩 — tiktoken 估算，超阈值时 LLM 摘要 |
 | `config.py` | 配置中心 — `.env` 解析 + `Config` dataclass |
 | `prompts.py` | 系统提示词（对话 + 摘要） |
 | `session/models.py` | `MessageEvent` + `Session` 领域模型 |
-| `session/store.py` | `SessionManager` — JSONL 文件持久化 |
+| `session/store.py` | `SessionManager` — JSONL 会话持久化 + 当前会话指针 |
 | `tools/` | 工具注册表 + 实现（`exec` 命令执行、`read_file` 文件读取） |
 
 ## 数据流
@@ -87,7 +87,7 @@ python -m minibot
 
 **工具安全** — `exec` 工具内置危险命令正则拦截（rm -rf、dd、fork bomb 等）。
 
-**会话持久化** — JSONL 格式存储在 `.minibot/sessions/`，支持多会话切换和恢复。
+**会话持久化** — JSONL 格式存储在 `.minibot/sessions/`，当前会话指针存储在 `.minibot/current_session`；若指针悬空会自动清理并修正。
 
 ## 配置
 

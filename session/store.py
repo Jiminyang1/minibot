@@ -13,7 +13,9 @@ class SessionManager:
     """Save and load sessions as `.jsonl` files under `.minibot/sessions/`."""
 
     def __init__(self, workspace: Path | None = None) -> None:
-        self.sessions_dir = (workspace or Path.cwd()).resolve() / ".minibot" / "sessions"
+        self.state_dir = (workspace or Path.cwd()).resolve() / ".minibot"
+        self.sessions_dir = self.state_dir / "sessions"
+        self.current_session_path = self.state_dir / "current_session"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, session_id: str) -> Path:
@@ -73,6 +75,49 @@ class SessionManager:
             "\n".join([meta_line, *message_lines]) + "\n",
             encoding="utf-8",
         )
+
+    def get_current_session_id(self) -> str | None:
+        if not self.current_session_path.exists():
+            return None
+        session_id = self.current_session_path.read_text(encoding="utf-8").strip()
+        return session_id or None
+
+    def set_current_session(self, session_id: str) -> None:
+        self.current_session_path.write_text(session_id + "\n", encoding="utf-8")
+
+    def clear_current_session(self) -> None:
+        if self.current_session_path.exists():
+            self.current_session_path.unlink()
+
+    def load_current_session(self) -> Session | None:
+        session_id = self.get_current_session_id()
+        if session_id is None:
+            return None
+        session = self.load(session_id)
+        if session is None:
+            self.clear_current_session()
+            return None
+        return session
+
+    def delete_session(self, session_id: str) -> bool:
+        path = self._path(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        if self.get_current_session_id() == session_id:
+            self.clear_current_session()
+        return True
+
+    def latest_session(self, *, prefer_non_empty: bool = True) -> Session | None:
+        sessions = self.list_sessions()
+        if not sessions:
+            return None
+        if not prefer_non_empty:
+            return sessions[0]
+        for session in sessions:
+            if session.messages:
+                return session
+        return sessions[0]
 
     def list_sessions(self) -> list[Session]:
         sessions: list[Session] = []
