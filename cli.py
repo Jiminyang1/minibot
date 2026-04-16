@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
-    from .loop import AgentLoop
+    from .loop import TurnEngine
 
 
 def _is_terminal_escape_sequence(text: str) -> bool:
@@ -48,13 +48,13 @@ def _print_sessions(manager: SessionManager) -> None:
     for s in sessions:
         print(
             f"  - {s.session_id} | {s.title} | "
-            f"{s.turn_count()} 轮对话 / {len(s.messages)} 条消息 | 更新于 {s.updated_at}"
+            f"{s.message_count} 条消息 | 更新于 {s.updated_at}"
         )
 
 
-def _handle_compact(session: Session, loop: AgentLoop) -> None:
+def _handle_compact(session: Session, turn_engine: TurnEngine) -> None:
     try:
-        did_compact, message = loop.compact_session(session)
+        did_compact, message = turn_engine.compact_session(session)
     except Exception as exc:
         print(f"手动 compact 失败: {exc}")
         return
@@ -79,17 +79,10 @@ def _handle_resume(raw: str, manager: SessionManager) -> Session | None:
     return loaded
 
 
-def _create_or_resume_startup_session(manager: SessionManager) -> tuple[Session, bool]:
-    current = manager.load_current_session()
-    if current is not None:
-        return current, True
-    latest = manager.latest_session(prefer_non_empty=True)
-    if latest is not None:
-        manager.set_current_session(latest.session_id)
-        return latest, True
+def _create_startup_session(manager: SessionManager) -> Session:
     session = manager.create_session()
     manager.set_current_session(session.session_id)
-    return session, False
+    return session
 
 
 def _handle_new(manager: SessionManager) -> Session:
@@ -124,18 +117,15 @@ def _handle_delete(raw: str, manager: SessionManager, current_session: Session) 
 
 
 def run_repl(
-    loop: AgentLoop,
+    turn_engine: TurnEngine,
     manager: SessionManager,
 ) -> None:
     """Run the interactive REPL loop."""
-    current_session, resumed = _create_or_resume_startup_session(manager)
+    current_session = _create_startup_session(manager)
 
     print("MiniBot 已启动！")
     _print_help()
-    if resumed:
-        print(f"已自动恢复最近会话: {current_session.session_id}")
-    else:
-        print(f"已创建新会话: {current_session.session_id}")
+    print(f"已创建新会话: {current_session.session_id}")
     _print_session(current_session)
 
     while True:
@@ -165,7 +155,7 @@ def run_repl(
             current_session = _handle_delete(user_msg, manager, current_session)
             continue
         if user_msg == "/compact":
-            _handle_compact(current_session, loop)
+            _handle_compact(current_session, turn_engine)
             continue
         if user_msg.startswith("/resume"):
             resumed = _handle_resume(user_msg, manager)
@@ -177,7 +167,7 @@ def run_repl(
             continue
 
         try:
-            result = loop.handle_turn(current_session, user_msg)
+            result = turn_engine.handle_turn(current_session, user_msg)
         except Exception as exc:
             print(f"\n❌ 运行失败: {exc}")
             continue

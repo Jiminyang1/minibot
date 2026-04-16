@@ -31,7 +31,7 @@ def _estimate_tokens(text: str) -> int:
         return max(1, len(text) // 2)
 
 
-def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
+def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
     """Estimate total tokens for a list of OpenAI-format messages."""
     total = 0
     for msg in messages:
@@ -43,6 +43,36 @@ def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
                 total += _estimate_tokens(json.dumps(value, ensure_ascii=False))
     total += 2  # reply priming
     return total
+
+
+def estimate_request_tokens(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> int:
+    """Estimate tokens for one concrete model request payload."""
+    total = estimate_messages_tokens(messages)
+    if tools:
+        total += _estimate_tokens(json.dumps(tools, ensure_ascii=False))
+    return total
+
+
+from .context import build_messages
+
+
+def estimate_visible_context_tokens(
+    *,
+    session: Session,
+    system_prompt: str,
+    max_history_turns: int,
+    tools: list[dict[str, Any]] | None,
+) -> int:
+    """Estimate current visible context usage, excluding any new user input."""
+    history = session.history_for_model(max_history_turns)
+    request_messages = build_messages(
+        system_prompt=system_prompt,
+        history=history,
+    )
+    return estimate_request_tokens(request_messages, tools)
 
 
 # ── summarisation ────────────────────────────────────────────────
@@ -95,20 +125,31 @@ def maybe_compact(
     manager: SessionManager,
     summarizer: Callable[[list[dict[str, Any]]], str],
     *,
+    system_prompt: str,
+    max_history_turns: int,
+    user_input: str | None,
+    tools: list[dict[str, Any]] | None,
     token_threshold: int,
+    reserved_completion_tokens: int,
     keep_recent: int,
 ) -> tuple[bool, str]:
-    """Compact a session when its estimated token count exceeds *token_threshold*.
+    """Compact a session when the next concrete request would exceed budget.
 
     Returns ``(did_compact, message)`` so the caller decides how to display it.
     """
-    all_dicts = [m.to_model_message() for m in session.messages]
-    current_tokens = estimate_message_tokens(all_dicts)
+    effective_input_budget = token_threshold - reserved_completion_tokens
+    visible_history = session.history_for_model(max_history_turns)
+    request_messages = build_messages(
+        system_prompt=system_prompt,
+        history=visible_history,
+        user_input=user_input,
+    )
+    projected_request_tokens = estimate_request_tokens(request_messages, tools)
 
-    if current_tokens <= token_threshold:
+    if projected_request_tokens <= effective_input_budget:
         return False, (
-            f"当前会话约 {current_tokens} tokens，"
-            f"未超过阈值 {token_threshold}，无需压缩。"
+            f"当前请求约 {projected_request_tokens} tokens，"
+            f"未超过输入预算 {effective_input_budget}，无需压缩。"
         )
 
     old_messages = session.messages_to_compact(keep_recent)
@@ -119,9 +160,14 @@ def maybe_compact(
     before, after = session.compact_with_summary(summary, keep_recent)
     manager.save(session)
 
-    after_dicts = [m.to_model_message() for m in session.messages]
-    after_tokens = estimate_message_tokens(after_dicts)
+    after_history = session.history_for_model(max_history_turns)
+    after_request_messages = build_messages(
+        system_prompt=system_prompt,
+        history=after_history,
+        user_input=user_input,
+    )
+    after_tokens = estimate_request_tokens(after_request_messages, tools)
     return True, (
         f"已压缩: {before} -> {after} 条消息, "
-        f"{current_tokens} -> {after_tokens} tokens"
+        f"请求预算 {projected_request_tokens} -> {after_tokens} tokens"
     )

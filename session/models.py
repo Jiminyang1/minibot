@@ -99,7 +99,7 @@ class MessageEvent:
 class Session:
     """A single conversation with its messages."""
 
-    __slots__ = ("session_id", "title", "created_at", "updated_at", "messages")
+    __slots__ = ("session_id", "title", "created_at", "updated_at", "messages", "_message_count")
 
     def __init__(
         self,
@@ -108,6 +108,7 @@ class Session:
         created_at: str | None = None,
         updated_at: str | None = None,
         messages: list[MessageEvent] | None = None,
+        message_count: int | None = None,
     ) -> None:
         now = utc_now()
         self.session_id = session_id
@@ -115,6 +116,11 @@ class Session:
         self.created_at = created_at or now
         self.updated_at = updated_at or self.created_at
         self.messages: list[MessageEvent] = messages or []
+        self._message_count = message_count
+
+    @property
+    def message_count(self) -> int:
+        return len(self.messages) if self.messages else (self._message_count or 0)
 
     def add_message(self, message: MessageEvent) -> None:
         self.messages.append(message)

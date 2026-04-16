@@ -28,10 +28,43 @@ class Config:
     model: str = "gpt-5.4-mini"
     max_history_turns: int = 40
     compact_token_threshold: int = 40000
+    reserved_completion_tokens: int = 4096
     compact_keep_recent: int = 10
+
+    def __post_init__(self) -> None:
+        if self.compact_token_threshold <= 0:
+            raise ValueError("compact_token_threshold 必须大于 0。")
+        if self.reserved_completion_tokens <= 0:
+            raise ValueError("reserved_completion_tokens 必须大于 0。")
+        if self.reserved_completion_tokens >= self.compact_token_threshold:
+            raise ValueError(
+                "reserved_completion_tokens 必须小于 compact_token_threshold。"
+            )
 
     @classmethod
     def from_env(cls) -> Config:
+        def _get_int(name: str, default: int) -> int:
+            raw = os.environ.get(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} 必须是整数。") from exc
+
         return cls(
             model=os.environ.get("MINIBOT_MODEL", cls.model),
+            max_history_turns=_get_int("MINIBOT_MAX_HISTORY_TURNS", cls.max_history_turns),
+            compact_token_threshold=_get_int(
+                "MINIBOT_COMPACT_TOKEN_THRESHOLD",
+                cls.compact_token_threshold,
+            ),
+            reserved_completion_tokens=_get_int(
+                "MINIBOT_RESERVED_COMPLETION_TOKENS",
+                cls.reserved_completion_tokens,
+            ),
+            compact_keep_recent=_get_int(
+                "MINIBOT_COMPACT_KEEP_RECENT",
+                cls.compact_keep_recent,
+            ),
         )

@@ -1,23 +1,17 @@
-"""Agent Core for MiniBot — identity, tools, and execution.
-
-The Agent is the single "protagonist": it knows who it is (system prompt),
-what it can do (tools), and how to execute (tool-calling loop).
-"""
+"""Agent specification and execution loop for MiniBot."""
 
 from __future__ import annotations
 
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from .llm import LLMClient, LLMResponse
 from .prompts import SYSTEM_PROMPT
 from .session import MessageEvent
-from .tools import TOOL_DEFINITIONS, execute_tool
-
-
-# ── helpers ──────────────────────────────────────────────────────
+from .tools import ToolRegistry, create_default_registry
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -35,57 +29,58 @@ def _parse_args(raw: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-# ── Agent Core ───────────────────────────────────────────────────
+def _latest_user_input(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
 
 
-class Agent:
-    """Core agent: identity + tools + tool-calling execution loop."""
+@dataclass(frozen=True)
+class AgentSpec:
+    """Static agent definition: identity, capabilities, and execution limits."""
+
+    system_prompt: str = SYSTEM_PROMPT
+    tool_registry: ToolRegistry = field(default_factory=create_default_registry)
+    max_iterations: int = 20
+    default_model: str | None = None
+
+    @property
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        return self.tool_registry.get_definitions()
+
+
+class AgentRunner:
+    """Execute the tool-calling LLM loop for one prepared request."""
 
     def __init__(
         self,
         llm: LLMClient,
+        spec: AgentSpec,
         *,
-        system_prompt: str = SYSTEM_PROMPT,
-        tools: list[dict[str, Any]] | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], str] = execute_tool,
-        max_iterations: int = 20,
         event_handler: Callable[[str], None] | None = None,
     ) -> None:
         self.llm = llm
-        self.system_prompt = system_prompt
-        self.tools = tools if tools is not None else TOOL_DEFINITIONS
-        self.tool_executor = tool_executor
-        self.max_iterations = max_iterations
+        self.spec = spec
         self.event_handler = event_handler
 
-    # ── public API ───────────────────────────────────────────────
-
-    def run(
-        self, history: list[dict[str, Any]], user_input: str
-    ) -> tuple[str, list[MessageEvent]]:
-        """Build context, run tool-call loop, return (reply, events)."""
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
-            *history,
-            {"role": "user", "content": user_input},
-        ]
-        self._emit(f"开始处理: {_preview(user_input)}")
+    def run(self, messages: list[dict[str, Any]]) -> tuple[str, list[MessageEvent]]:
+        """Run one prepared message list until the model returns a final answer."""
+        messages = list(messages)
+        self._emit(f"开始处理: {_preview(_latest_user_input(messages))}")
 
         events: list[MessageEvent] = []
-
-        for iteration in range(1, self.max_iterations + 1):
+        for iteration in range(1, self.spec.max_iterations + 1):
             started = time.perf_counter()
             self._emit(f"第 {iteration} 轮: 请求模型...")
 
-            resp = self.llm.chat(messages, self.tools)
+            resp = self.llm.chat(messages, self.spec.tool_definitions)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-            # Record the assistant message
             assistant_msg = self._response_to_message(resp)
             messages.append(assistant_msg)
             events.append(_to_event(assistant_msg))
 
-            # No tool calls → final answer
             if not resp.tool_calls:
                 self._emit(f"第 {iteration} 轮: 最终回答 ({elapsed_ms} ms)")
                 return resp.content or "", events
@@ -93,12 +88,10 @@ class Agent:
             self._emit(
                 f"第 {iteration} 轮: 调用 {len(resp.tool_calls)} 个工具 ({elapsed_ms} ms)"
             )
-
-            # Execute each tool call
             for tc in resp.tool_calls:
                 args = _parse_args(tc.arguments)
                 self._emit(f"工具: {tc.name}({args})")
-                result = self.tool_executor(tc.name, args)
+                result = self.spec.tool_registry.execute(tc.name, args)
                 self._emit(f"返回: {_preview(result, 100)}")
 
                 tool_msg: dict[str, Any] = {
@@ -110,17 +103,13 @@ class Agent:
                 messages.append(tool_msg)
                 events.append(_to_event(tool_msg))
 
-        # Safety: max iterations reached
         fallback = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
-        self._emit(f"已达最大迭代次数 {self.max_iterations}")
+        self._emit(f"已达最大迭代次数 {self.spec.max_iterations}")
         events.append(_to_event({"role": "assistant", "content": fallback}))
         return fallback, events
 
-    # ── internals ────────────────────────────────────────────────
-
     @staticmethod
     def _response_to_message(resp: LLMResponse) -> dict[str, Any]:
-        """Convert an LLMResponse to an OpenAI-format message dict."""
         msg: dict[str, Any] = {"role": "assistant", "content": resp.content or ""}
         if resp.tool_calls:
             msg["tool_calls"] = [
@@ -136,9 +125,6 @@ class Agent:
     def _emit(self, message: str) -> None:
         if self.event_handler:
             self.event_handler(message)
-
-
-# ── shared utility ───────────────────────────────────────────────
 
 
 def _to_event(message: dict[str, Any]) -> MessageEvent:

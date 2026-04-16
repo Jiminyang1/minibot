@@ -6,6 +6,8 @@ import re
 import subprocess
 from typing import Any
 
+from .base import Tool
+
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\b|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\b"), "rm -rf (递归强制删除)"),
     (re.compile(r"\brm\s+-rf?\b|\brm\s+-fr?\b"),                  "rm -rf (递归强制删除)"),
@@ -33,12 +35,20 @@ def _check_dangerous(command: str) -> str | None:
     return None
 
 
-DEFINITION: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "exec",
-        "description": "执行 shell 命令",
-        "parameters": {
+class ExecTool(Tool):
+    """Execute shell commands with a minimal safety check."""
+
+    @property
+    def name(self) -> str:
+        return "exec"
+
+    @property
+    def description(self) -> str:
+        return "执行 shell 命令"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
             "type": "object",
             "properties": {
                 "command": {
@@ -48,19 +58,27 @@ DEFINITION: dict[str, Any] = {
             },
             "required": ["command"],
             "additionalProperties": False,
-        },
-    },
-}
+        }
 
+    _TIMEOUT = 30
+    _MAX_OUTPUT = 10_000
 
-def execute(args: dict[str, Any]) -> str:
-    command = str(args["command"])
-    danger = _check_dangerous(command)
-    if danger:
-        return (
-            f"[安全拦截] 命令被拒绝执行。\n"
-            f"匹配到危险操作: {danger}\n"
-            f"原始命令: {command}"
-        )
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    return result.stdout or result.stderr or "(命令没有输出)"
+    def execute(self, *, command: str, **kwargs: Any) -> str:
+        danger = _check_dangerous(command)
+        if danger:
+            return (
+                f"[安全拦截] 命令被拒绝执行。\n"
+                f"匹配到危险操作: {danger}\n"
+                f"原始命令: {command}"
+            )
+        try:
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True,
+                timeout=self._TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return f"[超时] 命令执行超过 {self._TIMEOUT} 秒，已终止。"
+        output = result.stdout or result.stderr or "(命令没有输出)"
+        if len(output) > self._MAX_OUTPUT:
+            output = output[:self._MAX_OUTPUT] + f"\n...(输出已截断，共 {len(output)} 字符)"
+        return output

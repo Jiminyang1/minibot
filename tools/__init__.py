@@ -1,28 +1,33 @@
-"""Tool registry for MiniBot."""
+"""Tool exports for MiniBot."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from .base import Tool
+from .exec_cmd import ExecTool
+from .list_dir import ListDirTool
+from .read_file import ReadFileTool
+from .registry import ToolRegistry
+from .search_files import SearchFilesTool
+from .write_file import WriteFileTool
 
-from . import exec_cmd, read_file
 
-_REGISTRY: dict[str, Callable[[dict[str, Any]], str]] = {
-    "exec": exec_cmd.execute,
-    "read_file": read_file.execute,
-}
+def create_default_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(ExecTool())
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    registry.register(ListDirTool())
+    registry.register(SearchFilesTool())
+    return registry
 
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
-    exec_cmd.DEFINITION,
-    read_file.DEFINITION,
+
+__all__ = [
+    "Tool",
+    "ToolRegistry",
+    "ExecTool",
+    "ReadFileTool",
+    "WriteFileTool",
+    "ListDirTool",
+    "SearchFilesTool",
+    "create_default_registry",
 ]
-
-
-def execute_tool(name: str, args: dict[str, Any]) -> str:
-    fn = _REGISTRY.get(name)
-    if fn is None:
-        return f"工具执行报错: 未知工具 {name}"
-    try:
-        return fn(args)
-    except Exception as exc:
-        return f"工具执行报错: {exc}"

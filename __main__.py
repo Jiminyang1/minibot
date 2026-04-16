@@ -9,12 +9,17 @@ from .config import Config, load_env
 
 def main() -> None:
     load_env()
-    config = Config.from_env()
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"配置错误: {exc}")
+        return
 
-    from .agent import Agent
+    from .agent import AgentRunner, AgentSpec
     from .cli import run_repl
+    from .compaction import make_summarizer
     from .llm import OpenAIClient
-    from .loop import AgentLoop
+    from .loop import TurnEngine
     from .session import SessionManager
 
     manager = SessionManager(Path.cwd())
@@ -25,12 +30,23 @@ def main() -> None:
         print(f"配置错误: {exc}")
         return
 
-    agent = Agent(
+    emit = lambda msg: print(f"  🔧 {msg}")
+    spec = AgentSpec(default_model=config.model)
+    runner = AgentRunner(
         llm,
-        event_handler=lambda msg: print(f"  🔧 {msg}"),
+        spec,
+        event_handler=emit,
     )
-    loop = AgentLoop(agent, llm, manager, config)
-    run_repl(loop, manager)
+    turn_engine = TurnEngine(
+        spec,
+        runner,
+        manager,
+        config,
+        summarizer=make_summarizer(llm),
+        event_handler=emit,
+    )
+    run_repl(turn_engine, manager)
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -1,21 +1,18 @@
-"""Turn orchestration for MiniBot.
-
-AgentLoop sits between the CLI and the Agent Core, managing
-session state, history windowing, compaction, and persistence.
-"""
+"""Turn orchestration for MiniBot."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .compaction import make_summarizer, maybe_compact
+from .context import build_messages
+from .compaction import estimate_visible_context_tokens, maybe_compact
 from .session import MessageEvent, Session, SessionManager
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    from .agent import AgentRunner, AgentSpec
     from .config import Config
-    from .llm import LLMClient
 
 
 @dataclass(frozen=True)
@@ -27,29 +24,40 @@ class TurnResult:
     compact_message: str | None = None
 
 
-class AgentLoop:
-    """Coordinate session state, compaction, and agent execution."""
+class TurnEngine:
+    """Coordinate one full user turn: session, compaction, context, runner, persistence."""
 
     def __init__(
         self,
-        agent: Agent,
-        llm: LLMClient,
+        spec: AgentSpec,
+        runner: AgentRunner,
         manager: SessionManager,
         config: Config,
+        *,
+        summarizer: Callable[[list[dict[str, object]]], str],
+        event_handler: Callable[[str], None] | None = None,
     ) -> None:
-        self.agent = agent
+        self.spec = spec
+        self.runner = runner
         self.manager = manager
         self.config = config
-        self._summarizer = make_summarizer(llm)
+        self.event_handler = event_handler
+        self._summarizer = summarizer
 
     def handle_turn(self, session: Session, user_input: str) -> TurnResult:
-        did_compact, compact_message = self._maybe_compact(session)
+        self._emit_current_context_usage(session)
+        did_compact, compact_message = self._maybe_compact(session, user_input)
 
         history = session.history_for_model(self.config.max_history_turns)
         session.add_message(MessageEvent.create(role="user", content=user_input))
         self.manager.save(session)
 
-        reply, turn_events = self.agent.run(history, user_input)
+        messages = build_messages(
+            system_prompt=self.spec.system_prompt,
+            history=history,
+            user_input=user_input,
+        )
+        reply, turn_events = self.runner.run(messages)
         for event in turn_events:
             session.add_message(event)
         self.manager.save(session)
@@ -61,13 +69,38 @@ class AgentLoop:
         )
 
     def compact_session(self, session: Session) -> tuple[bool, str]:
-        return self._maybe_compact(session)
+        return self._maybe_compact(session, None)
 
-    def _maybe_compact(self, session: Session) -> tuple[bool, str]:
+    def _maybe_compact(
+        self,
+        session: Session,
+        user_input: str | None,
+    ) -> tuple[bool, str]:
         return maybe_compact(
             session,
             self.manager,
             self._summarizer,
+            system_prompt=self.spec.system_prompt,
+            max_history_turns=self.config.max_history_turns,
+            user_input=user_input,
+            tools=self.spec.tool_definitions,
             token_threshold=self.config.compact_token_threshold,
+            reserved_completion_tokens=self.config.reserved_completion_tokens,
             keep_recent=self.config.compact_keep_recent,
         )
+
+    def _emit_current_context_usage(self, session: Session) -> None:
+        current_tokens = estimate_visible_context_tokens(
+            session=session,
+            system_prompt=self.spec.system_prompt,
+            max_history_turns=self.config.max_history_turns,
+            tools=self.spec.tool_definitions,
+        )
+        self._emit(
+            "当前上下文占用(不含本次输入): "
+            f"{current_tokens}/{self.config.compact_token_threshold} tokens"
+        )
+
+    def _emit(self, message: str) -> None:
+        if self.event_handler:
+            self.event_handler(message)

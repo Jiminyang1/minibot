@@ -64,6 +64,7 @@ class SessionManager:
                 "title": session.title,
                 "created_at": session.created_at,
                 "updated_at": session.updated_at,
+                "message_count": len(session.messages),
             },
             ensure_ascii=False,
         )
@@ -108,21 +109,46 @@ class SessionManager:
             self.clear_current_session()
         return True
 
+    def _load_meta(self, session_id: str) -> dict[str, object] | None:
+        """Read only the first (meta) line of a session file."""
+        path = self._path(session_id)
+        if not path.exists():
+            return None
+        with path.open(encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        if not first_line:
+            return None
+        record = json.loads(first_line)
+        return record if record.get("type") == "meta" else None
+
     def latest_session(self, *, prefer_non_empty: bool = True) -> Session | None:
-        sessions = self.list_sessions()
-        if not sessions:
+        metas = self._list_metas()
+        if not metas:
             return None
         if not prefer_non_empty:
-            return sessions[0]
-        for session in sessions:
-            if session.messages:
-                return session
-        return sessions[0]
+            return self.load(str(metas[0].get("session_id", "")))
+        for meta in metas:
+            if meta.get("message_count", 0) > 0:
+                return self.load(str(meta["session_id"]))
+        return self.load(str(metas[0].get("session_id", "")))
+
+    def _list_metas(self) -> list[dict[str, object]]:
+        metas: list[dict[str, object]] = []
+        for path in self.sessions_dir.glob("*.jsonl"):
+            meta = self._load_meta(path.stem)
+            if meta:
+                metas.append(meta)
+        return sorted(metas, key=lambda m: str(m.get("updated_at", "")), reverse=True)
 
     def list_sessions(self) -> list[Session]:
-        sessions: list[Session] = []
-        for path in self.sessions_dir.glob("*.jsonl"):
-            session = self.load(path.stem)
-            if session:
-                sessions.append(session)
-        return sorted(sessions, key=lambda session: session.updated_at, reverse=True)
+        return [
+            Session(
+                session_id=str(m["session_id"]),
+                title=str(m.get("title", "新会话")),
+                created_at=str(m["created_at"]) if m.get("created_at") else None,
+                updated_at=str(m["updated_at"]) if m.get("updated_at") else None,
+                messages=[],
+                message_count=int(m.get("message_count", 0)),
+            )
+            for m in self._list_metas()
+        ]
