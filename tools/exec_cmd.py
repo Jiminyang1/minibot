@@ -43,6 +43,10 @@ class ExecTool(Tool):
         return "exec"
 
     @property
+    def requires_approval(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return "执行 shell 命令"
 
@@ -75,6 +79,7 @@ class ExecTool(Tool):
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True,
                 timeout=self._TIMEOUT,
+                cwd=self._workspace,
             )
         except subprocess.TimeoutExpired:
             return f"[超时] 命令执行超过 {self._TIMEOUT} 秒，已终止。"

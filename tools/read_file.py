@@ -36,7 +36,10 @@ class ReadFileTool(Tool):
     _MAX_SIZE = 256 * 1024  # 256 KB
 
     def execute(self, *, path: str, **kwargs: Any) -> str:
-        p = Path(path)
+        try:
+            p = self._resolve_path(path)
+        except PermissionError as exc:
+            return f"[安全拦截] {exc}"
         if not p.exists():
             return f"文件不存在: {path}"
         if p.stat().st_size > self._MAX_SIZE:

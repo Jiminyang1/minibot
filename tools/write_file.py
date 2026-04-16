@@ -16,6 +16,10 @@ class WriteFileTool(Tool):
         return "write_file"
 
     @property
+    def requires_approval(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return "写入文件内容。如果文件已存在则覆盖，不存在则创建（含中间目录）。"
 
@@ -40,9 +44,12 @@ class WriteFileTool(Tool):
     _MAX_SIZE = 256 * 1024  # 256 KB
 
     def execute(self, *, path: str, content: str, **kwargs: Any) -> str:
+        try:
+            p = self._resolve_path(path)
+        except PermissionError as exc:
+            return f"[安全拦截] {exc}"
         if len(content.encode("utf-8")) > self._MAX_SIZE:
             return f"内容过大 ({len(content.encode('utf-8'))} bytes)，上限 {self._MAX_SIZE} bytes。"
-        p = Path(path)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")

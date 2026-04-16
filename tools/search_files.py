@@ -52,7 +52,10 @@ class SearchFilesTool(Tool):
     def execute(
         self, *, pattern: str, path: str = ".", glob: str = "*", **kwargs: Any
     ) -> str:
-        root = Path(path)
+        try:
+            root = self._resolve_path(path)
+        except PermissionError as exc:
+            return f"[安全拦截] {exc}"
         if not root.is_dir():
             return f"不是目录: {path}"
         try:

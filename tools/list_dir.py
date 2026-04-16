@@ -36,7 +36,10 @@ class ListDirTool(Tool):
     _MAX_ENTRIES = 200
 
     def execute(self, *, path: str = ".", **kwargs: Any) -> str:
-        p = Path(path)
+        try:
+            p = self._resolve_path(path)
+        except PermissionError as exc:
+            return f"[安全拦截] {exc}"
         if not p.exists():
             return f"路径不存在: {path}"
         if not p.is_dir():
