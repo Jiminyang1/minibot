@@ -7,6 +7,7 @@ from pathlib import Path
 from .base import Tool
 from .exec_cmd import ExecTool
 from .list_dir import ListDirTool
+from .memory_tools import ForgetTool, RememberTool
 from .read_file import ReadFileTool
 from .registry import ToolRegistry
 from .search_files import SearchFilesTool
@@ -32,5 +33,7 @@ __all__ = [
     "WriteFileTool",
     "ListDirTool",
     "SearchFilesTool",
+    "RememberTool",
+    "ForgetTool",
     "create_default_registry",
 ]

@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 
 from .context import build_messages
 from .compaction import estimate_visible_context_tokens, maybe_compact
+from .prompts import MEMORY_INSTRUCTIONS
 from .session import MessageEvent, Session, SessionManager
 
 if TYPE_CHECKING:
     from .agent import AgentRunner, AgentSpec
     from .config import Config
+    from .memory import MemoryStore
 
 
 @dataclass(frozen=True)
@@ -35,25 +37,44 @@ class TurnEngine:
         config: Config,
         *,
         summarizer: Callable[[list[dict[str, object]]], str],
+        memory_store: MemoryStore | None = None,
         event_handler: Callable[[str], None] | None = None,
     ) -> None:
         self.spec = spec
         self.runner = runner
         self.manager = manager
         self.config = config
+        self.memory_store = memory_store
         self.event_handler = event_handler
         self._summarizer = summarizer
 
+    def _effective_system_prompt(self) -> str:
+        """Base system prompt plus memory instructions and current memories.
+
+        Rendered fresh every turn so tool-driven updates to memory show up
+        in the very next request.
+        """
+        if self.memory_store is None:
+            return self.spec.system_prompt
+        memory_block = self.memory_store.render_for_prompt()
+        parts = [self.spec.system_prompt, MEMORY_INSTRUCTIONS]
+        if memory_block:
+            parts.append(memory_block)
+        return "\n\n".join(parts)
+
     def handle_turn(self, session: Session, user_input: str) -> TurnResult:
-        self._emit_current_context_usage(session)
-        did_compact, compact_message = self._maybe_compact(session, user_input)
+        system_prompt = self._effective_system_prompt()
+        self._emit_current_context_usage(session, system_prompt)
+        did_compact, compact_message = self._maybe_compact(
+            session, user_input, system_prompt=system_prompt
+        )
 
         history = session.history_for_model(self.config.max_history_turns)
         session.add_message(MessageEvent.create(role="user", content=user_input))
         self.manager.save(session)
 
         messages = build_messages(
-            system_prompt=self.spec.system_prompt,
+            system_prompt=system_prompt,
             history=history,
             user_input=user_input,
         )
@@ -69,18 +90,22 @@ class TurnEngine:
         )
 
     def compact_session(self, session: Session) -> tuple[bool, str]:
-        return self._maybe_compact(session, None)
+        return self._maybe_compact(
+            session, None, system_prompt=self._effective_system_prompt()
+        )
 
     def _maybe_compact(
         self,
         session: Session,
         user_input: str | None,
+        *,
+        system_prompt: str,
     ) -> tuple[bool, str]:
         return maybe_compact(
             session,
             self.manager,
             self._summarizer,
-            system_prompt=self.spec.system_prompt,
+            system_prompt=system_prompt,
             max_history_turns=self.config.max_history_turns,
             user_input=user_input,
             tools=self.spec.tool_definitions,
@@ -89,10 +114,10 @@ class TurnEngine:
             keep_recent=self.config.compact_keep_recent,
         )
 
-    def _emit_current_context_usage(self, session: Session) -> None:
+    def _emit_current_context_usage(self, session: Session, system_prompt: str) -> None:
         current_tokens = estimate_visible_context_tokens(
             session=session,
-            system_prompt=self.spec.system_prompt,
+            system_prompt=system_prompt,
             max_history_turns=self.config.max_history_turns,
             tools=self.spec.tool_definitions,
         )

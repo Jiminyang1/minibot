@@ -20,11 +20,14 @@ def main() -> None:
     from .compaction import make_summarizer
     from .llm import OpenAIClient
     from .loop import TurnEngine
+    from .memory import MemoryStore
     from .session import SessionManager
-    from .tools import create_default_registry
+    from .tools import ForgetTool, RememberTool, create_default_registry
+    from .ui import prompt_approval, tool_log
 
     workspace = Path.cwd()
     manager = SessionManager(workspace)
+    memory_store = MemoryStore(workspace)
 
     try:
         llm = OpenAIClient(model=config.model)
@@ -32,25 +35,16 @@ def main() -> None:
         print(f"配置错误: {exc}")
         return
 
-    emit = lambda msg: print(f"  🔧 {msg}")
+    tool_registry = create_default_registry(workspace)
+    tool_registry.register(RememberTool(memory_store))
+    tool_registry.register(ForgetTool(memory_store))
 
-    if config.auto_approve:
-        approval = None
-    else:
-        def approval(tool_name: str, args: dict) -> bool:
-            preview = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            answer = input(f"  ⚠️  允许执行 {tool_name}({preview})? [y/N] ").strip().lower()
-            return answer in {"y", "yes"}
-
-    spec = AgentSpec(
-        default_model=config.model,
-        tool_registry=create_default_registry(workspace),
-    )
+    spec = AgentSpec(default_model=config.model, tool_registry=tool_registry)
     runner = AgentRunner(
         llm,
         spec,
-        event_handler=emit,
-        approval_handler=approval,
+        event_handler=tool_log,
+        approval_handler=None if config.auto_approve else prompt_approval,
     )
     turn_engine = TurnEngine(
         spec,
@@ -58,9 +52,10 @@ def main() -> None:
         manager,
         config,
         summarizer=make_summarizer(llm),
-        event_handler=emit,
+        memory_store=memory_store,
+        event_handler=tool_log,
     )
-    run_repl(turn_engine, manager)
+    run_repl(turn_engine, manager, memory_store)
 
 
 if __name__ == "__main__":

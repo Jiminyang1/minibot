@@ -1,4 +1,9 @@
-"""Interactive REPL and slash-command handling for MiniBot."""
+"""Interactive REPL and slash-command dispatch for MiniBot.
+
+All styling and print helpers live in :mod:`minibot.ui`. This module
+keeps only the command wiring: read a line, route it to a handler,
+hand user messages to the turn engine.
+"""
 
 from __future__ import annotations
 
@@ -9,81 +14,20 @@ except ImportError:
 
 from typing import TYPE_CHECKING
 
+from . import ui
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
     from .loop import TurnEngine
+    from .memory import MemoryStore
 
 
 def _is_terminal_escape_sequence(text: str) -> bool:
     return text.startswith("\x1b") or text.startswith("^[[")
 
 
-def _print_help() -> None:
-    print(
-        "命令: "
-        "`/sessions` 查看会话, "
-        "`/resume <session_id>` 恢复旧会话, "
-        "`/new` 新建会话, "
-        "`/delete <session_id|current>` 删除会话, "
-        "`/compact` 压缩当前会话, "
-        "`exit` 退出, "
-        "`/help` 查看帮助"
-    )
-
-
-def _print_session(session: Session) -> None:
-    print(
-        f"当前会话: {session.session_id} | {session.title} | "
-        f"{session.turn_count()} 轮对话 / {len(session.messages)} 条消息"
-    )
-
-
-def _print_sessions(manager: SessionManager) -> None:
-    sessions = manager.list_sessions()
-    if not sessions:
-        print("还没有历史会话。")
-        return
-    print("\n会话列表:")
-    for s in sessions:
-        print(
-            f"  - {s.session_id} | {s.title} | "
-            f"{s.message_count} 条消息 | 更新于 {s.updated_at}"
-        )
-
-
-def _handle_compact(session: Session, turn_engine: TurnEngine) -> None:
-    try:
-        did_compact, message = turn_engine.compact_session(session)
-    except Exception as exc:
-        print(f"手动 compact 失败: {exc}")
-        return
-    if did_compact:
-        print(f"已压缩当前会话: {message}")
-    else:
-        print(message)
-
-
-def _handle_resume(raw: str, manager: SessionManager) -> Session | None:
-    target = raw[len("/resume"):].strip()
-    if not target:
-        print("用法: /resume <session_id>")
-        return None
-    loaded = manager.load(target)
-    if loaded is None:
-        print(f"未找到会话: {target}")
-        return None
-    manager.set_current_session(loaded.session_id)
-    print(f"已恢复会话: {loaded.session_id}")
-    _print_session(loaded)
-    return loaded
-
-
-def _create_or_resume_startup_session(manager: SessionManager) -> tuple[Session, bool]:
-    """Try to resume the current/latest session, or create a new one.
-
-    Returns (session, resumed).
-    """
+def _startup_session(manager: SessionManager) -> tuple[Session, bool]:
+    """Resume current/latest, or create a new one. Returns (session, resumed)."""
     current = manager.load_current_session()
     if current is not None:
         return current, True
@@ -96,97 +40,155 @@ def _create_or_resume_startup_session(manager: SessionManager) -> tuple[Session,
     return session, False
 
 
+# ── slash-command handlers ───────────────────────────────────────
+
+
 def _handle_new(manager: SessionManager) -> Session:
     session = manager.create_session()
     manager.set_current_session(session.session_id)
-    print(f"已创建新会话: {session.session_id}")
-    _print_session(session)
+    ui.success(f"已创建新会话 {session.session_id}")
+    ui.print_session(session)
     return session
 
 
-def _handle_delete(raw: str, manager: SessionManager, current_session: Session) -> Session:
+def _handle_delete(raw: str, manager: SessionManager, current: Session) -> Session:
     target = raw[len("/delete"):].strip()
     if not target:
-        print("用法: /delete <session_id|current>")
-        return current_session
+        ui.info("用法: /delete <session_id|current>")
+        return current
 
-    resolved_target = current_session.session_id if target == "current" else target
-    deleted = manager.delete_session(resolved_target)
-    if not deleted:
-        print(f"未找到会话: {resolved_target}")
-        return current_session
+    resolved = current.session_id if target == "current" else target
+    if not manager.delete_session(resolved):
+        ui.warn(f"未找到会话: {resolved}")
+        return current
 
-    print(f"已删除会话: {resolved_target}")
-    if resolved_target != current_session.session_id:
-        return current_session
+    ui.success(f"已删除会话 {resolved}")
+    if resolved != current.session_id:
+        return current
 
     replacement = manager.create_session()
     manager.set_current_session(replacement.session_id)
-    print(f"已创建新会话: {replacement.session_id}")
-    _print_session(replacement)
+    ui.success(f"已创建新会话 {replacement.session_id}")
+    ui.print_session(replacement)
     return replacement
+
+
+def _handle_resume(raw: str, manager: SessionManager) -> Session | None:
+    target = raw[len("/resume"):].strip()
+    if not target:
+        ui.info("用法: /resume <session_id>")
+        return None
+    loaded = manager.load(target)
+    if loaded is None:
+        ui.warn(f"未找到会话: {target}")
+        return None
+    manager.set_current_session(loaded.session_id)
+    ui.success(f"已恢复会话 {loaded.session_id}")
+    ui.print_session(loaded)
+    return loaded
+
+
+def _handle_compact(session: Session, turn_engine: TurnEngine) -> None:
+    try:
+        did_compact, message = turn_engine.compact_session(session)
+    except Exception as exc:
+        ui.warn(f"手动 compact 失败: {exc}")
+        return
+    if did_compact:
+        ui.success(f"已压缩当前会话 · {message}")
+    else:
+        ui.info(message)
+
+
+def _handle_memory(raw: str, memory_store: MemoryStore) -> None:
+    parts = raw.strip().split(maxsplit=2)
+    sub = parts[1] if len(parts) >= 2 else ""
+
+    if sub == "":
+        ui.print_memory_list(memory_store.list())
+        return
+    if sub == "clear":
+        count = memory_store.clear()
+        ui.warn(f"已清空长期记忆 · 共删除 {count} 条")
+        return
+    if sub == "forget":
+        if len(parts) < 3 or not parts[2].strip():
+            ui.info("用法: /memory forget <memory_id>")
+            return
+        target = parts[2].strip()
+        if memory_store.delete(target):
+            ui.success(f"已删除记忆 {target}")
+        else:
+            ui.warn(f"未找到记忆 {target}")
+        return
+
+    ui.warn(
+        f"未知子命令: /memory {sub}。用法: /memory | /memory clear | /memory forget <id>"
+    )
+
+
+# ── REPL loop ────────────────────────────────────────────────────
 
 
 def run_repl(
     turn_engine: TurnEngine,
     manager: SessionManager,
+    memory_store: MemoryStore,
 ) -> None:
-    """Run the interactive REPL loop."""
-    current_session, resumed = _create_or_resume_startup_session(manager)
+    current, resumed = _startup_session(manager)
 
-    print("MiniBot 已启动！")
-    _print_help()
-    if resumed:
-        print(f"已自动恢复会话: {current_session.session_id}")
-    else:
-        print(f"已创建新会话: {current_session.session_id}")
-    _print_session(current_session)
+    ui.print_banner()
+    ui.print_status(current, len(memory_store.list()), resumed)
+    ui.print_help()
+    print(ui.RULE)
 
     while True:
         try:
-            user_msg = input("\nYou: ").strip()
+            user_msg = ui.read_user_input()
         except (EOFError, KeyboardInterrupt):
-            print("\n已退出。")
+            ui.info("\n已退出。")
             break
 
         if user_msg.lower() in {"exit", "quit"}:
-            print("已退出。")
+            ui.info("已退出。")
             break
-        if not user_msg:
+        if not user_msg or _is_terminal_escape_sequence(user_msg):
             continue
-        if _is_terminal_escape_sequence(user_msg):
-            continue
+
         if user_msg in {"/help", "help"}:
-            _print_help()
+            ui.print_help()
             continue
         if user_msg in {"/sessions", "/list"}:
-            _print_sessions(manager)
+            ui.print_sessions(manager.list_sessions())
             continue
         if user_msg == "/new":
-            current_session = _handle_new(manager)
+            current = _handle_new(manager)
             continue
         if user_msg.startswith("/delete"):
-            current_session = _handle_delete(user_msg, manager, current_session)
+            current = _handle_delete(user_msg, manager, current)
             continue
         if user_msg == "/compact":
-            _handle_compact(current_session, turn_engine)
+            _handle_compact(current, turn_engine)
+            continue
+        if user_msg.startswith("/memory"):
+            _handle_memory(user_msg, memory_store)
             continue
         if user_msg.startswith("/resume"):
-            resumed = _handle_resume(user_msg, manager)
-            if resumed is not None:
-                current_session = resumed
+            resumed_session = _handle_resume(user_msg, manager)
+            if resumed_session is not None:
+                current = resumed_session
             continue
         if user_msg.startswith("/"):
-            print(f"未知命令: {user_msg}，用 /help 查看帮助。")
+            ui.warn(f"未知命令: {user_msg}，用 /help 查看帮助。")
             continue
 
         try:
-            result = turn_engine.handle_turn(current_session, user_msg)
+            result = turn_engine.handle_turn(current, user_msg)
         except Exception as exc:
-            print(f"\n❌ 运行失败: {exc}")
+            ui.warn(f"运行失败: {exc}")
             continue
 
         if result.did_compact and result.compact_message:
-            print(f"已自动压缩当前会话: {result.compact_message}")
+            ui.info(f"已自动压缩 · {result.compact_message}")
 
-        print(f"\nAgent: {result.reply}")
+        ui.print_agent_reply(result.reply)
