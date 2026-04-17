@@ -18,8 +18,8 @@ from . import ui
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
-    from .loop import TurnEngine
-    from .memory import MemoryStore
+    from .turn_engine import TurnEngine
+    from .user_memory import UserMemoryStore
 
 
 def _is_terminal_escape_sequence(text: str) -> bool:
@@ -100,7 +100,7 @@ def _handle_compact(session: Session, turn_engine: TurnEngine) -> None:
         ui.info(message)
 
 
-def _handle_memory(raw: str, memory_store: MemoryStore) -> None:
+def _handle_memory(raw: str, memory_store: UserMemoryStore) -> None:
     parts = raw.strip().split(maxsplit=2)
     sub = parts[1] if len(parts) >= 2 else ""
 
@@ -133,7 +133,7 @@ def _handle_memory(raw: str, memory_store: MemoryStore) -> None:
 def run_repl(
     turn_engine: TurnEngine,
     manager: SessionManager,
-    memory_store: MemoryStore,
+    memory_store: UserMemoryStore,
 ) -> None:
     current, resumed = _startup_session(manager)
 

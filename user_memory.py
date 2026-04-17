@@ -1,9 +1,9 @@
-"""Long-term, cross-session memory store for MiniBot.
+"""Global user-memory store for MiniBot.
 
-Stores short, stable facts about the user (name, environment, preferences,
-current project state). Persisted as ``.minibot/memory.json`` alongside
-sessions, and intended to be rendered directly into the system prompt on
-every turn.
+This module manages a single cross-session memory file under the user's
+home directory. It stores short, stable facts about the user
+(preferences, identity, routines) and exposes only structured data
+operations; prompt rendering lives in :mod:`minibot.context_manager`.
 """
 
 from __future__ import annotations
@@ -32,12 +32,12 @@ class MemoryItem:
         )
 
 
-class MemoryStore:
-    """Load / save / mutate long-term memory items backed by a JSON file."""
+class UserMemoryStore:
+    """Load / save / mutate global user memory backed by a JSON file."""
 
-    def __init__(self, workspace: Path | None = None) -> None:
-        self.state_dir = (workspace or Path.cwd()).resolve() / ".minibot"
-        self.memory_path = self.state_dir / "memory.json"
+    def __init__(self, root: Path | None = None) -> None:
+        self.state_dir = (root or (Path.home() / ".minibot")).resolve()
+        self.memory_path = self.state_dir / "user_memory.json"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def list(self) -> list[MemoryItem]:
@@ -81,19 +81,6 @@ class MemoryStore:
         self._save([])
         return count
 
-    def render_for_prompt(self) -> str:
-        """Render all memories as a markdown block for system prompt injection.
-
-        Returns an empty string if there are no memories.
-        """
-        items = self.list()
-        if not items:
-            return ""
-        lines = ["## 关于用户的长期记忆（来自此前对话）"]
-        for m in items:
-            lines.append(f"- [{m.id}] {m.content}")
-        return "\n".join(lines)
-
     def _save(self, items: list[MemoryItem]) -> None:
         payload = {"memories": [m.to_dict() for m in items]}
         self.memory_path.write_text(
@@ -112,3 +99,7 @@ class MemoryStore:
         while f"{base}_{suffix}" in taken:
             suffix += 1
         return f"{base}_{suffix}"
+
+
+# Backward-compatible alias while the rest of the codebase is refactored.
+MemoryStore = UserMemoryStore

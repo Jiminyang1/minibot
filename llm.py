@@ -43,6 +43,7 @@ class LLMClient(abc.ABC):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
     ) -> LLMResponse: ...
 
 
@@ -72,8 +73,9 @@ class OpenAIClient(LLMClient):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
-        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+        kwargs: dict[str, Any] = {"model": model or self.model, "messages": messages}
         if tools:
             kwargs["tools"] = tools
 

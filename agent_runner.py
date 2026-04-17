@@ -1,4 +1,4 @@
-"""Agent specification and execution loop for MiniBot."""
+"""Agent run spec and execution loop for MiniBot."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .llm import LLMClient, LLMResponse
-from .prompts import SYSTEM_PROMPT
 from .session import MessageEvent
-from .tools import ToolRegistry, create_default_registry
+from .tools import ToolRegistry
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -37,17 +36,13 @@ def _latest_user_input(messages: list[dict[str, Any]]) -> str:
 
 
 @dataclass(frozen=True)
-class AgentSpec:
-    """Static agent definition: identity, capabilities, and execution limits."""
+class RunSpec:
+    """One concrete agent execution prepared by the turn engine."""
 
-    system_prompt: str = SYSTEM_PROMPT
-    tool_registry: ToolRegistry = field(default_factory=create_default_registry)
+    model: str
     max_iterations: int = 20
-    default_model: str | None = None
-
-    @property
-    def tool_definitions(self) -> list[dict[str, Any]]:
-        return self.tool_registry.get_definitions()
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_definitions: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -56,27 +51,33 @@ class AgentRunner:
     def __init__(
         self,
         llm: LLMClient,
-        spec: AgentSpec,
         *,
         event_handler: Callable[[str], None] | None = None,
         approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         self.llm = llm
-        self.spec = spec
         self.event_handler = event_handler
         self.approval_handler = approval_handler
 
-    def run(self, messages: list[dict[str, Any]]) -> tuple[str, list[MessageEvent]]:
-        """Run one prepared message list until the model returns a final answer."""
-        messages = list(messages)
+    def run(
+        self,
+        run_spec: RunSpec,
+        tool_registry: ToolRegistry,
+    ) -> tuple[str, list[MessageEvent]]:
+        """Run one prepared request until the model returns a final answer."""
+        messages = list(run_spec.messages)
         self._emit(f"开始处理: {_preview(_latest_user_input(messages))}")
 
         events: list[MessageEvent] = []
-        for iteration in range(1, self.spec.max_iterations + 1):
+        for iteration in range(1, run_spec.max_iterations + 1):
             started = time.perf_counter()
             self._emit(f"第 {iteration} 轮: 请求模型...")
 
-            resp = self.llm.chat(messages, self.spec.tool_definitions)
+            resp = self.llm.chat(
+                messages,
+                run_spec.tool_definitions,
+                model=run_spec.model,
+            )
             elapsed_ms = int((time.perf_counter() - started) * 1000)
 
             assistant_msg = self._response_to_message(resp)
@@ -94,11 +95,11 @@ class AgentRunner:
                 args = _parse_args(tc.arguments)
                 self._emit(f"工具: {tc.name}({args})")
 
-                tool = self.spec.tool_registry.get(tc.name)
+                tool = tool_registry.get(tc.name)
                 if tool and tool.requires_approval and not self._approve(tc.name, args):
                     result = f"[用户拒绝] 工具 {tc.name} 未获批准执行。"
                 else:
-                    result = self.spec.tool_registry.execute(tc.name, args)
+                    result = tool_registry.execute(tc.name, args)
                 self._emit(f"返回: {_preview(result, 100)}")
 
                 tool_msg: dict[str, Any] = {
@@ -111,7 +112,7 @@ class AgentRunner:
                 events.append(_to_event(tool_msg))
 
         fallback = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
-        self._emit(f"已达最大迭代次数 {self.spec.max_iterations}")
+        self._emit(f"已达最大迭代次数 {run_spec.max_iterations}")
         events.append(_to_event({"role": "assistant", "content": fallback}))
         return fallback, events
 

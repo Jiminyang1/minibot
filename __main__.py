@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import Config, load_env
+from .prompts import SYSTEM_PROMPT
 
 
 def main() -> None:
@@ -15,19 +16,24 @@ def main() -> None:
         print(f"配置错误: {exc}")
         return
 
-    from .agent import AgentRunner, AgentSpec
+    from .agent_runner import AgentRunner
     from .cli import run_repl
-    from .compaction import make_summarizer
+    from .context_manager import ContextManager, make_summarizer
     from .llm import OpenAIClient
-    from .loop import TurnEngine
-    from .memory import MemoryStore
+    from .turn_engine import TurnEngine
+    from .user_memory import UserMemoryStore
     from .session import SessionManager
-    from .tools import ForgetTool, RememberTool, create_default_registry
+    from .tools import (
+        ToolRegistry,
+        filesystem_toolset,
+        memory_toolset,
+        shell_toolset,
+    )
     from .ui import prompt_approval, tool_log
 
     workspace = Path.cwd()
     manager = SessionManager(workspace)
-    memory_store = MemoryStore(workspace)
+    memory_store = UserMemoryStore()
 
     try:
         llm = OpenAIClient(model=config.model)
@@ -35,24 +41,33 @@ def main() -> None:
         print(f"配置错误: {exc}")
         return
 
-    tool_registry = create_default_registry(workspace)
-    tool_registry.register(RememberTool(memory_store))
-    tool_registry.register(ForgetTool(memory_store))
+    tool_registry = ToolRegistry()
+    tool_registry.register_all(filesystem_toolset(workspace))
+    tool_registry.register_all(shell_toolset(workspace))
+    tool_registry.register_all(memory_toolset(memory_store))
 
-    spec = AgentSpec(default_model=config.model, tool_registry=tool_registry)
+    summarizer = make_summarizer(llm)
+    context_manager = ContextManager(
+        base_system_prompt=SYSTEM_PROMPT,
+        memory_store=memory_store,
+        tool_registry=tool_registry,
+        max_history_turns=config.max_history_turns,
+        compact_token_threshold=config.compact_token_threshold,
+        reserved_completion_tokens=config.reserved_completion_tokens,
+        compact_keep_recent=config.compact_keep_recent,
+        summarizer=summarizer,
+    )
     runner = AgentRunner(
         llm,
-        spec,
         event_handler=tool_log,
         approval_handler=None if config.auto_approve else prompt_approval,
     )
     turn_engine = TurnEngine(
-        spec,
         runner,
         manager,
+        tool_registry,
         config,
-        summarizer=make_summarizer(llm),
-        memory_store=memory_store,
+        context_manager=context_manager,
         event_handler=tool_log,
     )
     run_repl(turn_engine, manager, memory_store)

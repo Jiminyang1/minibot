@@ -26,6 +26,7 @@ def load_env(package_dir: Path | None = None) -> None:
 @dataclass(frozen=True)
 class Config:
     model: str = "gpt-5.4-mini"
+    max_iterations: int = 20
     max_history_turns: int = 40
     compact_token_threshold: int = 40000
     reserved_completion_tokens: int = 4096
@@ -33,6 +34,8 @@ class Config:
     auto_approve: bool = False
 
     def __post_init__(self) -> None:
+        if self.max_iterations <= 0:
+            raise ValueError("max_iterations 必须大于 0。")
         if self.compact_token_threshold <= 0:
             raise ValueError("compact_token_threshold 必须大于 0。")
         if self.reserved_completion_tokens <= 0:
@@ -57,6 +60,7 @@ class Config:
 
         return cls(
             model=os.environ.get("MINIBOT_MODEL", cls.model),
+            max_iterations=_get_int("MINIBOT_MAX_ITERATIONS", cls.max_iterations),
             auto_approve=auto_approve,
             max_history_turns=_get_int("MINIBOT_MAX_HISTORY_TURNS", cls.max_history_turns),
             compact_token_threshold=_get_int(

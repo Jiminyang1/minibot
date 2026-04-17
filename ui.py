@@ -15,7 +15,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
-from .memory import MemoryItem
+from .user_memory import MemoryItem
 from .session import Session
 
 
