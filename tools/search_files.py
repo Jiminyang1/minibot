@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class SearchFilesTool(Tool):
@@ -50,23 +51,35 @@ class SearchFilesTool(Tool):
     _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", ".minibot"}
 
     def execute(
-        self, *, pattern: str, path: str = ".", glob: str = "*", **kwargs: Any
-    ) -> str:
+        self,
+        *,
+        context: ToolExecutionContext,
+        pattern: str,
+        path: str = ".",
+        glob: str = "*",
+        **kwargs: Any,
+    ) -> ToolResult:
         try:
             root = self._resolve_path(path)
         except PermissionError as exc:
-            return f"[安全拦截] {exc}"
+            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
         if not root.is_dir():
-            return f"不是目录: {path}"
+            return ToolResult.failure(
+                "not_found",
+                f"不是目录: {path}",
+                data={"path": path},
+            )
         try:
             regex = re.compile(pattern)
         except re.error as exc:
-            return f"正则表达式无效: {exc}"
+            return ToolResult.failure(
+                "invalid_args",
+                f"正则表达式无效: {exc}",
+                data={"pattern": pattern},
+            )
 
         matches: list[str] = []
         for file in self._walk(root, glob):
-            if len(matches) >= self._MAX_MATCHES:
-                break
             if file.stat().st_size > self._MAX_FILE_SIZE:
                 continue
             try:
@@ -77,15 +90,46 @@ class SearchFilesTool(Tool):
                 if regex.search(line):
                     rel = file.relative_to(root) if file.is_relative_to(root) else file
                     matches.append(f"{rel}:{lineno}: {line.rstrip()}")
-                    if len(matches) >= self._MAX_MATCHES:
-                        break
 
         if not matches:
-            return f"未找到匹配: {pattern}"
-        result = "\n".join(matches)
-        if len(matches) >= self._MAX_MATCHES:
-            result += f"\n...(已达上限 {self._MAX_MATCHES} 条)"
-        return result
+            return ToolResult.failure(
+                "not_found",
+                f"未找到匹配: {pattern}",
+                data={"pattern": pattern, "path": path, "total_matches": 0, "matches": []},
+            )
+
+        total_matches = len(matches)
+        preview_matches = matches[: self._MAX_MATCHES]
+        if total_matches <= self._MAX_MATCHES:
+            return ToolResult.success(
+                f"找到 {total_matches} 处匹配。",
+                data={
+                    "pattern": pattern,
+                    "path": path,
+                    "glob": glob,
+                    "total_matches": total_matches,
+                    "matches": preview_matches,
+                },
+            )
+
+        artifact = self._require_session_manager().put_artifact_text(
+            context.session_id,
+            "\n".join(matches),
+            kind="text",
+            name=f"search:{pattern}",
+        )
+        return ToolResult.success(
+            f"找到 {total_matches} 处匹配，已返回前 {self._MAX_MATCHES} 条。",
+            data={
+                "pattern": pattern,
+                "path": path,
+                "glob": glob,
+                "total_matches": total_matches,
+                "matches": preview_matches,
+            },
+            artifact=artifact,
+            truncated=True,
+        )
 
     def _walk(self, root: Path, glob_pattern: str):
         for item in sorted(root.iterdir(), key=lambda e: e.name):

@@ -99,6 +99,7 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
     ("/resume <id>", "恢复指定会话"),
     ("/delete <id|current>", "删除会话"),
     ("/compact", "压缩当前会话"),
+    ("/skills", "查看当前可用 skills"),
     ("/memory", "查看长期记忆 (clear / forget <id>)"),
     ("/help", "显示帮助"),
     ("exit", "退出"),
@@ -118,16 +119,25 @@ def print_help() -> None:
         print(f"    {c(cmd.ljust(cmd_width), 'cyan')}{c(desc, 'gray')}")
 
 
-def print_status(session: Session, memory_count: int, resumed: bool) -> None:
+def print_status(
+    session: Session,
+    memory_count: int,
+    resumed: bool,
+    skill_count: int = 0,
+) -> None:
     status_tag = c("已恢复", "green") if resumed else c("新建", "yellow")
     memory_label = (
         c(f"{memory_count} 条", "green") if memory_count > 0 else c("空", "gray")
+    )
+    skill_label = (
+        c(f"{skill_count} 条", "green") if skill_count > 0 else c("空", "gray")
     )
     rows = (
         ("会话", f"{session.session_id}  {status_tag}"),
         ("标题", session.title),
         ("进度", f"{session.turn_count()} 轮 · {len(session.messages)} 条消息"),
         ("记忆", memory_label),
+        ("技能", skill_label),
     )
     for label, value in rows:
         print(f"  {c(label.ljust(4), 'gray')}  {value}")
@@ -169,5 +179,21 @@ def print_memory_list(items: list[MemoryItem]) -> None:
     for m in items:
         print(
             f"    {c(m.id, 'cyan')}  {m.content}  {c(m.created_at, 'dim')}"
+        )
+    print()
+
+
+def print_skills(skills: Iterable[tuple[str, str, tuple[str, ...]]]) -> None:
+    items = list(skills)
+    if not items:
+        info("当前没有可用 skills。")
+        return
+    print()
+    print(c(f"  Skills · {len(items)} 条", "bold"))
+    for name, description, tools in items:
+        tool_text = ", ".join(tools)
+        print(
+            f"    {c(name, 'cyan')}  {description}"
+            f"  {c('·', 'gray')} tools: {c(tool_text, 'dim')}"
         )
     print()

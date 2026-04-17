@@ -1,3 +1,5 @@
 .env
 __pycache__/
 .minibot/
+.claude/
+.tmp_*/

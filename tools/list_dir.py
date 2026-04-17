@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class ListDirTool(Tool):
@@ -35,23 +36,48 @@ class ListDirTool(Tool):
 
     _MAX_ENTRIES = 200
 
-    def execute(self, *, path: str = ".", **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        path: str = ".",
+        **kwargs: Any,
+    ) -> ToolResult:
+        del context
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return f"[安全拦截] {exc}"
+            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
         if not p.exists():
-            return f"路径不存在: {path}"
+            return ToolResult.failure(
+                "not_found",
+                f"路径不存在: {path}",
+                data={"path": path},
+            )
         if not p.is_dir():
-            return f"不是目录: {path}"
+            return ToolResult.failure(
+                "error",
+                f"不是目录: {path}",
+                data={"path": path},
+            )
         entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name))
+        total_entries = len(entries)
         if len(entries) > self._MAX_ENTRIES:
             entries = entries[: self._MAX_ENTRIES]
             truncated = True
         else:
             truncated = False
-        lines = [f"{e.name}/" if e.is_dir() else e.name for e in entries]
-        result = "\n".join(lines)
-        if truncated:
-            result += f"\n...(已截断，共 {len(list(p.iterdir()))} 项)"
-        return result
+        names = [f"{e.name}/" if e.is_dir() else e.name for e in entries]
+        return ToolResult.success(
+            (
+                f"已列出 {path}，共 {total_entries} 项。"
+                if not truncated
+                else f"已列出 {path} 的前 {len(names)} 项（共 {total_entries} 项）。"
+            ),
+            data={
+                "path": path,
+                "entries": names,
+                "total_entries": total_entries,
+            },
+            truncated=truncated,
+        )

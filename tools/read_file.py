@@ -5,11 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class ReadFileTool(Tool):
     """Read UTF-8 file contents from disk."""
+
+    _INLINE_CHARS = 2000
 
     @property
     def name(self) -> str:
@@ -35,16 +38,62 @@ class ReadFileTool(Tool):
 
     _MAX_SIZE = 256 * 1024  # 256 KB
 
-    def execute(self, *, path: str, **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        path: str,
+        **kwargs: Any,
+    ) -> ToolResult:
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return f"[安全拦截] {exc}"
+            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
         if not p.exists():
-            return f"文件不存在: {path}"
+            return ToolResult.failure(
+                "not_found",
+                f"文件不存在: {path}",
+                data={"path": path},
+            )
         if p.stat().st_size > self._MAX_SIZE:
-            return f"文件过大 ({p.stat().st_size} bytes)，上限 {self._MAX_SIZE} bytes。"
+            return ToolResult.failure(
+                "error",
+                f"文件过大 ({p.stat().st_size} bytes)，上限 {self._MAX_SIZE} bytes。",
+                data={"path": path, "size_bytes": p.stat().st_size},
+            )
         try:
-            return p.read_text(encoding="utf-8")
+            content = p.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return f"文件无法以 UTF-8 解码: {path}"
+            return ToolResult.failure(
+                "error",
+                f"文件无法以 UTF-8 解码: {path}",
+                data={"path": path},
+            )
+
+        total_chars = len(content)
+        if total_chars <= self._INLINE_CHARS:
+            return ToolResult.success(
+                f"已读取 {path}（{total_chars} 字符）。",
+                data={
+                    "path": path,
+                    "content": content,
+                    "total_chars": total_chars,
+                },
+            )
+
+        artifact = self._require_session_manager().put_artifact_text(
+            context.session_id,
+            content,
+            kind="file",
+            name=path,
+        )
+        return ToolResult.success(
+            f"已读取 {path}（{total_chars} 字符，已截断预览）。",
+            data={
+                "path": path,
+                "preview": content[: self._INLINE_CHARS],
+                "total_chars": total_chars,
+            },
+            artifact=artifact,
+            truncated=True,
+        )

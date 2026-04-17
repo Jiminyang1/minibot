@@ -10,7 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..user_memory import UserMemoryStore
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class RememberTool(Tool):
@@ -47,14 +48,24 @@ class RememberTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, content: str, **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        content: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        del context
         try:
             item = self._store.add(content)
         except ValueError as exc:
-            return f"写入失败: {exc}"
+            return ToolResult.failure("invalid_args", f"写入失败: {exc}")
         except OSError as exc:
-            return f"写入失败: {exc}"
-        return f"已记住 [{item.id}]: {item.content}"
+            return ToolResult.failure("error", f"写入失败: {exc}")
+        return ToolResult.success(
+            f"已记住 [{item.id}]。",
+            data={"memory_id": item.id, "content": item.content},
+        )
 
 
 class ForgetTool(Tool):
@@ -89,14 +100,31 @@ class ForgetTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, memory_id: str, **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        memory_id: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        del context
         memory_id = memory_id.strip()
         if not memory_id:
-            return "删除失败: memory_id 不能为空。"
+            return ToolResult.failure(
+                "invalid_args",
+                "删除失败: memory_id 不能为空。",
+            )
         try:
             removed = self._store.delete(memory_id)
         except OSError as exc:
-            return f"删除失败: {exc}"
+            return ToolResult.failure("error", f"删除失败: {exc}")
         if not removed:
-            return f"未找到记忆 {memory_id}。"
-        return f"已删除记忆 {memory_id}。"
+            return ToolResult.failure(
+                "not_found",
+                f"未找到记忆 {memory_id}。",
+                data={"memory_id": memory_id},
+            )
+        return ToolResult.success(
+            f"已删除记忆 {memory_id}。",
+            data={"memory_id": memory_id},
+        )

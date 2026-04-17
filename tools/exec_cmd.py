@@ -6,7 +6,8 @@ import re
 import subprocess
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\b|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\b"), "rm -rf (递归强制删除)"),
@@ -35,8 +36,16 @@ def _check_dangerous(command: str) -> str | None:
     return None
 
 
+def _preview_text(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
 class ExecTool(Tool):
     """Execute shell commands with a minimal safety check."""
+
+    _PREVIEW_CHARS = 2000
 
     @property
     def name(self) -> str:
@@ -65,15 +74,20 @@ class ExecTool(Tool):
         }
 
     _TIMEOUT = 30
-    _MAX_OUTPUT = 10_000
 
-    def execute(self, *, command: str, **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        command: str,
+        **kwargs: Any,
+    ) -> ToolResult:
         danger = _check_dangerous(command)
         if danger:
-            return (
-                f"[安全拦截] 命令被拒绝执行。\n"
-                f"匹配到危险操作: {danger}\n"
-                f"原始命令: {command}"
+            return ToolResult.failure(
+                "permission_denied",
+                "命令被安全策略拒绝执行。",
+                data={"command": command, "reason": danger},
             )
         try:
             result = subprocess.run(
@@ -82,8 +96,51 @@ class ExecTool(Tool):
                 cwd=self._workspace,
             )
         except subprocess.TimeoutExpired:
-            return f"[超时] 命令执行超过 {self._TIMEOUT} 秒，已终止。"
-        output = result.stdout or result.stderr or "(命令没有输出)"
-        if len(output) > self._MAX_OUTPUT:
-            output = output[:self._MAX_OUTPUT] + f"\n...(输出已截断，共 {len(output)} 字符)"
-        return output
+            return ToolResult.failure(
+                "timeout",
+                f"命令执行超过 {self._TIMEOUT} 秒，已终止。",
+                data={"command": command, "timeout_seconds": self._TIMEOUT},
+            )
+
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        stdout_preview, stdout_truncated = _preview_text(stdout, self._PREVIEW_CHARS)
+        stderr_preview, stderr_truncated = _preview_text(stderr, self._PREVIEW_CHARS)
+        truncated = stdout_truncated or stderr_truncated
+
+        data: dict[str, Any] = {
+            "command": command,
+            "exit_code": result.returncode,
+        }
+        if stdout_truncated:
+            data["stdout_preview"] = stdout_preview
+        else:
+            data["stdout"] = stdout
+        if stderr_truncated:
+            data["stderr_preview"] = stderr_preview
+        else:
+            data["stderr"] = stderr
+
+        artifact = None
+        if truncated:
+            full_output = (
+                f"$ {command}\n"
+                f"[exit_code] {result.returncode}\n\n"
+                "[stdout]\n"
+                f"{stdout}\n\n"
+                "[stderr]\n"
+                f"{stderr}"
+            )
+            artifact = self._require_session_manager().put_artifact_text(
+                context.session_id,
+                full_output,
+                kind="text",
+                name="exec_output",
+            )
+
+        return ToolResult.success(
+            f"命令已执行，退出码 {result.returncode}。",
+            data=data,
+            artifact=artifact,
+            truncated=truncated,
+        )

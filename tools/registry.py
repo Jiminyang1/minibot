@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class ToolRegistry:
@@ -27,21 +28,47 @@ class ToolRegistry:
     def get_definitions(self) -> list[dict[str, Any]]:
         return [tool.to_definition() for tool in self._tools.values()]
 
-    def execute(self, name: str, args: dict[str, Any]) -> str:
+    def execute(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
         if not isinstance(args, dict):
-            return f"工具执行报错: 工具参数必须是 JSON 对象，收到 {type(args).__name__}"
+            return ToolResult.failure(
+                "invalid_args",
+                f"工具 {name} 参数错误: 参数必须是 JSON 对象。",
+                data={"tool": name, "received_type": type(args).__name__},
+            )
 
         tool = self.get(name)
         if tool is None:
-            return f"工具执行报错: 未知工具 {name}"
+            return ToolResult.failure(
+                "not_found",
+                f"未知工具: {name}",
+                data={"tool": name},
+            )
 
         try:
-            return tool.execute(**args)
+            result = tool.execute(context=context, **args)
         except TypeError as exc:
-            return f"工具执行报错: 参数错误: {exc}"
+            return ToolResult.failure(
+                "invalid_args",
+                f"工具 {name} 参数错误: {exc}",
+                data={"tool": name, "args": args},
+            )
         except Exception as exc:
-            return f"工具执行报错: {exc}"
-
-    @property
-    def tool_names(self) -> list[str]:
-        return list(self._tools.keys())
+            return ToolResult.failure(
+                "error",
+                f"工具 {name} 执行失败: {exc}",
+                data={"tool": name},
+                meta={"exception": repr(exc)},
+            )
+        if not isinstance(result, ToolResult):
+            return ToolResult.failure(
+                "error",
+                f"工具 {name} 返回了无效结果类型。",
+                data={"tool": name, "returned_type": type(result).__name__},
+            )
+        return result

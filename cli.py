@@ -10,7 +10,7 @@ from __future__ import annotations
 try:
     import readline  # noqa: F401
 except ImportError:
-    readline = None
+    pass
 
 from typing import TYPE_CHECKING
 
@@ -18,7 +18,7 @@ from . import ui
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
-    from .turn_engine import TurnEngine
+    from .runtime.turn_engine import TurnEngine
     from .user_memory import UserMemoryStore
 
 
@@ -51,14 +51,19 @@ def _handle_new(manager: SessionManager) -> Session:
     return session
 
 
-def _handle_delete(raw: str, manager: SessionManager, current: Session) -> Session:
+def _handle_delete(
+    raw: str,
+    manager: SessionManager,
+    turn_engine: TurnEngine,
+    current: Session,
+) -> Session:
     target = raw[len("/delete"):].strip()
     if not target:
         ui.info("用法: /delete <session_id|current>")
         return current
 
     resolved = current.session_id if target == "current" else target
-    if not manager.delete_session(resolved):
+    if not turn_engine.delete_session(resolved):
         ui.warn(f"未找到会话: {resolved}")
         return current
 
@@ -127,6 +132,10 @@ def _handle_memory(raw: str, memory_store: UserMemoryStore) -> None:
     )
 
 
+def _handle_skills(turn_engine: TurnEngine) -> None:
+    ui.print_skills(turn_engine.list_available_skills())
+
+
 # ── REPL loop ────────────────────────────────────────────────────
 
 
@@ -136,9 +145,10 @@ def run_repl(
     memory_store: UserMemoryStore,
 ) -> None:
     current, resumed = _startup_session(manager)
+    skill_count = len(turn_engine.list_available_skills())
 
     ui.print_banner()
-    ui.print_status(current, len(memory_store.list()), resumed)
+    ui.print_status(current, len(memory_store.list()), resumed, skill_count)
     ui.print_help()
     print(ui.RULE)
 
@@ -165,10 +175,13 @@ def run_repl(
             current = _handle_new(manager)
             continue
         if user_msg.startswith("/delete"):
-            current = _handle_delete(user_msg, manager, current)
+            current = _handle_delete(user_msg, manager, turn_engine, current)
             continue
         if user_msg == "/compact":
             _handle_compact(current, turn_engine)
+            continue
+        if user_msg == "/skills":
+            _handle_skills(turn_engine)
             continue
         if user_msg.startswith("/memory"):
             _handle_memory(user_msg, memory_store)

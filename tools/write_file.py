@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class WriteFileTool(Tool):
@@ -43,16 +44,40 @@ class WriteFileTool(Tool):
 
     _MAX_SIZE = 256 * 1024  # 256 KB
 
-    def execute(self, *, path: str, content: str, **kwargs: Any) -> str:
+    def execute(
+        self,
+        *,
+        context: ToolExecutionContext,
+        path: str,
+        content: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        del context
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return f"[安全拦截] {exc}"
+            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
         if len(content.encode("utf-8")) > self._MAX_SIZE:
-            return f"内容过大 ({len(content.encode('utf-8'))} bytes)，上限 {self._MAX_SIZE} bytes。"
+            return ToolResult.failure(
+                "error",
+                f"内容过大 ({len(content.encode('utf-8'))} bytes)，上限 {self._MAX_SIZE} bytes。",
+                data={"path": path, "size_bytes": len(content.encode('utf-8'))},
+            )
+        existed = p.exists()
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         except OSError as exc:
-            return f"写入失败: {exc}"
-        return f"已写入 {p} ({len(content)} 字符)"
+            return ToolResult.failure(
+                "error",
+                f"写入失败: {exc}",
+                data={"path": path},
+            )
+        return ToolResult.success(
+            f"已写入 {p}（{len(content)} 字符）。",
+            data={
+                "path": path,
+                "chars_written": len(content),
+                "created": not existed,
+            },
+        )

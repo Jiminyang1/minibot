@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
+
+from .result import ToolResult
+
+if TYPE_CHECKING:
+    from ..session import SessionManager
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """Runtime-only execution context for one tool call."""
+
+    session_id: str
 
 
 class Tool(ABC):
     """A single agent capability exposed through function calling."""
 
-    def __init__(self, *, workspace: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        workspace: Path | None = None,
+        session_manager: SessionManager | None = None,
+    ) -> None:
         self._workspace = workspace.resolve() if workspace else None
+        self._session_manager = session_manager
 
     @property
     @abstractmethod
@@ -34,7 +54,7 @@ class Tool(ABC):
         return False
 
     @abstractmethod
-    def execute(self, **kwargs: Any) -> str:
+    def execute(self, *, context: ToolExecutionContext, **kwargs: Any) -> ToolResult:
         """Run the tool with named parameters."""
 
     def _resolve_path(self, path: str) -> Path:
@@ -47,6 +67,11 @@ class Tool(ABC):
                 f"路径 {path} 超出工作目录 {self._workspace}"
             )
         return resolved
+
+    def _require_session_manager(self) -> SessionManager:
+        if self._session_manager is None:
+            raise RuntimeError("当前工具未配置 SessionManager。")
+        return self._session_manager
 
     def to_definition(self) -> dict[str, Any]:
         """Return an OpenAI-compatible function definition."""

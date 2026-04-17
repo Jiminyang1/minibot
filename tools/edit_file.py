@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import Tool
+from .base import Tool, ToolExecutionContext
+from .result import ToolResult
 
 
 class EditFileTool(Tool):
@@ -58,39 +59,72 @@ class EditFileTool(Tool):
     def execute(
         self,
         *,
+        context: ToolExecutionContext,
         path: str,
         old_string: str,
         new_string: str,
         replace_all: bool = False,
         **kwargs: Any,
-    ) -> str:
+    ) -> ToolResult:
+        del context
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return f"[安全拦截] {exc}"
+            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
         if not p.exists():
-            return f"文件不存在: {path}"
+            return ToolResult.failure(
+                "not_found",
+                f"文件不存在: {path}",
+                data={"path": path},
+            )
         if not p.is_file():
-            return f"不是文件: {path}"
+            return ToolResult.failure(
+                "error",
+                f"不是文件: {path}",
+                data={"path": path},
+            )
         if p.stat().st_size > self._MAX_SIZE:
-            return f"文件过大 ({p.stat().st_size} bytes)，上限 {self._MAX_SIZE} bytes。"
+            return ToolResult.failure(
+                "error",
+                f"文件过大 ({p.stat().st_size} bytes)，上限 {self._MAX_SIZE} bytes。",
+                data={"path": path, "size_bytes": p.stat().st_size},
+            )
         if not old_string:
-            return "old_string 不能为空。"
+            return ToolResult.failure(
+                "invalid_args",
+                "old_string 不能为空。",
+                data={"path": path},
+            )
         if old_string == new_string:
-            return "old_string 与 new_string 相同，无需编辑。"
+            return ToolResult.noop(
+                "old_string 与 new_string 相同，无需编辑。",
+                data={"path": path},
+            )
 
         try:
             original = p.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return f"文件无法以 UTF-8 解码: {path}"
+            return ToolResult.failure(
+                "error",
+                f"文件无法以 UTF-8 解码: {path}",
+                data={"path": path},
+            )
 
         occurrences = original.count(old_string)
         if occurrences == 0:
-            return f"未在文件中找到 old_string（0 处匹配）: {path}"
+            return ToolResult.failure(
+                "not_found",
+                f"未在文件中找到 old_string（0 处匹配）: {path}",
+                data={"path": path},
+            )
         if occurrences > 1 and not replace_all:
-            return (
-                f"old_string 在文件中匹配到 {occurrences} 处；"
-                "请提供更长的上下文以唯一定位，或设置 replace_all=true。"
+            return ToolResult.failure(
+                "invalid_args",
+                (
+                    f"old_string 在文件中匹配到 {occurrences} 处；"
+                    "请提供更长的上下文以唯一定位，或设置 replace_all=true。"
+                ),
+                data={"path": path, "occurrences": occurrences},
             )
 
         if replace_all:
@@ -103,5 +137,16 @@ class EditFileTool(Tool):
         try:
             p.write_text(updated, encoding="utf-8")
         except OSError as exc:
-            return f"写入失败: {exc}"
-        return f"已编辑 {p}（替换 {count} 处）"
+            return ToolResult.failure(
+                "error",
+                f"写入失败: {exc}",
+                data={"path": path},
+            )
+        return ToolResult.success(
+            f"已编辑 {p}（替换 {count} 处）。",
+            data={
+                "path": path,
+                "replacements": count,
+                "replace_all": replace_all,
+            },
+        )

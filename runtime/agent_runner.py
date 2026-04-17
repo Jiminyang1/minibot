@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from .llm import LLMClient, LLMResponse
-from .session import MessageEvent
-from .tools import ToolRegistry
+from ..llm import LLMClient, LLMResponse
+from ..session import MessageEvent
+from ..tools import ToolExecutionContext, ToolRegistry
+from ..tools.result import ToolResult
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -39,10 +40,11 @@ def _latest_user_input(messages: list[dict[str, Any]]) -> str:
 class RunSpec:
     """One concrete agent execution prepared by the turn engine."""
 
+    session_id: str
     model: str
+    messages: list[dict[str, Any]]
+    tool_definitions: list[dict[str, Any]]
     max_iterations: int = 20
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    tool_definitions: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -51,21 +53,20 @@ class AgentRunner:
     def __init__(
         self,
         llm: LLMClient,
+        tool_registry: ToolRegistry,
         *,
         event_handler: Callable[[str], None] | None = None,
         approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         self.llm = llm
+        self.tool_registry = tool_registry
         self.event_handler = event_handler
         self.approval_handler = approval_handler
 
-    def run(
-        self,
-        run_spec: RunSpec,
-        tool_registry: ToolRegistry,
-    ) -> tuple[str, list[MessageEvent]]:
+    def run(self, run_spec: RunSpec) -> tuple[str, list[MessageEvent]]:
         """Run one prepared request until the model returns a final answer."""
         messages = list(run_spec.messages)
+        tool_context = ToolExecutionContext(session_id=run_spec.session_id)
         self._emit(f"开始处理: {_preview(_latest_user_input(messages))}")
 
         events: list[MessageEvent] = []
@@ -95,18 +96,26 @@ class AgentRunner:
                 args = _parse_args(tc.arguments)
                 self._emit(f"工具: {tc.name}({args})")
 
-                tool = tool_registry.get(tc.name)
+                tool = self.tool_registry.get(tc.name)
                 if tool and tool.requires_approval and not self._approve(tc.name, args):
-                    result = f"[用户拒绝] 工具 {tc.name} 未获批准执行。"
+                    result = ToolResult.failure(
+                        "denied",
+                        f"工具 {tc.name} 未获批准执行。",
+                        data={"tool": tc.name, "args": args},
+                    )
                 else:
-                    result = tool_registry.execute(tc.name, args)
-                self._emit(f"返回: {_preview(result, 100)}")
+                    result = self.tool_registry.execute(
+                        tc.name,
+                        args,
+                        context=tool_context,
+                    )
+                self._emit(f"返回: {result.summary}")
 
                 tool_msg: dict[str, Any] = {
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "name": tc.name,
-                    "content": str(result),
+                    "content": result.to_model_content(),
                 }
                 messages.append(tool_msg)
                 events.append(_to_event(tool_msg))
