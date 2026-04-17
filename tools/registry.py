@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import inspect
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
@@ -51,13 +52,16 @@ class ToolRegistry:
             )
 
         try:
-            result = tool.execute(context=context, **args)
+            inspect.signature(tool.execute).bind(context=context, **args)
         except TypeError as exc:
             return ToolResult.failure(
                 "invalid_args",
                 f"工具 {name} 参数错误: {exc}",
                 data={"tool": name, "args": args},
             )
+
+        try:
+            result = tool.execute(context=context, **args)
         except Exception as exc:
             return ToolResult.failure(
                 "error",

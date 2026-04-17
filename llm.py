@@ -25,11 +25,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    """Provider-reported token usage for one model call."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """Provider-agnostic model response."""
 
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: TokenUsage | None = None
 
 
 # ── abstract client ──────────────────────────────────────────────
@@ -93,4 +103,52 @@ class OpenAIClient(LLMClient):
                 for tc in msg.tool_calls
             ]
 
-        return LLMResponse(content=msg.content, tool_calls=tool_calls)
+        return LLMResponse(
+            content=msg.content,
+            tool_calls=tool_calls,
+            usage=_extract_token_usage(getattr(resp, "usage", None)),
+        )
+
+
+def _extract_token_usage(raw_usage: Any) -> TokenUsage | None:
+    """Convert provider usage objects to the local TokenUsage shape."""
+    if raw_usage is None:
+        return None
+
+    input_tokens = _coerce_token_count(
+        _usage_value(raw_usage, "prompt_tokens", "input_tokens")
+    )
+    output_tokens = _coerce_token_count(
+        _usage_value(raw_usage, "completion_tokens", "output_tokens")
+    )
+    total_tokens = _coerce_token_count(_usage_value(raw_usage, "total_tokens"))
+
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return None
+
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _usage_value(raw_usage: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(raw_usage, dict) and name in raw_usage:
+            return raw_usage[name]
+        value = getattr(raw_usage, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _coerce_token_count(value: Any) -> int | None:
+    if not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return value

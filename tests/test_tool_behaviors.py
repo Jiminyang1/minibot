@@ -95,7 +95,8 @@ class ToolBehaviorTests(unittest.TestCase):
 
             result = tool.execute(context=context, command=command)
 
-            self.assertTrue(result.ok)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "error")
             self.assertEqual(result.data["exit_code"], 1)
             self.assertTrue(result.truncated)
             self.assertIn("stdout_preview", result.data)
@@ -106,6 +107,21 @@ class ToolBehaviorTests(unittest.TestCase):
                 artifact_id=result.artifact.id,
             )
             self.assertIn("[stderr]\nerr", artifact_result.data["content"])
+
+    def test_exec_zero_exit_code_remains_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = ExecTool(workspace=workspace, session_manager=manager)
+            command = f"{shlex.quote(sys.executable)} -c \"print('ok')\""
+
+            result = tool.execute(context=context, command=command)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.code, "success")
+            self.assertEqual(result.data["exit_code"], 0)
+            self.assertEqual(result.data["stdout"], "ok\n")
 
     def test_search_files_many_matches_returns_preview_and_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

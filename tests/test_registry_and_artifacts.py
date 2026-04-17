@@ -60,11 +60,35 @@ class ExplodingTool(Tool):
         raise RuntimeError("boom")
 
 
+class TypeErrorTool(Tool):
+    @property
+    def name(self) -> str:
+        return "type_error"
+
+    @property
+    def description(self) -> str:
+        return "type_error"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+
+    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolResult:
+        del context, kwargs
+        raise TypeError("internal type error")
+
+
 class ToolRegistryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = ToolRegistry()
         self.registry.register(EchoTool())
         self.registry.register(ExplodingTool())
+        self.registry.register(TypeErrorTool())
         self.context = ToolExecutionContext(session_id="s_test")
 
     def test_unknown_tool_returns_not_found(self) -> None:
@@ -82,8 +106,22 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.code, "invalid_args")
 
+    def test_extra_args_return_invalid_args(self) -> None:
+        result = self.registry.execute(
+            "echo",
+            {"value": "ok", "extra": "nope"},
+            context=self.context,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "invalid_args")
+
     def test_exception_returns_error(self) -> None:
         result = self.registry.execute("explode", {}, context=self.context)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "error")
+
+    def test_internal_type_error_returns_error(self) -> None:
+        result = self.registry.execute("type_error", {}, context=self.context)
         self.assertFalse(result.ok)
         self.assertEqual(result.code, "error")
 

@@ -32,6 +32,7 @@ from .macos_apps import (
 )
 from .read_artifact import ReadArtifactTool
 from .read_file import ReadFileTool
+from .read_skill import ReadSkillTool
 from .registry import ToolRegistry
 from .result import ArtifactRef, ToolResult
 from .search_files import SearchFilesTool
@@ -40,6 +41,7 @@ from .write_file import WriteFileTool
 
 if TYPE_CHECKING:
     from ..session import SessionManager
+    from ..skills import SkillRegistry
 
 
 def filesystem_toolset(workspace: Path, session_manager: SessionManager) -> list[Tool]:
@@ -72,6 +74,11 @@ def memory_toolset(store: UserMemoryStore) -> list[Tool]:
     return [RememberTool(store), ForgetTool(store)]
 
 
+def skill_toolset(skill_registry: SkillRegistry) -> list[Tool]:
+    """Expose on-demand skill-body loading via ``read_skill``."""
+    return [ReadSkillTool(skill_registry)]
+
+
 def macos_toolset() -> list[Tool]:
     """macOS builtin app tools backed by AppleScript."""
     if sys.platform != "darwin" or shutil.which("osascript") is None:
@@ -98,6 +105,7 @@ __all__ = [
     "ExecTool",
     "FetchUrlTool",
     "ReadFileTool",
+    "ReadSkillTool",
     "WriteFileTool",
     "EditFileTool",
     "ListDirTool",
@@ -118,4 +126,5 @@ __all__ = [
     "network_toolset",
     "memory_toolset",
     "macos_toolset",
+    "skill_toolset",
 ]

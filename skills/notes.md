@@ -1,18 +1,10 @@
 ---
 name: notes
 description: 使用 macOS 备忘录/Notes 工具搜索、创建和追加笔记
-triggers:
-  - notes
-  - note
-  - 笔记
-  - 备忘录
-  - 记事
-  - 记录
 tools:
   - notes_search
   - notes_create
   - notes_append
-summary: 处理笔记任务时，先区分“搜索现有内容”还是“新建/追加”，写入前确认目标笔记或文件夹。
 ---
 当用户要查找或记录笔记时：
 

@@ -1,18 +1,10 @@
 ---
 name: reminders
 description: 使用 macOS 提醒事项工具查看、创建和完成提醒
-triggers:
-  - reminders
-  - reminder
-  - 提醒
-  - 提醒事项
-  - todo
-  - 待办
 tools:
   - reminders_list
   - reminders_create
   - reminders_complete
-summary: 处理提醒事项时，优先把任务拆成明确标题和可选截止时间；完成操作前确认目标条目。
 ---
 当用户要创建、查看或完成提醒事项时：
 

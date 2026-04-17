@@ -18,6 +18,7 @@ def main() -> None:
 
     from .cli import run_repl
     from .llm import OpenAIClient
+    from .run_log import RunLogStore
     from .runtime import AgentRunner, ContextManager, TurnEngine, make_summarizer
     from .skills import SkillRegistry
     from .user_memory import UserMemoryStore
@@ -29,12 +30,14 @@ def main() -> None:
         memory_toolset,
         network_toolset,
         shell_toolset,
+        skill_toolset,
     )
     from .ui import prompt_approval, tool_log
 
     workspace = Path.cwd()
     manager = SessionManager(workspace)
     memory_store = UserMemoryStore()
+    run_log_store = RunLogStore(workspace)
 
     try:
         llm = OpenAIClient(model=config.model)
@@ -42,15 +45,17 @@ def main() -> None:
         print(f"配置错误: {exc}")
         return
 
+    skill_registry = SkillRegistry.from_directory(
+        Path(__file__).resolve().parent / "skills"
+    )
+
     tool_registry = ToolRegistry()
     tool_registry.register_all(filesystem_toolset(workspace, manager))
     tool_registry.register_all(shell_toolset(workspace, manager))
     tool_registry.register_all(network_toolset(manager))
     tool_registry.register_all(macos_toolset())
     tool_registry.register_all(memory_toolset(memory_store))
-    skill_registry = SkillRegistry.from_directory(
-        Path(__file__).resolve().parent / "skills"
-    )
+    tool_registry.register_all(skill_toolset(skill_registry))
 
     summarizer = make_summarizer(llm)
     context_manager = ContextManager(
@@ -76,6 +81,7 @@ def main() -> None:
         config,
         context_manager=context_manager,
         event_handler=tool_log,
+        run_log_store=run_log_store,
     )
     run_repl(turn_engine, manager, memory_store)
 

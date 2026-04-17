@@ -1,98 +1,34 @@
-"""Local skill loading and progressive matching."""
+"""Local skill loading.
+
+Skills follow Anthropic's progressive-disclosure shape:
+
+- L1 metadata (name + description + tools) is injected into the system
+  prompt every turn. It is always cheap and always visible.
+- L2 body is pulled on demand by the model via the ``read_skill`` tool.
+  The framework does not match or inject skill bodies itself.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..tools.registry import ToolRegistry
-
-
-_EXPLICIT_APP_TERMS = {
-    "calendar",
-    "日历",
-    "reminders",
-    "提醒",
-    "提醒事项",
-    "notes",
-    "note",
-    "笔记",
-    "备忘录",
-}
-
 
 @dataclass(frozen=True)
 class Skill:
     name: str
     description: str
-    triggers: tuple[str, ...]
     tools: tuple[str, ...]
-    summary: str
     body: str
     path: Path
 
 
-@dataclass(frozen=True)
-class SkillMatch:
-    skill: Skill
-    score: int
-    explicit_mention: bool
-
-
-class SkillMatcher:
-    """Deterministic, trigger-based skill matching."""
-
-    def match(
-        self,
-        user_input: str,
-        *,
-        skills: list[Skill],
-        tool_registry: ToolRegistry,
-    ) -> list[SkillMatch]:
-        normalized = user_input.strip().lower()
-        if not normalized:
-            return []
-
-        matches: list[SkillMatch] = []
-        for skill in skills:
-            if not self._skill_available(skill, tool_registry):
-                continue
-            score = sum(1 for trigger in skill.triggers if trigger.lower() in normalized)
-            if score <= 0:
-                continue
-            explicit_mention = any(
-                term in normalized and term in {trigger.lower() for trigger in skill.triggers}
-                for term in _EXPLICIT_APP_TERMS
-            )
-            matches.append(
-                SkillMatch(
-                    skill=skill,
-                    score=score,
-                    explicit_mention=explicit_mention,
-                )
-            )
-
-        return sorted(
-            matches,
-            key=lambda item: (-item.score, item.skill.name),
-        )
-
-    @staticmethod
-    def _skill_available(skill: Skill, tool_registry: ToolRegistry) -> bool:
-        return all(tool_registry.get(name) is not None for name in skill.tools)
-
-
 class SkillRegistry:
-    """Load skill markdown files and expose lightweight matching."""
+    """Load skill markdown files from disk and expose them by name."""
 
-    def __init__(
-        self,
-        skills: list[Skill],
-        *,
-        matcher: SkillMatcher | None = None,
-    ) -> None:
+    def __init__(self, skills: list[Skill]) -> None:
         self._skills = tuple(skills)
-        self.matcher = matcher or SkillMatcher()
+        self._by_name = {skill.name: skill for skill in self._skills}
 
     @classmethod
     def from_directory(cls, directory: Path) -> "SkillRegistry":
@@ -107,12 +43,8 @@ class SkillRegistry:
     def list(self) -> list[Skill]:
         return list(self._skills)
 
-    def match(self, user_input: str, *, tool_registry: ToolRegistry) -> list[SkillMatch]:
-        return self.matcher.match(
-            user_input,
-            skills=self.list(),
-            tool_registry=tool_registry,
-        )
+    def get_by_name(self, name: str) -> Skill | None:
+        return self._by_name.get(name.strip())
 
 
 def _load_skill(path: Path) -> Skill:
@@ -125,9 +57,7 @@ def _load_skill(path: Path) -> Skill:
     return Skill(
         name=str(meta["name"]),
         description=str(meta["description"]),
-        triggers=tuple(str(item) for item in meta["triggers"]),
         tools=tuple(str(item) for item in meta["tools"]),
-        summary=str(meta["summary"]),
         body=body.strip(),
         path=path,
     )
@@ -163,12 +93,12 @@ def _parse_frontmatter(frontmatter: str) -> dict[str, object]:
         data[key] = _strip_quotes(value)
         current_list_key = None
 
-    required_keys = {"name", "description", "triggers", "tools", "summary"}
+    required_keys = {"name", "description", "tools"}
     missing = required_keys - set(data)
     if missing:
         raise ValueError(f"frontmatter 缺少字段: {sorted(missing)}")
-    if not isinstance(data["triggers"], list) or not isinstance(data["tools"], list):
-        raise ValueError("triggers 和 tools 必须是列表。")
+    if not isinstance(data["tools"], list):
+        raise ValueError("tools 必须是列表。")
     return data
 
 
@@ -180,7 +110,5 @@ def _strip_quotes(value: str) -> str:
 
 __all__ = [
     "Skill",
-    "SkillMatch",
-    "SkillMatcher",
     "SkillRegistry",
 ]

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..llm import LLMClient, LLMResponse
+from ..llm import LLMClient, LLMResponse, TokenUsage
 from ..session import MessageEvent
 from ..tools import ToolExecutionContext, ToolRegistry
 from ..tools.result import ToolResult
@@ -47,6 +47,25 @@ class RunSpec:
     max_iterations: int = 20
 
 
+@dataclass(frozen=True)
+class RunOutcome:
+    """Full outcome of one prepared agent run."""
+
+    reply: str
+    events: list[MessageEvent]
+    usage: TokenUsage | None = None
+
+
+@dataclass(frozen=True)
+class PartialRunError(Exception):
+    """Internal carrier for failures after partial agent progress."""
+
+    cause: Exception
+    events: list[MessageEvent]
+    usage: TokenUsage | None = None
+    reply: str | None = None
+
+
 class AgentRunner:
     """Execute the tool-calling LLM loop for one prepared request."""
 
@@ -63,22 +82,33 @@ class AgentRunner:
         self.event_handler = event_handler
         self.approval_handler = approval_handler
 
-    def run(self, run_spec: RunSpec) -> tuple[str, list[MessageEvent]]:
+    def run(self, run_spec: RunSpec) -> RunOutcome:
         """Run one prepared request until the model returns a final answer."""
         messages = list(run_spec.messages)
         tool_context = ToolExecutionContext(session_id=run_spec.session_id)
         self._emit(f"开始处理: {_preview(_latest_user_input(messages))}")
 
         events: list[MessageEvent] = []
+        usage: TokenUsage | None = None
         for iteration in range(1, run_spec.max_iterations + 1):
             started = time.perf_counter()
             self._emit(f"第 {iteration} 轮: 请求模型...")
 
-            resp = self.llm.chat(
-                messages,
-                run_spec.tool_definitions,
-                model=run_spec.model,
-            )
+            try:
+                resp = self.llm.chat(
+                    messages,
+                    run_spec.tool_definitions,
+                    model=run_spec.model,
+                )
+            except Exception as exc:
+                if events:
+                    raise PartialRunError(
+                        cause=exc,
+                        events=list(events),
+                        usage=usage,
+                    ) from exc
+                raise
+            usage = _merge_usage(usage, resp.usage)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
 
             assistant_msg = self._response_to_message(resp)
@@ -87,7 +117,7 @@ class AgentRunner:
 
             if not resp.tool_calls:
                 self._emit(f"第 {iteration} 轮: 最终回答 ({elapsed_ms} ms)")
-                return resp.content or "", events
+                return RunOutcome(reply=resp.content or "", events=events, usage=usage)
 
             self._emit(
                 f"第 {iteration} 轮: 调用 {len(resp.tool_calls)} 个工具 ({elapsed_ms} ms)"
@@ -123,7 +153,7 @@ class AgentRunner:
         fallback = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
         self._emit(f"已达最大迭代次数 {run_spec.max_iterations}")
         events.append(_to_event({"role": "assistant", "content": fallback}))
-        return fallback, events
+        return RunOutcome(reply=fallback, events=events, usage=usage)
 
     @staticmethod
     def _response_to_message(resp: LLMResponse) -> dict[str, Any]:
@@ -158,3 +188,24 @@ def _to_event(message: dict[str, Any]) -> MessageEvent:
         tool_call_id=message.get("tool_call_id"),
         name=message.get("name"),
     )
+
+
+def _merge_usage(
+    accumulated: TokenUsage | None,
+    current: TokenUsage | None,
+) -> TokenUsage | None:
+    if accumulated is None:
+        return current
+    if current is None:
+        return accumulated
+    return TokenUsage(
+        input_tokens=_sum_optional(accumulated.input_tokens, current.input_tokens),
+        output_tokens=_sum_optional(accumulated.output_tokens, current.output_tokens),
+        total_tokens=_sum_optional(accumulated.total_tokens, current.total_tokens),
+    )
+
+
+def _sum_optional(left: int | None, right: int | None) -> int | None:
+    if left is None or right is None:
+        return None
+    return left + right

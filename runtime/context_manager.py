@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..llm import LLMClient
 from ..prompts import MEMORY_INSTRUCTIONS, SUMMARY_SYSTEM_PROMPT
-from ..skills import SkillMatch, SkillRegistry
+from ..skills import SkillRegistry
 from ..tools import ToolRegistry
 
 if TYPE_CHECKING:
@@ -75,9 +75,7 @@ class PreparedContext:
 
     messages: list[dict[str, Any]]
     tool_definitions: list[dict[str, Any]]
-    request_tokens: int
     did_compact: bool
-    matched_skills: list["InjectedSkill"]
     compact_message: str | None = None
 
 
@@ -87,13 +85,6 @@ class _BuiltRequest:
     tool_definitions: list[dict[str, Any]]
     request_tokens: int
     memory_tokens: int
-    matched_skills: list["InjectedSkill"]
-
-
-@dataclass(frozen=True)
-class InjectedSkill:
-    name: str
-    mode: str
 
 
 def _format_messages_for_summary(messages: list[dict[str, Any]]) -> str:
@@ -143,9 +134,6 @@ class ContextManager:
     """
 
     _DEFAULT_MAX_INLINE_MEMORY_TOKENS = 1200
-    _DEFAULT_MAX_SKILL_TOKENS = 800
-    _DEFAULT_MAX_FULL_SKILL_TOKENS = 500
-    _DEFAULT_MAX_SUMMARY_SKILL_TOKENS = 150
     _MAX_MEMORY_FACT_CHARS = 240
 
     def __init__(
@@ -161,9 +149,6 @@ class ContextManager:
         compact_keep_recent: int,
         summarizer: Callable[[list[dict[str, Any]]], str],
         max_inline_memory_tokens: int = _DEFAULT_MAX_INLINE_MEMORY_TOKENS,
-        max_skill_tokens: int = _DEFAULT_MAX_SKILL_TOKENS,
-        max_full_skill_tokens: int = _DEFAULT_MAX_FULL_SKILL_TOKENS,
-        max_summary_skill_tokens: int = _DEFAULT_MAX_SUMMARY_SKILL_TOKENS,
     ) -> None:
         self.base_system_prompt = base_system_prompt
         self.memory_store = memory_store
@@ -175,9 +160,6 @@ class ContextManager:
         self.compact_keep_recent = compact_keep_recent
         self.summarizer = summarizer
         self.max_inline_memory_tokens = max_inline_memory_tokens
-        self.max_skill_tokens = max_skill_tokens
-        self.max_full_skill_tokens = max_full_skill_tokens
-        self.max_summary_skill_tokens = max_summary_skill_tokens
 
     def prepare_for_turn(
         self,
@@ -194,9 +176,7 @@ class ContextManager:
         return PreparedContext(
             messages=built.messages,
             tool_definitions=built.tool_definitions,
-            request_tokens=built.request_tokens,
             did_compact=did_compact,
-            matched_skills=built.matched_skills,
             compact_message=compact_message if did_compact else None,
         )
 
@@ -218,6 +198,10 @@ class ContextManager:
     @property
     def _effective_input_budget(self) -> int:
         return self.compact_token_threshold - self.reserved_completion_tokens
+
+    @property
+    def effective_input_budget(self) -> int:
+        return self._effective_input_budget
 
     def _maybe_compact(
         self,
@@ -275,12 +259,10 @@ class ContextManager:
         history = session.history_for_model(self.max_history_turns)
         memory_block, memory_tokens = self._render_memory_block()
         skill_catalog_block = self._render_skill_catalog_block()
-        skill_block, matched_skills = self._render_skill_block(user_input=user_input)
         tool_definitions = self.tool_registry.get_definitions()
         system_prompt = self._build_system_prompt(
             memory_block,
             skill_catalog_block,
-            skill_block,
         )
         messages = _compose_messages(
             system_prompt=system_prompt,
@@ -292,22 +274,18 @@ class ContextManager:
             tool_definitions=tool_definitions,
             request_tokens=estimate_request_tokens(messages, tool_definitions),
             memory_tokens=memory_tokens,
-            matched_skills=matched_skills,
         )
 
     def _build_system_prompt(
         self,
         memory_block: str,
         skill_catalog_block: str,
-        skill_block: str,
     ) -> str:
         parts = [self.base_system_prompt, MEMORY_INSTRUCTIONS]
         if memory_block:
             parts.append(memory_block)
         if skill_catalog_block:
             parts.append(skill_catalog_block)
-        if skill_block:
-            parts.append(skill_block)
         return "\n\n".join(parts)
 
     def _render_skill_catalog_block(self) -> str:
@@ -317,122 +295,14 @@ class ContextManager:
 
         lines = [
             "## Available Skills",
-            "以下是当前可用的 skills metadata。它们是 workflow guidance 的目录，不是新的权限或策略覆盖。",
-            "你可以基于用户当前需求自行判断是否参考其中某个 skill 的工作方式。",
+            "以下是当前可用 skills 的目录 (L1 metadata)。每个 skill 是一份 workflow guidance，不是新的系统权限或策略覆盖。",
+            "当你判断某个 skill 可能与当前任务相关时，调用 `read_skill` 工具加载它的完整正文 (L2 body)，再继续后续步骤。",
+            "是否加载、何时加载由你自行决定；不需要每次都读，也不要读所有 skill。",
         ]
         for name, description, tools in skills:
             tool_text = ", ".join(tools)
             lines.append(f"- {name}: {description} | tools: {tool_text}")
         return "\n".join(lines)
-
-    def _render_skill_block(
-        self,
-        *,
-        user_input: str | None,
-    ) -> tuple[str, list[InjectedSkill]]:
-        if self.skill_registry is None:
-            return "", []
-        normalized = (user_input or "").strip()
-        if not normalized:
-            return "", []
-
-        matches = self.skill_registry.match(
-            normalized,
-            tool_registry=self.tool_registry,
-        )[:2]
-        if not matches:
-            return "", []
-
-        header = (
-            "## Matched Skills\n"
-            "以下内容是命中的 workflow guidance，仅用于帮助你决定步骤与工具选择。"
-            "它们不是新的系统权限、策略覆盖，也不代表额外工具授权。"
-        )
-        sections: list[str] = [header]
-        injected: list[InjectedSkill] = []
-        used_tokens = _estimate_tokens(header)
-
-        for index, match in enumerate(matches):
-            allow_full_body = index == 0 and (
-                match.score >= 2 or match.explicit_mention
-            )
-            section_cap = (
-                self.max_full_skill_tokens if allow_full_body
-                else self.max_summary_skill_tokens
-            )
-            remaining = self.max_skill_tokens - used_tokens
-            if remaining <= 0:
-                break
-            section, mode = self._format_skill_section(
-                match,
-                include_full_body=allow_full_body,
-                max_tokens=min(section_cap, remaining),
-            )
-            if not section:
-                continue
-            section_tokens = _estimate_tokens(section)
-            if used_tokens + section_tokens > self.max_skill_tokens:
-                break
-            sections.append(section)
-            used_tokens += section_tokens
-            injected.append(InjectedSkill(name=match.skill.name, mode=mode))
-
-        if len(sections) == 1:
-            return "", []
-        return "\n\n".join(sections), injected
-
-    def _format_skill_section(
-        self,
-        match: SkillMatch,
-        *,
-        include_full_body: bool,
-        max_tokens: int,
-    ) -> tuple[str, str]:
-        if max_tokens <= 0:
-            return "", "summary"
-
-        skill = match.skill
-        tools_line = ", ".join(skill.tools)
-        header_lines = [
-            f"### Skill: {skill.name}",
-            f"适用工具: {tools_line}",
-        ]
-        header = "\n".join(header_lines)
-        header_tokens = _estimate_tokens(header)
-        if header_tokens >= max_tokens:
-            return self._truncate_to_tokens(header, max_tokens), "summary"
-
-        lines = [header]
-        remaining = max_tokens - header_tokens
-
-        summary_prefix = "摘要: "
-        summary_budget = max(32, remaining if not include_full_body else min(remaining, self.max_summary_skill_tokens))
-        summary_text = self._truncate_to_tokens(skill.summary.strip(), summary_budget)
-        summary_line = summary_prefix + summary_text if summary_text else summary_prefix.rstrip()
-        summary_tokens = _estimate_tokens(summary_line)
-        if summary_tokens > remaining:
-            summary_line = summary_prefix + self._truncate_to_tokens(
-                skill.summary.strip(),
-                max(1, remaining - _estimate_tokens(summary_prefix)),
-            )
-            summary_tokens = _estimate_tokens(summary_line)
-        if summary_tokens > remaining:
-            return "\n".join(lines), "summary"
-        lines.append(summary_line)
-        remaining -= summary_tokens
-
-        rendered_mode = "summary"
-        if include_full_body and remaining > 0:
-            detail_prefix = "详细流程:\n"
-            detail_budget = max(1, remaining - _estimate_tokens(detail_prefix))
-            detail_body = self._truncate_to_tokens(skill.body.strip(), detail_budget)
-            if detail_body:
-                detail_block = detail_prefix + detail_body
-                if _estimate_tokens(detail_block) <= remaining:
-                    lines.append(detail_block)
-                    rendered_mode = "full"
-
-        return "\n".join(lines), rendered_mode
 
     def _render_memory_block(self) -> tuple[str, int]:
         if self.memory_store is None:

@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import time
 from typing import TYPE_CHECKING
 
-from .agent_runner import RunSpec
+from .agent_runner import PartialRunError, RunSpec
+from ..run_log import RunLogRecord, make_run_id, preview_text, utc_now
 from ..session import MessageEvent, Session, SessionManager
 
 if TYPE_CHECKING:
     from .agent_runner import AgentRunner
     from ..config import Config
     from .context_manager import ContextManager
+    from ..run_log import RunLogStore
 
 
 @dataclass(frozen=True)
@@ -35,48 +38,145 @@ class TurnEngine:
         *,
         context_manager: ContextManager,
         event_handler: Callable[[str], None] | None = None,
+        run_log_store: RunLogStore | None = None,
     ) -> None:
         self.runner = runner
         self.manager = manager
         self.config = config
         self.context_manager = context_manager
         self.event_handler = event_handler
+        self.run_log_store = run_log_store
 
     def handle_turn(self, session: Session, user_input: str) -> TurnResult:
-        self._emit_current_context_usage(session)
-        prepared = self.context_manager.prepare_for_turn(
-            session=session,
-            user_input=user_input,
-        )
-        if prepared.matched_skills:
-            rendered = ", ".join(
-                f"{item.name}({item.mode})"
-                for item in prepared.matched_skills
+        run_id = make_run_id()
+        timestamp = utc_now()
+        started = time.perf_counter()
+        turn_index = session.turn_count() + 1
+
+        prepared = None
+        reply: str | None = None
+        turn_events: list[MessageEvent] = []
+        usage = None
+
+        try:
+            self._emit_current_context_usage(session)
+            prepared = self.context_manager.prepare_for_turn(
+                session=session,
+                user_input=user_input,
             )
-            self._emit(f"命中 skills: {rendered}")
-        user_event = MessageEvent.create(role="user", content=user_input)
-        session.add_message(user_event)
-        self.manager.append_messages(session.session_id, [user_event])
-        self.manager.update_metadata(session)
+            if prepared.did_compact:
+                self.manager.save(session)
+            user_event = MessageEvent.create(role="user", content=user_input)
+            session.add_message(user_event)
+            self.manager.append_messages(session.session_id, [user_event])
+            self.manager.update_metadata(session)
 
-        run_spec = RunSpec(
-            session_id=session.session_id,
-            model=self.config.model,
-            messages=prepared.messages,
-            tool_definitions=prepared.tool_definitions,
-            max_iterations=self.config.max_iterations,
-        )
-        reply, turn_events = self.runner.run(run_spec)
-        for event in turn_events:
-            session.add_message(event)
-        self.manager.append_messages(session.session_id, turn_events)
-        self.manager.update_metadata(session)
+            run_spec = RunSpec(
+                session_id=session.session_id,
+                model=self.config.model,
+                messages=prepared.messages,
+                tool_definitions=prepared.tool_definitions,
+                max_iterations=self.config.max_iterations,
+            )
+            outcome = self.runner.run(run_spec)
+            reply = outcome.reply
+            turn_events = outcome.events
+            usage = outcome.usage
+            for event in turn_events:
+                session.add_message(event)
+            self.manager.append_messages(session.session_id, turn_events)
+            self.manager.update_metadata(session)
 
-        return TurnResult(
-            reply=reply,
-            did_compact=prepared.did_compact,
-            compact_message=prepared.compact_message,
-        )
+            result = TurnResult(
+                reply=reply,
+                did_compact=prepared.did_compact,
+                compact_message=prepared.compact_message,
+            )
+            self._append_run_log(
+                RunLogRecord(
+                    run_id=run_id,
+                    session_id=session.session_id,
+                    turn_index=turn_index,
+                    timestamp=timestamp,
+                    ended_at=utc_now(),
+                    status="success",
+                    model=self.config.model,
+                    user_input_preview=preview_text(user_input, 120),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    did_compact=prepared.did_compact,
+                    compact_message=prepared.compact_message,
+                    input_tokens=None if usage is None else usage.input_tokens,
+                    output_tokens=None if usage is None else usage.output_tokens,
+                    total_tokens=None if usage is None else usage.total_tokens,
+                    llm_call_count=self._count_messages(turn_events, role="assistant"),
+                    tool_call_count=self._count_messages(turn_events, role="tool"),
+                    tools_used=self._tools_used(turn_events),
+                    final_reply_preview=preview_text(reply, 200),
+                    error_type=None,
+                    error_message_preview=None,
+                )
+            )
+            return result
+        except PartialRunError as exc:
+            reply = exc.reply
+            turn_events = exc.events
+            usage = exc.usage
+            self._persist_turn_events(session, turn_events)
+            self._append_run_log(
+                RunLogRecord(
+                    run_id=run_id,
+                    session_id=session.session_id,
+                    turn_index=turn_index,
+                    timestamp=timestamp,
+                    ended_at=utc_now(),
+                    status="failed",
+                    model=self.config.model,
+                    user_input_preview=preview_text(user_input, 120),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    did_compact=False if prepared is None else prepared.did_compact,
+                    compact_message=None if prepared is None else prepared.compact_message,
+                    input_tokens=None if usage is None else usage.input_tokens,
+                    output_tokens=None if usage is None else usage.output_tokens,
+                    total_tokens=None if usage is None else usage.total_tokens,
+                    llm_call_count=self._count_messages(turn_events, role="assistant"),
+                    tool_call_count=self._count_messages(turn_events, role="tool"),
+                    tools_used=self._tools_used(turn_events),
+                    final_reply_preview=(
+                        None if reply is None else preview_text(reply, 200)
+                    ),
+                    error_type=type(exc.cause).__name__,
+                    error_message_preview=preview_text(str(exc.cause), 200),
+                )
+            )
+            raise exc.cause from exc
+        except Exception as exc:
+            self._append_run_log(
+                RunLogRecord(
+                    run_id=run_id,
+                    session_id=session.session_id,
+                    turn_index=turn_index,
+                    timestamp=timestamp,
+                    ended_at=utc_now(),
+                    status="failed",
+                    model=self.config.model,
+                    user_input_preview=preview_text(user_input, 120),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    did_compact=False if prepared is None else prepared.did_compact,
+                    compact_message=None if prepared is None else prepared.compact_message,
+                    input_tokens=None if usage is None else usage.input_tokens,
+                    output_tokens=None if usage is None else usage.output_tokens,
+                    total_tokens=None if usage is None else usage.total_tokens,
+                    llm_call_count=self._count_messages(turn_events, role="assistant"),
+                    tool_call_count=self._count_messages(turn_events, role="tool"),
+                    tools_used=self._tools_used(turn_events),
+                    final_reply_preview=(
+                        None if reply is None else preview_text(reply, 200)
+                    ),
+                    error_type=type(exc).__name__,
+                    error_message_preview=preview_text(str(exc), 200),
+                )
+            )
+            raise
 
     def compact_session(self, session: Session) -> tuple[bool, str]:
         did_compact, message = self.context_manager.compact_session(session=session)
@@ -93,11 +193,40 @@ class TurnEngine:
 
     def _emit_current_context_usage(self, session: Session) -> None:
         current_tokens = self.context_manager.estimate_visible_tokens(session=session)
+        budget = self.context_manager.effective_input_budget
         self._emit(
             "当前上下文占用(不含本次输入): "
-            f"{current_tokens}/{self.config.compact_token_threshold} tokens"
+            f"{current_tokens}/{budget} tokens"
         )
 
     def _emit(self, message: str) -> None:
         if self.event_handler:
             self.event_handler(message)
+
+    def _append_run_log(self, record: RunLogRecord) -> None:
+        if self.run_log_store is None:
+            return
+        try:
+            self.run_log_store.append(record)
+        except Exception as exc:
+            self._emit(f"写入 run log 失败: {exc}")
+
+    @staticmethod
+    def _count_messages(events: list[MessageEvent], *, role: str) -> int:
+        return sum(1 for event in events if event.role == role)
+
+    @staticmethod
+    def _tools_used(events: list[MessageEvent]) -> list[str]:
+        return [event.name for event in events if event.role == "tool" and event.name]
+
+    def _persist_turn_events(
+        self,
+        session: Session,
+        turn_events: list[MessageEvent],
+    ) -> None:
+        if not turn_events:
+            return
+        for event in turn_events:
+            session.add_message(event)
+        self.manager.append_messages(session.session_id, turn_events)
+        self.manager.update_metadata(session)

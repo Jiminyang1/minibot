@@ -138,6 +138,15 @@ class ExecTool(Tool):
                 name="exec_output",
             )
 
+        if result.returncode != 0:
+            return ToolResult.failure(
+                "error",
+                f"命令执行失败，退出码 {result.returncode}。",
+                data=data,
+                artifact=artifact,
+                truncated=truncated,
+            )
+
         return ToolResult.success(
             f"命令已执行，退出码 {result.returncode}。",
             data=data,

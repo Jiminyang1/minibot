@@ -1,10 +1,8 @@
 """Skill package exports."""
 
-from .registry import Skill, SkillMatch, SkillMatcher, SkillRegistry
+from .registry import Skill, SkillRegistry
 
 __all__ = [
     "Skill",
-    "SkillMatch",
-    "SkillMatcher",
     "SkillRegistry",
 ]

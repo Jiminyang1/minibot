@@ -66,6 +66,7 @@ minibot/
 │   ├── exec_cmd.py
 │   ├── read_file.py
 │   ├── read_artifact.py
+│   ├── read_skill.py
 │   ├── write_file.py
 │   ├── edit_file.py
 │   ├── list_dir.py
@@ -92,106 +93,152 @@ minibot/
 
 ## 架构
 
-### 分层
-
-```text
-入口
-- __main__.py
-- cli.py / ui.py
-
-运行时编排
-- runtime/turn_engine.py
-- runtime/context_manager.py
-- runtime/agent_runner.py
-
-能力层
-- tools/
-- macos/
-- llm.py
-
-状态层
-- session/
-- user_memory.py
-- skills/
-- prompts.py
-```
-
-### 运行流
+### 分层组件图
 
 ```mermaid
 flowchart TB
-    User([User]) --> CLI["cli.run_repl"]
-    CLI --> Engine["TurnEngine"]
-    Engine --> Context["ContextManager"]
-    Engine --> Runner["AgentRunner"]
-    Engine --> Session["SessionManager"]
-    Context --> Memory["UserMemoryStore"]
-    Context --> Skills["SkillRegistry"]
-    Context --> Tools["ToolRegistry"]
-    Runner --> Tools
-    Runner --> LLM["LLMClient"]
-    Tools --> Session
-    Tools --> Mac["AppleScriptBridge"]
+    subgraph Entry["Composition Root"]
+        Main["__main__.py"]
+        CLI["cli.py (REPL / 斜杠命令)"]
+    end
+
+    subgraph Runtime["Runtime 层 (单轮编排)"]
+        TE["TurnEngine<br/>事件广播 / 消息持久化"]
+        CM["ContextManager<br/>组装 system prompt<br/>token 预算 / 压缩触发"]
+        AR["AgentRunner<br/>LLM tool-calling 循环<br/>审批 / 迭代上限"]
+        SUM["Summarizer<br/>压缩旧轮次"]
+    end
+
+    subgraph Capability["Capability 层 (Tools)"]
+        TR["ToolRegistry"]
+        FS["filesystem_toolset<br/>read/write/edit/list/search"]
+        SH["shell_toolset<br/>exec"]
+        NET["network_toolset<br/>fetch_url / web_search"]
+        MEM["memory_toolset<br/>remember / forget"]
+        MAC["macos_toolset<br/>calendar_* / reminders_* / notes_*"]
+        SK["skill_toolset<br/>read_skill"]
+    end
+
+    subgraph State["State 层 (持久化)"]
+        SM["SessionManager<br/>.minibot/sessions/&lt;id&gt;/"]
+        UM["UserMemoryStore<br/>~/.minibot/user_memory.json"]
+        SR["SkillRegistry<br/>只加载 + 按名查"]
+        AS["ArtifactStore<br/>大对象落盘 + ArtifactRef"]
+    end
+
+    subgraph External["External"]
+        LLM["OpenAIClient"]
+        APPLE["AppleScriptBridge"]
+    end
+
+    Main --> CLI
+    CLI --> TE
+    TE --> CM
+    TE --> AR
+    CM --> UM
+    CM --> SR
+    CM --> TR
+    CM --> SUM
+    SUM --> LLM
+    AR --> LLM
+    AR --> TR
+    TR --> FS
+    TR --> SH
+    TR --> NET
+    TR --> MEM
+    TR --> MAC
+    TR --> SK
+    SK -.按 name 查.-> SR
+    MAC --> APPLE
+    FS --> AS
+    NET --> AS
+    TE --> SM
+    MEM --> UM
 ```
 
-### 一轮对话
+核心分工：
+
+- **Runtime** 只做编排，不拥有业务逻辑
+- **Capability** 所有能力都挂在 `ToolRegistry` 下，按 toolset 装配
+- **State** 三种存储各司其职：会话 / 长期记忆 / skill 目录
+- `SkillRegistry` 在热路径上只出现在 prompt 装配（拿 L1 目录）和 `read_skill` 工具（按 name 查）两处
+
+### 一轮对话（含 skill pull 链路）
 
 ```mermaid
 sequenceDiagram
-    actor User as 用户
-    participant CLI as cli
-    participant Engine as TurnEngine
-    participant Context as ContextManager
-    participant Runner as AgentRunner
-    participant LLM as LLMClient
-    participant Tools as ToolRegistry
-    participant Session as SessionManager
+    autonumber
+    participant U as User
+    participant TE as TurnEngine
+    participant CM as ContextManager
+    participant SR as SkillRegistry
+    participant AR as AgentRunner
+    participant LLM as OpenAIClient
+    participant TR as ToolRegistry
+    participant RS as ReadSkillTool
+    participant Tgt as Target Tool<br/>(例 calendar_list_events)
 
-    User->>CLI: 输入消息
-    CLI->>Engine: handle_turn(session, input)
-    Engine->>Context: prepare_for_turn(...)
-    Context-->>Engine: PreparedContext
-    Engine->>Session: append user message
-    Engine->>Runner: run(RunSpec)
+    U->>TE: handle_turn(user_input)
+    TE->>CM: prepare_for_turn(session, input)
+    CM->>SR: list() 可用 skills
+    CM->>TR: get_definitions() 工具 schema
+    Note over CM: 组装 system prompt:<br/>base + memory + L1 skill 目录<br/>(只有 name/desc/tools)
+    CM-->>TE: PreparedContext
 
-    loop tool-calling loop
-        Runner->>LLM: chat(messages, tool_definitions)
-        LLM-->>Runner: assistant / tool_calls
-        opt 有 tool_calls
-            Runner->>Tools: execute(name, args)
-            Tools-->>Runner: ToolResult
+    TE->>AR: run(spec)
+    loop LLM tool-calling loop
+        AR->>LLM: chat(messages, tools)
+        LLM-->>AR: tool_calls
+
+        alt 模型决定先 pull skill (可选)
+            AR->>TR: dispatch("read_skill", {name})
+            TR->>RS: execute
+            RS->>SR: get_by_name(name)
+            SR-->>RS: Skill(body, ...)
+            RS-->>AR: ToolResult(data.body = L2 正文)
+            Note over AR,LLM: body 进入下一轮<br/>tool message
         end
-    end
 
-    Runner-->>Engine: final reply + events
-    Engine->>Session: append assistant/tool events
-    Engine-->>CLI: TurnResult
+        AR->>TR: dispatch(target_tool, args)
+        TR->>Tgt: execute
+        Tgt-->>AR: ToolResult
+    end
+    AR-->>TE: 最终回答
+    TE->>TE: 持久化 user + assistant 消息
+    TE-->>U: 回答
 ```
 
 ## Prompt 组装
 
-`ContextManager` 每轮都会重新拼一次请求。当前顺序是：
+`ContextManager` 每轮重新拼一次请求。结构如下：
 
-1. base system prompt
-2. memory instructions
-3. user memory block
-4. available skills metadata
-5. matched skills guidance
-6. visible history
-7. current user input
-8. tool definitions
+```mermaid
+flowchart LR
+    A["base SYSTEM_PROMPT"] --> P
+    B["MEMORY_INSTRUCTIONS"] --> P
+    C["## User Memory Data<br/>(若非空)"] --> P
+    D["## Available Skills<br/>L1 目录 + 调用 read_skill 指令"] --> P
+    P["System message"] --> M
+    H["history (按 max_history_turns 截)"] --> M
+    U["当前 user input"] --> M
+    T["tool_definitions[]<br/>(含 read_skill + 业务工具)"]
 
-这里要分清：
+    M["messages[]"] --> REQ["LLM request"]
+    T --> REQ
+```
+
+分工：
 
 - `tools` 是 function calling 能力，走 `tool_definitions`
-- `skills` 是 prompt guidance，不可调用
+- `skills` 是 workflow guidance，走 `tool_definitions` 里的 `read_skill` **按需拉取**
 
-当前 skill 策略：
+当前 skill 策略（progressive disclosure / model-pulled）：
 
-- 所有当前可用 skill 的 metadata 都会常驻注入
-- 当前输入命中的 skill 最多额外展开 2 个
-- top skill 可能注入 full body
-- secondary skill 只注入 summary
+- **L1 metadata**（name / description / tools）每轮常驻在系统提示的 `## Available Skills` 块
+- **L2 body** 不由框架匹配注入，只在模型调用 `read_skill` 时进 tool message
+- 是否加载、加载哪个、加载几个，完全由模型自行判断
+- 框架不再做 trigger 匹配、不再有 top-2 / full / summary 三档模式
+- L2 内容走 tool message 通道进上下文，模型清楚那是"刚加载的参考资料"而不是"新系统规则"
 
 ## Tool 体系
 
@@ -221,6 +268,8 @@ sequenceDiagram
   - `notes_search`
   - `notes_create`
   - `notes_append`
+- `skill_toolset`
+  - `read_skill`
 
 ### ToolResult
 
@@ -269,7 +318,7 @@ sequenceDiagram
 说明：
 
 - `meta.json`：标题、时间、message_count
-- `messages.jsonl`：user / assistant / tool 事件日志
+- `messages.jsonl`：transcript，只存 user / assistant / tool 历史，供后续拼上下文
 - `artifacts/`：长文件、长输出、长网页内容
 
 当前会话指针在：
@@ -277,6 +326,19 @@ sequenceDiagram
 ```text
 .minibot/current_session
 ```
+
+### Run Log
+
+每轮用户输入还会额外追加一条运行摘要日志：
+
+```text
+.minibot/runs.jsonl
+```
+
+说明：
+
+- `runs.jsonl`：turn 级观测摘要日志，记录耗时、工具数、工具名、compact 情况、错误摘要等
+- run log 不进入模型上下文，也不替代 session transcript
 
 ### Long-term Memory
 
@@ -358,6 +420,6 @@ MINIBOT_RUN_MACOS_INTEGRATION=1 python -m unittest tests.test_macos_integration
 ## 已知边界
 
 - `fetch_url` 更适合静态网页、普通文章页和 SSR 页面；纯前端重渲染页面不保证能拿到完整正文
-- 当前 skill matching 仍然是轻量规则式，不是 embedding retrieval
-- skill metadata 会常驻注入，但详细 workflow 只会给命中的 skill
+- skill 采用 pull 模式：L1 目录常驻、L2 正文按需 `read_skill`；框架不再做 trigger 匹配，模型不读就不加载
+- 若 skill 正文没有 L1 目录无法传达的关键信息（默认值、跨工具编排、错误恢复等），模型多半不会去 pull——这是预期行为，不是 bug
 - artifact 是 session-scoped，不是全局 blob store
