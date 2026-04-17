@@ -6,8 +6,8 @@ from collections.abc import Iterable
 import inspect
 from typing import Any
 
-from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .base import Tool, ToolExecutionContext, ToolLayer
+from .result import ToolOutput
 
 
 class ToolRegistry:
@@ -26,8 +26,14 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def get_definitions(self) -> list[dict[str, Any]]:
-        return [tool.to_definition() for tool in self._tools.values()]
+    def list_tools(self, *, layer: ToolLayer | None = None) -> list[Tool]:
+        tools = list(self._tools.values())
+        if layer is None:
+            return tools
+        return [tool for tool in tools if tool.layer == layer]
+
+    def get_definitions(self, *, layer: ToolLayer | None = None) -> list[dict[str, Any]]:
+        return [tool.to_definition() for tool in self.list_tools(layer=layer)]
 
     def execute(
         self,
@@ -35,9 +41,9 @@ class ToolRegistry:
         args: dict[str, Any],
         *,
         context: ToolExecutionContext,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         if not isinstance(args, dict):
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 f"工具 {name} 参数错误: 参数必须是 JSON 对象。",
                 data={"tool": name, "received_type": type(args).__name__},
@@ -45,7 +51,7 @@ class ToolRegistry:
 
         tool = self.get(name)
         if tool is None:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"未知工具: {name}",
                 data={"tool": name},
@@ -54,7 +60,7 @@ class ToolRegistry:
         try:
             inspect.signature(tool.execute).bind(context=context, **args)
         except TypeError as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 f"工具 {name} 参数错误: {exc}",
                 data={"tool": name, "args": args},
@@ -63,14 +69,14 @@ class ToolRegistry:
         try:
             result = tool.execute(context=context, **args)
         except Exception as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"工具 {name} 执行失败: {exc}",
                 data={"tool": name},
                 meta={"exception": repr(exc)},
             )
-        if not isinstance(result, ToolResult):
-            return ToolResult.failure(
+        if not isinstance(result, ToolOutput):
+            return ToolOutput.failure(
                 "error",
                 f"工具 {name} 返回了无效结果类型。",
                 data={"tool": name, "returned_type": type(result).__name__},

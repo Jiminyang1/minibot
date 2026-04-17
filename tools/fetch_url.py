@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import ipaddress
 from typing import Any
-from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import json
@@ -14,10 +13,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
-
-if TYPE_CHECKING:
-    from ..session import SessionManager
+from .result import ToolOutput
 
 
 @dataclass(frozen=True)
@@ -201,8 +197,8 @@ class FetchUrlTool(Tool):
         "text/plain",
     }
 
-    def __init__(self, session_manager: SessionManager) -> None:
-        super().__init__(workspace=None, session_manager=session_manager)
+    def __init__(self) -> None:
+        super().__init__(workspace=None)
 
     @property
     def name(self) -> str:
@@ -235,11 +231,12 @@ class FetchUrlTool(Tool):
         context: ToolExecutionContext,
         url: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
+        del context
         normalized = url.strip()
         parsed = urlparse(normalized)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 "抓取失败: 请输入有效的 http/https URL。",
                 data={"url": normalized},
@@ -252,7 +249,7 @@ class FetchUrlTool(Tool):
             try:
                 page = self._fetch_direct(normalized)
             except Exception as exc:
-                return ToolResult.failure(
+                return ToolOutput.failure(
                     "error",
                     f"抓取失败: {exc}",
                     data={"url": normalized},
@@ -272,31 +269,16 @@ class FetchUrlTool(Tool):
         if page.published_at:
             data["published_at"] = page.published_at
 
-        if total_chars <= self._INLINE_CHARS and not page.byte_truncated:
-            data["content"] = page.body_text
-            return ToolResult.success(
-                f"已抓取网页 {page.final_url}（{total_chars} 字符）。",
-                data=data,
-            )
-
-        artifact = self._require_session_manager().put_artifact_text(
-            context.session_id,
-            page.body_text,
-            kind="text",
-            name=page.title or page.final_url,
-        )
-        data["preview"] = page.body_text[: self._INLINE_CHARS]
-        details: list[str] = []
         if page.byte_truncated:
-            details.append("页面较大，仅提取前段内容")
-        if total_chars > self._INLINE_CHARS:
-            details.append("正文预览已截断")
-        detail_text = "，".join(details) if details else "已截断预览"
-        return ToolResult.success(
-            f"已抓取网页 {page.final_url}（{total_chars} 字符，{detail_text}）。",
+            data["byte_truncated"] = True
+
+        return ToolOutput.success(
+            f"已抓取网页 {page.final_url}（{total_chars} 字符）。",
             data=data,
-            artifact=artifact,
-            truncated=True,
+            content=page.body_text,
+            content_kind="text",
+            content_name=page.title or page.final_url,
+            truncated=page.byte_truncated,
         )
 
     def _fetch_google_news_rss(self, url: str) -> _FetchedPage | None:

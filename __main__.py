@@ -19,9 +19,16 @@ def main() -> None:
     from .cli import run_repl
     from .llm import OpenAIClient
     from .run_log import RunLogStore
-    from .runtime import AgentRunner, ContextManager, TurnEngine, make_summarizer
+    from .runtime import (
+        AgentRunner,
+        ContextManager,
+        ToolOutputMaterializer,
+        TurnEngine,
+        make_summarizer,
+    )
     from .skills import SkillRegistry
     from .user_memory import UserMemoryStore
+    from .artifacts import ArtifactStore
     from .session import SessionManager
     from .tools import (
         ToolRegistry,
@@ -36,6 +43,7 @@ def main() -> None:
 
     workspace = Path.cwd()
     manager = SessionManager(workspace)
+    artifact_store = ArtifactStore(workspace)
     memory_store = UserMemoryStore()
     run_log_store = RunLogStore(workspace)
 
@@ -50,9 +58,9 @@ def main() -> None:
     )
 
     tool_registry = ToolRegistry()
-    tool_registry.register_all(filesystem_toolset(workspace, manager))
-    tool_registry.register_all(shell_toolset(workspace, manager))
-    tool_registry.register_all(network_toolset(manager))
+    tool_registry.register_all(filesystem_toolset(workspace, artifact_store))
+    tool_registry.register_all(shell_toolset(workspace))
+    tool_registry.register_all(network_toolset())
     tool_registry.register_all(macos_toolset())
     tool_registry.register_all(memory_toolset(memory_store))
     tool_registry.register_all(skill_toolset(skill_registry))
@@ -72,6 +80,7 @@ def main() -> None:
     runner = AgentRunner(
         llm,
         tool_registry,
+        materializer=ToolOutputMaterializer(artifact_store),
         event_handler=tool_log,
         approval_handler=None if config.auto_approve else prompt_approval,
     )

@@ -7,13 +7,16 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.tools.result import ArtifactRef, ToolResult
+from minibot.artifacts import ArtifactRef
+from minibot.tools.result import ToolResult
 
 
 class ToolResultTests(unittest.TestCase):
     def test_to_model_content_excludes_meta(self) -> None:
-        result = ToolResult.success(
-            "done",
+        result = ToolResult(
+            ok=True,
+            code="success",
+            summary="done",
             data={"value": 1},
             artifact=ArtifactRef(id="a_test", kind="text", name="sample"),
             truncated=True,

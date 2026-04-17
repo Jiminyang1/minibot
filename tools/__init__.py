@@ -12,6 +12,7 @@ import shutil
 import sys
 from typing import TYPE_CHECKING
 
+from ..artifacts import ArtifactRef, ArtifactStore
 from ..macos import AppleScriptBridge
 from ..user_memory import UserMemoryStore
 from .base import Tool, ToolExecutionContext
@@ -34,38 +35,37 @@ from .read_artifact import ReadArtifactTool
 from .read_file import ReadFileTool
 from .read_skill import ReadSkillTool
 from .registry import ToolRegistry
-from .result import ArtifactRef, ToolResult
+from .result import ToolOutput, ToolResult
 from .search_files import SearchFilesTool
 from .web_search import WebSearchTool
 from .write_file import WriteFileTool
 
 if TYPE_CHECKING:
-    from ..session import SessionManager
     from ..skills import SkillRegistry
 
 
-def filesystem_toolset(workspace: Path, session_manager: SessionManager) -> list[Tool]:
+def filesystem_toolset(workspace: Path, artifact_store: ArtifactStore) -> list[Tool]:
     """Read, write, edit, browse, and search files under *workspace*."""
     return [
-        ReadFileTool(workspace=workspace, session_manager=session_manager),
+        ReadFileTool(workspace=workspace),
         WriteFileTool(workspace=workspace),
         EditFileTool(workspace=workspace),
         ListDirTool(workspace=workspace),
-        SearchFilesTool(workspace=workspace, session_manager=session_manager),
-        ReadArtifactTool(session_manager),
+        SearchFilesTool(workspace=workspace),
+        ReadArtifactTool(artifact_store),
     ]
 
 
-def shell_toolset(workspace: Path, session_manager: SessionManager) -> list[Tool]:
+def shell_toolset(workspace: Path) -> list[Tool]:
     """Execute shell commands within *workspace*."""
-    return [ExecTool(workspace=workspace, session_manager=session_manager)]
+    return [ExecTool(workspace=workspace)]
 
 
-def network_toolset(session_manager: SessionManager) -> list[Tool]:
+def network_toolset() -> list[Tool]:
     """Network-facing tools such as search and webpage fetching."""
     return [
         WebSearchTool(workspace=None),
-        FetchUrlTool(session_manager),
+        FetchUrlTool(),
     ]
 
 
@@ -98,8 +98,10 @@ def macos_toolset() -> list[Tool]:
 
 __all__ = [
     "ArtifactRef",
+    "ArtifactStore",
     "Tool",
     "ToolExecutionContext",
+    "ToolOutput",
     "ToolResult",
     "ToolRegistry",
     "ExecTool",

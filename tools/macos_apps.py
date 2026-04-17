@@ -12,7 +12,7 @@ from ..macos import (
     ReminderRecord,
 )
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 
 def _serialize_calendar_event(event: CalendarEventRecord) -> dict[str, Any]:
@@ -52,8 +52,8 @@ class _MacOSAppTool(Tool):
         super().__init__()
         self.bridge = bridge
 
-    def _bridge_failure(self, exc: AppleScriptBridgeError) -> ToolResult:
-        return ToolResult.failure(exc.code, exc.message, data=exc.data)
+    def _bridge_failure(self, exc: AppleScriptBridgeError) -> ToolOutput:
+        return ToolOutput.failure(exc.code, exc.message, data=exc.data)
 
 
 class CalendarListEventsTool(_MacOSAppTool):
@@ -102,7 +102,7 @@ class CalendarListEventsTool(_MacOSAppTool):
         calendar_name: str | None = None,
         limit: int = 10,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             events = self.bridge.list_calendar_events(
@@ -113,7 +113,7 @@ class CalendarListEventsTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已找到 {len(events)} 条日历事件。",
             data={
                 "events": [_serialize_calendar_event(event) for event in events],
@@ -183,7 +183,7 @@ class CalendarCreateEventTool(_MacOSAppTool):
         location: str | None = None,
         notes: str | None = None,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             event = self.bridge.create_calendar_event(
@@ -196,7 +196,7 @@ class CalendarCreateEventTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已创建日历事件：{event.title}。",
             data=_serialize_calendar_event(event),
         )
@@ -244,7 +244,7 @@ class RemindersListTool(_MacOSAppTool):
         status: str = "open",
         limit: int = 10,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             reminders = self.bridge.list_reminders(
@@ -254,7 +254,7 @@ class RemindersListTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已找到 {len(reminders)} 条提醒事项。",
             data={
                 "reminders": [_serialize_reminder(item) for item in reminders],
@@ -313,7 +313,7 @@ class RemindersCreateTool(_MacOSAppTool):
         list_name: str | None = None,
         notes: str | None = None,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             reminder = self.bridge.create_reminder(
@@ -324,7 +324,7 @@ class RemindersCreateTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已创建提醒事项：{reminder.title}。",
             data=_serialize_reminder(reminder),
         )
@@ -363,13 +363,13 @@ class RemindersCompleteTool(_MacOSAppTool):
         context: ToolExecutionContext,
         reminder_id: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             reminder = self.bridge.complete_reminder(reminder_id=reminder_id)
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已完成提醒事项：{reminder.title}。",
             data=_serialize_reminder(reminder),
         )
@@ -416,7 +416,7 @@ class NotesSearchTool(_MacOSAppTool):
         folder_name: str | None = None,
         limit: int = 10,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             notes = self.bridge.search_notes(
@@ -426,7 +426,7 @@ class NotesSearchTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已找到 {len(notes)} 条备忘录。",
             data={
                 "notes": [_serialize_note(item) for item in notes],
@@ -480,7 +480,7 @@ class NotesCreateTool(_MacOSAppTool):
         content: str,
         folder_name: str | None = None,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             note = self.bridge.create_note(
@@ -490,7 +490,7 @@ class NotesCreateTool(_MacOSAppTool):
             )
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已创建备忘录：{note.title}。",
             data=_serialize_note(note),
         )
@@ -534,13 +534,13 @@ class NotesAppendTool(_MacOSAppTool):
         note_id: str,
         content: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         try:
             note = self.bridge.append_note(note_id=note_id, content=content)
         except AppleScriptBridgeError as exc:
             return self._bridge_failure(exc)
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已追加到备忘录：{note.title}。",
             data=_serialize_note(note),
         )

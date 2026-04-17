@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from minibot.artifacts import ArtifactStore
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from minibot.runtime.agent_runner import AgentRunner, PartialRunError, RunSpec
+from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.base import Tool, ToolExecutionContext
-from minibot.tools.result import ToolResult
+from minibot.tools.result import ToolOutput
 
 
 class _ScriptedLLM(LLMClient):
@@ -66,91 +69,49 @@ class _EchoTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, context: ToolExecutionContext, value: str) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, value: str) -> ToolOutput:
         del context
-        return ToolResult.success("ok", data={"value": value})
+        return ToolOutput.success("ok", data={"value": value})
 
 
 class AgentRunnerUsageTests(unittest.TestCase):
     def test_aggregates_real_usage_across_multiple_llm_calls(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_EchoTool())
-        runner = AgentRunner(
-            _ScriptedLLM(
-                [
-                    LLMResponse(
-                        content="",
-                        tool_calls=[
-                            ToolCall(
-                                id="call_1",
-                                name="echo",
-                                arguments='{"value":"hi"}',
-                            )
-                        ],
-                        usage=TokenUsage(
-                            input_tokens=100,
-                            output_tokens=10,
-                            total_tokens=110,
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_EchoTool())
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(
+                                    id="call_1",
+                                    name="echo",
+                                    arguments='{"value":"hi"}',
+                                )
+                            ],
+                            usage=TokenUsage(
+                                input_tokens=100,
+                                output_tokens=10,
+                                total_tokens=110,
+                            ),
                         ),
-                    ),
-                    LLMResponse(
-                        content="done",
-                        usage=TokenUsage(
-                            input_tokens=120,
-                            output_tokens=20,
-                            total_tokens=140,
+                        LLMResponse(
+                            content="done",
+                            usage=TokenUsage(
+                                input_tokens=120,
+                                output_tokens=20,
+                                total_tokens=140,
+                            ),
                         ),
-                    ),
-                ]
-            ),
-            registry,
-        )
-
-        outcome = runner.run(
-            RunSpec(
-                session_id="s_test",
-                model="gpt-5.4-mini",
-                messages=[{"role": "user", "content": "say hi"}],
-                tool_definitions=registry.get_definitions(),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
             )
-        )
 
-        self.assertEqual(outcome.reply, "done")
-        self.assertIsNotNone(outcome.usage)
-        assert outcome.usage is not None
-        self.assertEqual(outcome.usage.input_tokens, 220)
-        self.assertEqual(outcome.usage.output_tokens, 30)
-        self.assertEqual(outcome.usage.total_tokens, 250)
-
-    def test_raises_partial_run_error_with_accumulated_events_on_later_llm_failure(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_EchoTool())
-        runner = AgentRunner(
-            _FailingLLM(
-                [
-                    LLMResponse(
-                        content="",
-                        tool_calls=[
-                            ToolCall(
-                                id="call_1",
-                                name="echo",
-                                arguments='{"value":"hi"}',
-                            )
-                        ],
-                        usage=TokenUsage(
-                            input_tokens=100,
-                            output_tokens=10,
-                            total_tokens=110,
-                        ),
-                    ),
-                ],
-                RuntimeError("llm unavailable"),
-            ),
-            registry,
-        )
-
-        with self.assertRaises(PartialRunError) as ctx:
-            runner.run(
+            outcome = runner.run(
                 RunSpec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
@@ -159,13 +120,59 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 )
             )
 
-        exc = ctx.exception
-        self.assertEqual(type(exc.cause), RuntimeError)
-        self.assertEqual(str(exc.cause), "llm unavailable")
-        self.assertEqual([event.role for event in exc.events], ["assistant", "tool"])
-        self.assertIsNotNone(exc.usage)
-        assert exc.usage is not None
-        self.assertEqual(exc.usage.total_tokens, 110)
+            self.assertEqual(outcome.reply, "done")
+            self.assertIsNotNone(outcome.usage)
+            assert outcome.usage is not None
+            self.assertEqual(outcome.usage.input_tokens, 220)
+            self.assertEqual(outcome.usage.output_tokens, 30)
+            self.assertEqual(outcome.usage.total_tokens, 250)
+
+    def test_raises_partial_run_error_with_accumulated_events_on_later_llm_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_EchoTool())
+            runner = AgentRunner(
+                _FailingLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(
+                                    id="call_1",
+                                    name="echo",
+                                    arguments='{"value":"hi"}',
+                                )
+                            ],
+                            usage=TokenUsage(
+                                input_tokens=100,
+                                output_tokens=10,
+                                total_tokens=110,
+                            ),
+                        ),
+                    ],
+                RuntimeError("llm unavailable"),
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+            )
+
+            with self.assertRaises(PartialRunError) as ctx:
+                runner.run(
+                    RunSpec(
+                        session_id="s_test",
+                        model="gpt-5.4-mini",
+                        messages=[{"role": "user", "content": "say hi"}],
+                        tool_definitions=registry.get_definitions(),
+                    )
+                )
+
+            exc = ctx.exception
+            self.assertEqual(type(exc.cause), RuntimeError)
+            self.assertEqual(str(exc.cause), "llm unavailable")
+            self.assertEqual([event.role for event in exc.events], ["assistant", "tool"])
+            self.assertIsNotNone(exc.usage)
+            assert exc.usage is not None
+            self.assertEqual(exc.usage.total_tokens, 110)
 
 
 if __name__ == "__main__":

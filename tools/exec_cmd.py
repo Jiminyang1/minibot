@@ -7,7 +7,7 @@ import subprocess
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\b|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\b"), "rm -rf (递归强制删除)"),
@@ -48,6 +48,10 @@ class ExecTool(Tool):
     _PREVIEW_CHARS = 2000
 
     @property
+    def layer(self) -> str:
+        return "kernel"
+
+    @property
     def name(self) -> str:
         return "exec"
 
@@ -81,10 +85,11 @@ class ExecTool(Tool):
         context: ToolExecutionContext,
         command: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
+        del context
         danger = _check_dangerous(command)
         if danger:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "permission_denied",
                 "命令被安全策略拒绝执行。",
                 data={"command": command, "reason": danger},
@@ -96,7 +101,7 @@ class ExecTool(Tool):
                 cwd=self._workspace,
             )
         except subprocess.TimeoutExpired:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "timeout",
                 f"命令执行超过 {self._TIMEOUT} 秒，已终止。",
                 data={"command": command, "timeout_seconds": self._TIMEOUT},
@@ -121,7 +126,7 @@ class ExecTool(Tool):
         else:
             data["stderr"] = stderr
 
-        artifact = None
+        full_output = None
         if truncated:
             full_output = (
                 f"$ {command}\n"
@@ -131,25 +136,23 @@ class ExecTool(Tool):
                 "[stderr]\n"
                 f"{stderr}"
             )
-            artifact = self._require_session_manager().put_artifact_text(
-                context.session_id,
-                full_output,
-                kind="text",
-                name="exec_output",
-            )
 
         if result.returncode != 0:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"命令执行失败，退出码 {result.returncode}。",
                 data=data,
-                artifact=artifact,
                 truncated=truncated,
+                content=full_output,
+                content_kind="text",
+                content_name="exec_output",
             )
 
-        return ToolResult.success(
+        return ToolOutput.success(
             f"命令已执行，退出码 {result.returncode}。",
             data=data,
-            artifact=artifact,
             truncated=truncated,
+            content=full_output,
+            content_kind="text",
+            content_name="exec_output",
         )

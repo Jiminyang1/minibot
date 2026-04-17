@@ -6,7 +6,7 @@ from typing import Any
 from typing import TYPE_CHECKING
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 if TYPE_CHECKING:
     from ..skills import SkillRegistry
@@ -26,6 +26,10 @@ class ReadSkillTool(Tool):
     def __init__(self, registry: SkillRegistry) -> None:
         super().__init__(workspace=None)
         self._registry = registry
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
     @property
     def name(self) -> str:
@@ -60,11 +64,11 @@ class ReadSkillTool(Tool):
         context: ToolExecutionContext,
         name: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context, kwargs
         normalized = name.strip()
         if not normalized:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 "读取 skill 失败: name 不能为空。",
             )
@@ -72,7 +76,7 @@ class ReadSkillTool(Tool):
         skill = self._registry.get_by_name(normalized)
         if skill is None:
             available = [item.name for item in self._registry.list()]
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"未找到 skill: {normalized}。",
                 data={"name": normalized, "available": available},
@@ -83,7 +87,7 @@ class ReadSkillTool(Tool):
         truncated = total_chars > self._MAX_BODY_CHARS
         payload = body[: self._MAX_BODY_CHARS] if truncated else body
 
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已加载 skill '{skill.name}' 的工作流指南（{total_chars} 字符{'，已截断' if truncated else ''}）。",
             data={
                 "name": skill.name,

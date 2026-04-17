@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 import re
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 
 @dataclass(frozen=True)
@@ -87,11 +87,11 @@ class WebSearchTool(Tool):
         max_results: int = _DEFAULT_MAX_RESULTS,
         allowed_domains: list[str] | None = None,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context
         query = _collapse_ws(query)
         if not query:
-            return ToolResult.failure("invalid_args", "搜索失败: query 不能为空。")
+            return ToolOutput.failure("invalid_args", "搜索失败: query 不能为空。")
 
         max_results = max(1, min(int(max_results), self._MAX_RESULTS))
         normalized_domains = self._normalize_domains(allowed_domains or [])
@@ -99,7 +99,7 @@ class WebSearchTool(Tool):
         try:
             html = self._fetch_results_html(query)
         except Exception as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"搜索失败: {exc}",
                 data={"query": query},
@@ -112,7 +112,7 @@ class WebSearchTool(Tool):
             ]
 
         if not results:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 "未找到匹配结果。",
                 data={
@@ -123,7 +123,7 @@ class WebSearchTool(Tool):
             )
 
         selected = results[:max_results]
-        return ToolResult.success(
+        return ToolOutput.success(
             f"找到 {len(selected)} 条网页结果。",
             data={
                 "query": query,

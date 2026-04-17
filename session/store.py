@@ -4,30 +4,13 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-import uuid
-
-from ..artifacts import ArtifactKind, ArtifactRef
 from .models import MessageEvent, Session
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-
-@dataclass(frozen=True)
-class ArtifactPage:
-    """A single character-based artifact page."""
-
-    ref: ArtifactRef
-    content: str
-    offset: int
-    limit: int
-    total_chars: int
-    next_offset: int | None
-    has_more: bool
 
 
 class SessionManager:
@@ -134,56 +117,6 @@ class SessionManager:
             self.clear_current_session()
         return removed
 
-    def put_artifact_text(
-        self,
-        session_id: str,
-        content: str,
-        *,
-        kind: ArtifactKind = "text",
-        name: str | None = None,
-    ) -> ArtifactRef:
-        artifact_id = "a_" + uuid.uuid4().hex[:12]
-        payload = {
-            "id": artifact_id,
-            "kind": kind,
-            "name": name,
-            "created_at": _utc_now(),
-            "content": content,
-        }
-        self._artifact_path(session_id, artifact_id).write_text(
-            json.dumps(payload, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        return ArtifactRef(id=artifact_id, kind=kind, name=name)
-
-    def read_artifact_page(
-        self,
-        session_id: str,
-        artifact_id: str,
-        *,
-        offset: int,
-        limit: int,
-    ) -> ArtifactPage:
-        payload = self._load_artifact(session_id, artifact_id)
-        content = str(payload["content"])
-        total_chars = len(content)
-        start = min(offset, total_chars)
-        end = min(start + limit, total_chars)
-        next_offset = end if end < total_chars else None
-        return ArtifactPage(
-            ref=ArtifactRef(
-                id=str(payload["id"]),
-                kind=str(payload["kind"]),
-                name=payload.get("name"),
-            ),
-            content=content[start:end],
-            offset=start,
-            limit=limit,
-            total_chars=total_chars,
-            next_offset=next_offset,
-            has_more=next_offset is not None,
-        )
-
     def latest_session(self, *, prefer_non_empty: bool = True) -> Session | None:
         metas = self._list_metas()
         if not metas:
@@ -215,26 +148,6 @@ class SessionManager:
         path = self._session_dir(session_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
-
-    def _artifacts_dir(self, session_id: str) -> Path:
-        session_id = session_id.strip()
-        if not session_id:
-            raise ValueError("session_id 不能为空。")
-        path = self._ensure_session_dir(session_id) / "artifacts"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _artifact_path(self, session_id: str, artifact_id: str) -> Path:
-        return self._artifacts_dir(session_id) / f"{artifact_id}.json"
-
-    def _load_artifact(self, session_id: str, artifact_id: str) -> dict[str, object]:
-        path = self._artifact_path(session_id, artifact_id)
-        if not path.exists():
-            raise FileNotFoundError(f"未找到 artifact {artifact_id}")
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"artifact {artifact_id} 格式无效")
-        return payload
 
     def _load_native(self, session_id: str) -> Session:
         meta = self._read_meta(session_id) or {}

@@ -43,13 +43,20 @@ python -m minibot
 
 ```text
 minibot/
-├── __main__.py
-├── config.py
-├── llm.py
-├── runtime/
-├── session/
-├── tools/
-├── skills/
+├── __main__.py            # 组装依赖，启动 REPL
+├── cli.py                 # REPL 与斜杠命令
+├── config.py              # 集中配置
+├── llm.py                 # LLM 适配器 (OpenAI-compatible)
+├── prompts.py             # 系统提示词
+├── ui.py                  # 终端样式与交互原语
+├── artifacts.py           # ArtifactStore / ArtifactRef / ArtifactPage
+├── user_memory.py         # 用户长期记忆
+├── run_log.py             # 运行日志
+├── runtime/               # TurnEngine / AgentRunner / ContextManager / Materializer
+├── session/               # SessionManager + 消息模型
+├── tools/                 # Tool 基类、Registry、各工具实现
+├── skills/                # Markdown 技能文档
+├── macos/                 # AppleScript 桥接
 └── tests/
 ```
 
@@ -58,38 +65,109 @@ minibot/
 - `TurnEngine` 负责单轮编排和持久化
 - `ContextManager` 负责 system prompt、历史、memory 和 compact
 - `AgentRunner` 负责 tool-calling 循环
-- `ToolRegistry` 统一管理工具定义和执行
-- 会话保存在 `.minibot/sessions/<session_id>/`
+- `ToolOutputMaterializer` 决定工具产出内联还是落盘为 artifact
+- `ToolRegistry` 统一管理工具定义和执行，支持按 `kernel`/`extension` 分层
+- 会话消息保存在 `.minibot/sessions/<session_id>/messages.jsonl`
+- Artifact 保存在 `.minibot/sessions/<session_id>/artifacts/`
 - run log 保存在 `.minibot/runs.jsonl`
 
 ## 架构图
 
-```mermaid
-flowchart TB
-    CLI["CLI / REPL"] --> TE["TurnEngine"]
-    TE --> CM["ContextManager"]
-    TE --> AR["AgentRunner"]
-    TE --> SM["SessionManager"]
-    TE --> RL["RunLogStore"]
+### 分层视图
 
-    CM --> MEM["UserMemoryStore"]
-    CM --> SK["SkillRegistry"]
-    CM --> TR["ToolRegistry"]
-    CM --> LLM["OpenAIClient"]
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│  入口 & UI 层                                                        │
+│  ┌──────────────┐     ┌────────────┐                                │
+│  │ __main__.py  │────▶│   cli.py   │◀────┐  ui.py (终端样式)        │
+│  │ (组装依赖)    │     │  (REPL)    │     │  prompts.py              │
+│  └──────────────┘     └─────┬──────┘     │                          │
+└─────────────────────────────┼────────────┼──────────────────────────┘
+                              │            │ event_handler
+                              ▼            │ approval_handler
+┌─────────────────────────────────────────────────────────────────────┐
+│  运行时编排层 (runtime/)                                             │
+│                                                                      │
+│   ┌──────────────┐   ┌─────────────────┐   ┌──────────────────┐    │
+│   │ TurnEngine   │──▶│ ContextManager  │──▶│  AgentRunner     │    │
+│   │ (单轮协调)    │   │ (上下文/Compact) │   │  (Tool 循环)      │    │
+│   └──────────────┘   └─────────────────┘   └────────┬─────────┘    │
+│                                                      │               │
+│                                                      ▼  materialize()│
+│                     ┌───────────────────────┐                        │
+│                     │ ToolOutputMaterializer│  阈值决策中枢          │
+│                     │  content ≤ 3K → 内联  │                        │
+│                     │  content > 3K → 落盘  │                        │
+│                     └───────────────────────┘                        │
+└─────────────────────────────────────────────────────────────────────┘
+         │                       │                        │
+         ▼                       ▼                        ▼
+┌──────────────────┐  ┌────────────────────┐  ┌──────────────────────┐
+│  LLM 适配层       │  │  能力层 (tools/)    │  │  持久化层             │
+│  ┌────────────┐  │  │  ┌──────────────┐  │  │  ┌───────────────┐   │
+│  │ LLMClient  │  │  │  │ ToolRegistry │  │  │  │SessionManager │   │
+│  │(抽象接口)   │  │  │  │ (layer 过滤) │  │  │  │(消息 JSONL)   │   │
+│  └─────┬──────┘  │  │  └──────┬───────┘  │  │  └───────────────┘   │
+│        ▼          │  │         ▼          │  │  ┌───────────────┐   │
+│  ┌────────────┐  │  │  ┌──────────────┐  │  │  │ ArtifactStore │◀──┤
+│  │OpenAIClient│  │  │  │    Tool      │  │  │  │(独立存储)      │   │
+│  └────────────┘  │  │  │ kernel/ext   │  │  │  └───────────────┘   │
+└──────────────────┘  │  └──────┬───────┘  │  │  ┌───────────────┐   │
+                      │         ▼          │  │  │UserMemoryStore│   │
+                      │   返回 ToolOutput  │  │  │ (全局 JSON)    │   │
+                      │                    │  │  └───────────────┘   │
+                      └────────────────────┘  │  ┌───────────────┐   │
+                                              │  │  RunLogStore  │   │
+                                              │  └───────────────┘   │
+                                              └──────────────────────┘
+```
 
-    AR --> TR
-    AR --> LLM
+### 工具两阶段数据流
 
-    TR --> FS["Filesystem Tools"]
-    TR --> SH["Shell Tool"]
-    TR --> NET["Network Tools"]
-    TR --> MAC["macOS Tools"]
-    TR --> MEMT["Memory Tools"]
-    TR --> RSK["read_skill"]
+```text
+        ┌────────┐                                ┌──────────┐
+        │  Tool  │                                │   LLM    │
+        └───┬────┘                                └────▲─────┘
+            │                                          │
+   execute()│ 返回                         tool_msg    │
+            ▼                                          │
+     ┌────────────┐                            ┌───────────────┐
+     │ ToolOutput │                            │  ToolResult   │
+     │ ─ content  │  ─────materialize()────▶   │ ─ artifact    │
+     │ ─ data     │                            │ ─ data        │
+     │ ─ summary  │                            │ ─ summary     │
+     └────────────┘                            └───────────────┘
+        工具语义                                  模型可见形态
+       (无存储知识)                               (统一决策过)
+                       │
+                       ▼
+               ArtifactStore.put_text()
+               (大内容落盘，返回 ArtifactRef)
+```
 
-    RSK --> SK
-    FS --> SM
-    NET --> SM
+工具只负责产出 `ToolOutput`（含原始 `content`），不关心存储策略；`ToolOutputMaterializer` 统一决定内联还是落盘，模型拿到的是规范化的 `ToolResult`。
+
+### 工具集合
+
+```text
+filesystem_toolset(workspace, artifact_store)
+   ├─ ReadFileTool      [kernel]
+   ├─ WriteFileTool     [kernel]
+   ├─ EditFileTool      [kernel]
+   ├─ ListDirTool       [kernel]
+   ├─ SearchFilesTool   [kernel]
+   └─ ReadArtifactTool  [kernel]   持有 ArtifactStore
+
+shell_toolset(workspace)
+   └─ ExecTool          [kernel]
+
+network_toolset()
+   ├─ WebSearchTool     [extension]
+   └─ FetchUrlTool      [extension]
+
+macos_toolset()     → Calendar / Reminders / Notes  [extension]
+memory_toolset()    → RememberTool / ForgetTool     [kernel]
+skill_toolset()     → ReadSkillTool (按需加载 skills/*.md)  [kernel]
 ```
 
 ## 配置
@@ -124,4 +202,4 @@ MINIBOT_RUN_MACOS_INTEGRATION=1 python -m unittest tests.test_macos_integration
 
 - `fetch_url` 更适合公开网页和普通文章页，不保证拿到纯前端站点的完整正文
 - skill 采用 pull 模式：目录常驻，正文由模型通过 `read_skill` 按需读取
-- 大输出会写入 artifact，而不是直接塞进 tool result
+- 工具产出统一为 `ToolOutput`；大内容由 `ToolOutputMaterializer` 落盘为 artifact，而不是让工具自己管存储

@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 
 class ListDirTool(Tool):
     """List files and directories at a given path."""
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
     @property
     def name(self) -> str:
@@ -42,20 +46,20 @@ class ListDirTool(Tool):
         context: ToolExecutionContext,
         path: str = ".",
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
+            return ToolOutput.failure("permission_denied", f"[安全拦截] {exc}")
         if not p.exists():
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"路径不存在: {path}",
                 data={"path": path},
             )
         if not p.is_dir():
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"不是目录: {path}",
                 data={"path": path},
@@ -68,7 +72,7 @@ class ListDirTool(Tool):
         else:
             truncated = False
         names = [f"{e.name}/" if e.is_dir() else e.name for e in entries]
-        return ToolResult.success(
+        return ToolOutput.success(
             (
                 f"已列出 {path}，共 {total_entries} 项。"
                 if not truncated

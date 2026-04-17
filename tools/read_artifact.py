@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from typing import TYPE_CHECKING
 
+from ..artifacts import ArtifactStore
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
-
-if TYPE_CHECKING:
-    from ..session import SessionManager
+from .result import ToolOutput
 
 
 class ReadArtifactTool(Tool):
@@ -19,8 +16,13 @@ class ReadArtifactTool(Tool):
     _DEFAULT_LIMIT = 4000
     _MAX_LIMIT = 8000
 
-    def __init__(self, session_manager: SessionManager) -> None:
-        super().__init__(workspace=None, session_manager=session_manager)
+    def __init__(self, artifact_store: ArtifactStore) -> None:
+        super().__init__(workspace=None)
+        self._artifact_store = artifact_store
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
     @property
     def name(self) -> str:
@@ -63,21 +65,21 @@ class ReadArtifactTool(Tool):
         offset: int = 0,
         limit: int = _DEFAULT_LIMIT,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         artifact_id = artifact_id.strip()
         if not artifact_id:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 "读取 artifact 失败: artifact_id 不能为空。",
             )
         if offset < 0:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 "读取 artifact 失败: offset 不能小于 0。",
                 data={"artifact_id": artifact_id, "offset": offset},
             )
         if limit <= 0:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 "读取 artifact 失败: limit 必须大于 0。",
                 data={"artifact_id": artifact_id, "limit": limit},
@@ -85,26 +87,26 @@ class ReadArtifactTool(Tool):
         limit = min(limit, self._MAX_LIMIT)
 
         try:
-            page = self._require_session_manager().read_artifact_page(
+            page = self._artifact_store.read_page(
                 context.session_id,
                 artifact_id,
                 offset=offset,
                 limit=limit,
             )
         except FileNotFoundError:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"未找到 artifact {artifact_id}。",
                 data={"artifact_id": artifact_id},
             )
         except ValueError as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"读取 artifact 失败: {exc}",
                 data={"artifact_id": artifact_id},
             )
         except OSError as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"读取 artifact 失败: {exc}",
                 data={"artifact_id": artifact_id},
@@ -120,7 +122,7 @@ class ReadArtifactTool(Tool):
             total_chars=page.total_chars,
         )
         if not content:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"读取 artifact 失败: artifact {artifact_id} 片段过大，无法安全返回。",
                 data={"artifact_id": artifact_id},
@@ -131,7 +133,7 @@ class ReadArtifactTool(Tool):
         next_offset = returned_end if returned_end < page.total_chars else None
         has_more = next_offset is not None
 
-        return ToolResult.success(
+        return ToolOutput.success(
             (
                 f"已读取 artifact {artifact_id} "
                 f"({page.offset}-{returned_end}/{page.total_chars} 字符)"
@@ -173,7 +175,7 @@ class ReadArtifactTool(Tool):
             "has_more": False,
             "total_chars": total_chars,
         }
-        max_size = ToolResult._MAX_DATA_CHARS
+        max_size = ToolOutput._MAX_DATA_CHARS
 
         def serialized_size(text: str) -> int:
             returned_chars = len(text)

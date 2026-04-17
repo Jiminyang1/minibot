@@ -6,11 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 
 class WriteFileTool(Tool):
     """Create or overwrite a UTF-8 file on disk."""
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
     @property
     def name(self) -> str:
@@ -51,14 +55,14 @@ class WriteFileTool(Tool):
         path: str,
         content: str,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
         del context
         try:
             p = self._resolve_path(path)
         except PermissionError as exc:
-            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
+            return ToolOutput.failure("permission_denied", f"[安全拦截] {exc}")
         if len(content.encode("utf-8")) > self._MAX_SIZE:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"内容过大 ({len(content.encode('utf-8'))} bytes)，上限 {self._MAX_SIZE} bytes。",
                 data={"path": path, "size_bytes": len(content.encode('utf-8'))},
@@ -68,12 +72,12 @@ class WriteFileTool(Tool):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         except OSError as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "error",
                 f"写入失败: {exc}",
                 data={"path": path},
             )
-        return ToolResult.success(
+        return ToolOutput.success(
             f"已写入 {p}（{len(content)} 字符）。",
             data={
                 "path": path,

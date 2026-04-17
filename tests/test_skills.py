@@ -7,13 +7,26 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from minibot.artifacts import ArtifactStore
 from minibot.runtime.context_manager import ContextManager
 from minibot.session import Session
 from minibot.skills import SkillRegistry
+from minibot.tools import (
+    EditFileTool,
+    ExecTool,
+    ForgetTool,
+    ListDirTool,
+    ReadArtifactTool,
+    ReadFileTool,
+    RememberTool,
+    SearchFilesTool,
+    WriteFileTool,
+)
 from minibot.tools.base import Tool, ToolExecutionContext
 from minibot.tools.read_skill import ReadSkillTool
 from minibot.tools.registry import ToolRegistry
-from minibot.tools.result import ToolResult
+from minibot.tools.result import ToolOutput
+from minibot.user_memory import UserMemoryStore
 
 
 class _DummyTool(Tool):
@@ -38,9 +51,9 @@ class _DummyTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolOutput:
         del context, kwargs
-        return ToolResult.success("ok")
+        return ToolOutput.success("ok")
 
 
 def _write_skill(
@@ -234,6 +247,30 @@ class ReadSkillToolTests(unittest.TestCase):
             self.assertTrue(result.truncated)
             self.assertEqual(len(result.data["body"]), ReadSkillTool._MAX_BODY_CHARS)
             self.assertGreater(result.data["total_chars"], ReadSkillTool._MAX_BODY_CHARS)
+
+
+class ToolLayerTests(unittest.TestCase):
+    def test_core_local_tools_are_marked_as_kernel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            artifact_store = ArtifactStore(workspace)
+            memory_store = UserMemoryStore(root=workspace / "state")
+            skills = SkillRegistry.from_directory(workspace / "skills")
+
+            tools = [
+                ReadFileTool(workspace=workspace),
+                ReadArtifactTool(artifact_store),
+                ReadSkillTool(skills),
+                ListDirTool(workspace=workspace),
+                SearchFilesTool(workspace=workspace),
+                WriteFileTool(workspace=workspace),
+                EditFileTool(workspace=workspace),
+                ExecTool(workspace=workspace),
+                RememberTool(memory_store),
+                ForgetTool(memory_store),
+            ]
+
+            self.assertTrue(all(tool.layer == "kernel" for tool in tools))
 
 
 if __name__ == "__main__":

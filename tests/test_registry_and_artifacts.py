@@ -7,11 +7,11 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.session import SessionManager
+from minibot.artifacts import ArtifactStore
 from minibot.tools.base import Tool, ToolExecutionContext
 from minibot.tools.read_artifact import ReadArtifactTool
 from minibot.tools.registry import ToolRegistry
-from minibot.tools.result import ToolResult
+from minibot.tools.result import ToolOutput
 
 
 class EchoTool(Tool):
@@ -32,9 +32,19 @@ class EchoTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, context: ToolExecutionContext, value: str) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, value: str) -> ToolOutput:
         del context
-        return ToolResult.success("echo ok", data={"value": value})
+        return ToolOutput.success("echo ok", data={"value": value})
+
+
+class KernelEchoTool(EchoTool):
+    @property
+    def name(self) -> str:
+        return "kernel_echo"
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
 
 class ExplodingTool(Tool):
@@ -55,7 +65,7 @@ class ExplodingTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolOutput:
         del context
         raise RuntimeError("boom")
 
@@ -78,7 +88,7 @@ class TypeErrorTool(Tool):
             "additionalProperties": False,
         }
 
-    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolOutput:
         del context, kwargs
         raise TypeError("internal type error")
 
@@ -87,6 +97,7 @@ class ToolRegistryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = ToolRegistry()
         self.registry.register(EchoTool())
+        self.registry.register(KernelEchoTool())
         self.registry.register(ExplodingTool())
         self.registry.register(TypeErrorTool())
         self.context = ToolExecutionContext(session_id="s_test")
@@ -125,15 +136,38 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.code, "error")
 
+    def test_list_tools_can_filter_by_layer(self) -> None:
+        self.assertEqual(
+            [tool.name for tool in self.registry.list_tools(layer="kernel")],
+            ["kernel_echo"],
+        )
+        self.assertEqual(
+            [tool.name for tool in self.registry.list_tools(layer="extension")],
+            ["echo", "explode", "type_error"],
+        )
+
+    def test_get_definitions_can_filter_by_layer(self) -> None:
+        kernel_names = [
+            item["function"]["name"]
+            for item in self.registry.get_definitions(layer="kernel")
+        ]
+        extension_names = [
+            item["function"]["name"]
+            for item in self.registry.get_definitions(layer="extension")
+        ]
+
+        self.assertEqual(kernel_names, ["kernel_echo"])
+        self.assertEqual(extension_names, ["echo", "explode", "type_error"])
+
 
 class ReadArtifactToolTests(unittest.TestCase):
     def test_read_artifact_paginates_by_character(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            manager = SessionManager(workspace)
+            store = ArtifactStore(workspace)
             context = ToolExecutionContext(session_id="s_test")
-            ref = manager.put_artifact_text("s_test", "abcdef", name="sample")
-            tool = ReadArtifactTool(manager)
+            ref = store.put_text("s_test", "abcdef", name="sample")
+            tool = ReadArtifactTool(store)
 
             result = tool.execute(
                 context=context,
@@ -150,10 +184,10 @@ class ReadArtifactToolTests(unittest.TestCase):
     def test_read_artifact_large_page_is_shrunk_to_fit_result_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
-            manager = SessionManager(workspace)
+            store = ArtifactStore(workspace)
             context = ToolExecutionContext(session_id="s_test")
-            ref = manager.put_artifact_text("s_test", "x" * 12000, name="large")
-            tool = ReadArtifactTool(manager)
+            ref = store.put_text("s_test", "x" * 12000, name="large")
+            tool = ReadArtifactTool(store)
 
             result = tool.execute(
                 context=context,

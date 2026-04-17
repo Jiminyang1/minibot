@@ -7,11 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
-from .result import ToolResult
+from .result import ToolOutput
 
 
 class SearchFilesTool(Tool):
     """Search file contents by regex pattern under a directory."""
+
+    @property
+    def layer(self) -> str:
+        return "kernel"
 
     @property
     def name(self) -> str:
@@ -58,13 +62,14 @@ class SearchFilesTool(Tool):
         path: str = ".",
         glob: str = "*",
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolOutput:
+        del context
         try:
             root = self._resolve_path(path)
         except PermissionError as exc:
-            return ToolResult.failure("permission_denied", f"[安全拦截] {exc}")
+            return ToolOutput.failure("permission_denied", f"[安全拦截] {exc}")
         if not root.is_dir():
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"不是目录: {path}",
                 data={"path": path},
@@ -72,7 +77,7 @@ class SearchFilesTool(Tool):
         try:
             regex = re.compile(pattern)
         except re.error as exc:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "invalid_args",
                 f"正则表达式无效: {exc}",
                 data={"pattern": pattern},
@@ -92,7 +97,7 @@ class SearchFilesTool(Tool):
                     matches.append(f"{rel}:{lineno}: {line.rstrip()}")
 
         if not matches:
-            return ToolResult.failure(
+            return ToolOutput.failure(
                 "not_found",
                 f"未找到匹配: {pattern}",
                 data={"pattern": pattern, "path": path, "total_matches": 0, "matches": []},
@@ -100,26 +105,8 @@ class SearchFilesTool(Tool):
 
         total_matches = len(matches)
         preview_matches = matches[: self._MAX_MATCHES]
-        if total_matches <= self._MAX_MATCHES:
-            return ToolResult.success(
-                f"找到 {total_matches} 处匹配。",
-                data={
-                    "pattern": pattern,
-                    "path": path,
-                    "glob": glob,
-                    "total_matches": total_matches,
-                    "matches": preview_matches,
-                },
-            )
-
-        artifact = self._require_session_manager().put_artifact_text(
-            context.session_id,
-            "\n".join(matches),
-            kind="text",
-            name=f"search:{pattern}",
-        )
-        return ToolResult.success(
-            f"找到 {total_matches} 处匹配，已返回前 {self._MAX_MATCHES} 条。",
+        return ToolOutput.success(
+            f"找到 {total_matches} 处匹配。",
             data={
                 "pattern": pattern,
                 "path": path,
@@ -127,8 +114,10 @@ class SearchFilesTool(Tool):
                 "total_matches": total_matches,
                 "matches": preview_matches,
             },
-            artifact=artifact,
-            truncated=True,
+            content=None if total_matches <= self._MAX_MATCHES else "\n".join(matches),
+            content_kind="text",
+            content_name=f"search:{pattern}",
+            truncated=total_matches > self._MAX_MATCHES,
         )
 
     def _walk(self, root: Path, glob_pattern: str):

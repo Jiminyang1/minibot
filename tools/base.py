@@ -5,13 +5,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
-from .result import ToolResult
+from .result import ToolOutput
 
-if TYPE_CHECKING:
-    from ..session import SessionManager
+
+ToolLayer: TypeAlias = Literal["kernel", "extension"]
 
 
 @dataclass(frozen=True)
@@ -28,10 +27,8 @@ class Tool(ABC):
         self,
         *,
         workspace: Path | None = None,
-        session_manager: SessionManager | None = None,
     ) -> None:
         self._workspace = workspace.resolve() if workspace else None
-        self._session_manager = session_manager
 
     @property
     @abstractmethod
@@ -49,12 +46,17 @@ class Tool(ABC):
         """JSON Schema for the tool's parameters."""
 
     @property
+    def layer(self) -> ToolLayer:
+        """Architectural layer for the tool."""
+        return "extension"
+
+    @property
     def requires_approval(self) -> bool:
         """Whether this tool needs user confirmation before execution."""
         return False
 
     @abstractmethod
-    def execute(self, *, context: ToolExecutionContext, **kwargs: Any) -> ToolResult:
+    def execute(self, *, context: ToolExecutionContext, **kwargs: Any) -> ToolOutput:
         """Run the tool with named parameters."""
 
     def _resolve_path(self, path: str) -> Path:
@@ -67,11 +69,6 @@ class Tool(ABC):
                 f"路径 {path} 超出工作目录 {self._workspace}"
             )
         return resolved
-
-    def _require_session_manager(self) -> SessionManager:
-        if self._session_manager is None:
-            raise RuntimeError("当前工具未配置 SessionManager。")
-        return self._session_manager
 
     def to_definition(self) -> dict[str, Any]:
         """Return an OpenAI-compatible function definition."""

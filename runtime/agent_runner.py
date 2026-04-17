@@ -11,7 +11,8 @@ from typing import Any
 from ..llm import LLMClient, LLMResponse, TokenUsage
 from ..session import MessageEvent
 from ..tools import ToolExecutionContext, ToolRegistry
-from ..tools.result import ToolResult
+from ..tools.result import ToolOutput
+from .tool_output_materializer import ToolOutputMaterializer
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -74,11 +75,13 @@ class AgentRunner:
         llm: LLMClient,
         tool_registry: ToolRegistry,
         *,
+        materializer: ToolOutputMaterializer,
         event_handler: Callable[[str], None] | None = None,
         approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
+        self.materializer = materializer
         self.event_handler = event_handler
         self.approval_handler = approval_handler
 
@@ -128,17 +131,18 @@ class AgentRunner:
 
                 tool = self.tool_registry.get(tc.name)
                 if tool and tool.requires_approval and not self._approve(tc.name, args):
-                    result = ToolResult.failure(
+                    output = ToolOutput.failure(
                         "denied",
                         f"工具 {tc.name} 未获批准执行。",
                         data={"tool": tc.name, "args": args},
                     )
                 else:
-                    result = self.tool_registry.execute(
+                    output = self.tool_registry.execute(
                         tc.name,
                         args,
                         context=tool_context,
                     )
+                result = self.materializer.materialize(output, context=tool_context)
                 self._emit(f"返回: {result.summary}")
 
                 tool_msg: dict[str, Any] = {

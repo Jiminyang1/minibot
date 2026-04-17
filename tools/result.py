@@ -1,4 +1,4 @@
-"""Structured tool results for MiniBot."""
+"""Structured tool outputs and materialized tool results for MiniBot."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Literal, TypeAlias
 
-from ..artifacts import ArtifactRef
+from ..artifacts import ArtifactKind, ArtifactRef
 
 ToolCode: TypeAlias = Literal[
     "success",
@@ -21,23 +21,18 @@ ToolCode: TypeAlias = Literal[
 
 
 @dataclass(frozen=True)
-class ToolResult:
-    """Stable envelope for every tool response.
+class ToolOutput:
+    """Raw semantic result produced by a tool before runtime materialization."""
 
-    ``data`` is for *structured metadata* (paths, counts, short previews).
-    Bulk content must go through the artifact store and be referenced via
-    ``artifact``. Violators fail fast in ``__post_init__``.
-    """
-
-    # Soft cap on serialized ``data`` to prevent bypassing the artifact
-    # mechanism. Raise this only if you have a concrete reason.
     _MAX_DATA_CHARS = 8000
 
     ok: bool
     code: ToolCode
     summary: str
     data: dict[str, Any] = field(default_factory=dict)
-    artifact: ArtifactRef | None = None
+    content: str | None = None
+    content_kind: ArtifactKind = "text"
+    content_name: str | None = None
     truncated: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -47,9 +42,9 @@ class ToolResult:
         size = len(json.dumps(self.data, ensure_ascii=False))
         if size > self._MAX_DATA_CHARS:
             raise ValueError(
-                f"ToolResult.data 序列化长度 {size} 超过上限 "
-                f"{self._MAX_DATA_CHARS}；请把大内容存为 artifact，"
-                f"data 只保留结构化元信息与短预览。"
+                f"ToolOutput.data 序列化长度 {size} 超过上限 "
+                f"{self._MAX_DATA_CHARS}；请把大正文放进 content，"
+                "data 只保留结构化元信息与短字段。"
             )
 
     @classmethod
@@ -58,16 +53,20 @@ class ToolResult:
         summary: str,
         *,
         data: dict[str, Any] | None = None,
-        artifact: ArtifactRef | None = None,
+        content: str | None = None,
+        content_kind: ArtifactKind = "text",
+        content_name: str | None = None,
         truncated: bool = False,
         meta: dict[str, Any] | None = None,
-    ) -> "ToolResult":
+    ) -> "ToolOutput":
         return cls(
             ok=True,
             code="success",
             summary=summary,
             data=data or {},
-            artifact=artifact,
+            content=content,
+            content_kind=content_kind,
+            content_name=content_name,
             truncated=truncated,
             meta=meta or {},
         )
@@ -79,16 +78,20 @@ class ToolResult:
         summary: str,
         *,
         data: dict[str, Any] | None = None,
-        artifact: ArtifactRef | None = None,
+        content: str | None = None,
+        content_kind: ArtifactKind = "text",
+        content_name: str | None = None,
         truncated: bool = False,
         meta: dict[str, Any] | None = None,
-    ) -> "ToolResult":
+    ) -> "ToolOutput":
         return cls(
             ok=False,
             code=code,
             summary=summary,
             data=data or {},
-            artifact=artifact,
+            content=content,
+            content_kind=content_kind,
+            content_name=content_name,
             truncated=truncated,
             meta=meta or {},
         )
@@ -100,7 +103,7 @@ class ToolResult:
         *,
         data: dict[str, Any] | None = None,
         meta: dict[str, Any] | None = None,
-    ) -> "ToolResult":
+    ) -> "ToolOutput":
         return cls(
             ok=True,
             code="noop",
@@ -108,6 +111,19 @@ class ToolResult:
             data=data or {},
             meta=meta or {},
         )
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Final materialized envelope returned to the model."""
+
+    ok: bool
+    code: ToolCode
+    summary: str
+    data: dict[str, Any] = field(default_factory=dict)
+    artifact: ArtifactRef | None = None
+    truncated: bool = False
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_model_dict(self) -> dict[str, Any]:
         return {
