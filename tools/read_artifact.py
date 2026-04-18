@@ -120,6 +120,7 @@ class ReadArtifactTool(Tool):
             offset=page.offset,
             requested_limit=page.limit,
             total_chars=page.total_chars,
+            file_sha256=page.file_sha256,
         )
         if not content:
             return ToolOutput.failure(
@@ -133,23 +134,27 @@ class ReadArtifactTool(Tool):
         next_offset = returned_end if returned_end < page.total_chars else None
         has_more = next_offset is not None
 
+        data: dict[str, Any] = {
+            "artifact_id": artifact_id,
+            "kind": page.ref.kind,
+            "name": page.ref.name,
+            "content": content,
+            "offset": page.offset,
+            "limit": page.limit,
+            "returned_chars": returned_chars,
+            "next_offset": next_offset,
+            "has_more": has_more,
+            "total_chars": page.total_chars,
+        }
+        if page.file_sha256 is not None:
+            data["file_sha256"] = page.file_sha256
+
         return ToolOutput.success(
             (
                 f"已读取 artifact {artifact_id} "
                 f"({page.offset}-{returned_end}/{page.total_chars} 字符)"
             ),
-            data={
-                "artifact_id": artifact_id,
-                "kind": page.ref.kind,
-                "name": page.ref.name,
-                "content": content,
-                "offset": page.offset,
-                "limit": page.limit,
-                "returned_chars": returned_chars,
-                "next_offset": next_offset,
-                "has_more": has_more,
-                "total_chars": page.total_chars,
-            },
+            data=data,
             truncated=has_more,
         )
 
@@ -163,8 +168,9 @@ class ReadArtifactTool(Tool):
         offset: int,
         requested_limit: int,
         total_chars: int,
+        file_sha256: str | None = None,
     ) -> str:
-        base_data = {
+        base_data: dict[str, Any] = {
             "artifact_id": artifact_id,
             "kind": kind,
             "name": name,
@@ -175,6 +181,8 @@ class ReadArtifactTool(Tool):
             "has_more": False,
             "total_chars": total_chars,
         }
+        if file_sha256 is not None:
+            base_data["file_sha256"] = file_sha256
         max_size = ToolOutput._MAX_DATA_CHARS
 
         def serialized_size(text: str) -> int:

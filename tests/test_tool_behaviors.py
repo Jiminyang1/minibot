@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import shlex
 import sys
 import tempfile
@@ -19,6 +20,11 @@ from minibot.tools.fetch_url import FetchUrlTool, _FetchedPage
 from minibot.tools.read_artifact import ReadArtifactTool
 from minibot.tools.read_file import ReadFileTool
 from minibot.tools.search_files import SearchFilesTool
+from minibot.tools.write_file import WriteFileTool
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class _ArticleHandler(BaseHTTPRequestHandler):
@@ -310,6 +316,141 @@ class ToolBehaviorTests(unittest.TestCase):
                 artifact_id=result.artifact.id,
             )
             self.assertIn("topic item", artifact_result.data["content"])
+
+
+class FileHashTests(unittest.TestCase):
+    """Cover the sha256 optimistic lock around ``write_file``."""
+
+    def _materialize(self, workspace: Path, context: ToolExecutionContext, output):
+        return ToolOutputMaterializer(ArtifactStore(workspace)).materialize(
+            output,
+            context=context,
+        )
+
+    def test_read_file_small_returns_file_sha256(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            body = "hello world\n"
+            (workspace / "note.txt").write_text(body, encoding="utf-8")
+
+            output = ReadFileTool(workspace=workspace).execute(
+                context=context,
+                path="note.txt",
+            )
+            result = self._materialize(workspace, context, output)
+
+            self.assertTrue(result.ok)
+            self.assertFalse(result.truncated)
+            self.assertEqual(result.data["file_sha256"], _sha(body))
+
+    def test_read_file_large_flows_hash_through_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            store = ArtifactStore(workspace)
+            context = ToolExecutionContext(session_id="s_test")
+            body = "a" * 3500
+            (workspace / "long.txt").write_text(body, encoding="utf-8")
+
+            output = ReadFileTool(workspace=workspace).execute(
+                context=context,
+                path="long.txt",
+            )
+            result = self._materialize(workspace, context, output)
+
+            self.assertTrue(result.truncated)
+            self.assertEqual(result.data["file_sha256"], _sha(body))
+
+            artifact_result = ReadArtifactTool(store).execute(
+                context=context,
+                artifact_id=result.artifact.id,
+            )
+            self.assertEqual(artifact_result.data["file_sha256"], _sha(body))
+
+    def test_write_new_file_does_not_require_expected_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = WriteFileTool(workspace=workspace)
+
+            new_body = "fresh\n"
+            result = tool.execute(context=context, path="new.txt", content=new_body)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["file_sha256"], _sha(new_body))
+            self.assertTrue((workspace / "new.txt").exists())
+
+    def test_write_existing_file_with_matching_hash_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = WriteFileTool(workspace=workspace)
+            original = "one"
+            (workspace / "a.txt").write_text(original, encoding="utf-8")
+
+            new_body = "two"
+            result = tool.execute(
+                context=context,
+                path="a.txt",
+                content=new_body,
+                expected_sha256=_sha(original),
+            )
+
+            self.assertTrue(result.ok)
+            # The returned hash must be for the new content, not the old one.
+            self.assertEqual(result.data["file_sha256"], _sha(new_body))
+            self.assertEqual(
+                (workspace / "a.txt").read_text(encoding="utf-8"),
+                new_body,
+            )
+
+    def test_write_existing_file_with_wrong_hash_returns_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = WriteFileTool(workspace=workspace)
+            original = "one"
+            (workspace / "a.txt").write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="a.txt",
+                content="two",
+                expected_sha256="deadbeef" * 8,
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "conflict")
+            self.assertEqual(result.data["expected_sha256"], "deadbeef" * 8)
+            self.assertEqual(result.data["current_sha256"], _sha(original))
+            # File must remain untouched.
+            self.assertEqual(
+                (workspace / "a.txt").read_text(encoding="utf-8"),
+                original,
+            )
+
+    def test_write_existing_file_without_hash_returns_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = WriteFileTool(workspace=workspace)
+            original = "one"
+            (workspace / "a.txt").write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="a.txt",
+                content="two",
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "conflict")
+            self.assertEqual(result.data["current_sha256"], _sha(original))
+            self.assertNotIn("expected_sha256", result.data)
+            self.assertEqual(
+                (workspace / "a.txt").read_text(encoding="utf-8"),
+                original,
+            )
 
 
 if __name__ == "__main__":

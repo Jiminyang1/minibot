@@ -9,12 +9,23 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 import uuid
 
 ArtifactKind: TypeAlias = Literal["text", "json", "file", "diff"]
+
+
+def sha256_text(text: str) -> str:
+    """Return the hex SHA-256 digest of ``text`` as UTF-8 bytes.
+
+    Central helper so that all hash computations in the project (file reads,
+    artifact persistence, write-file optimistic lock) share the exact same
+    normalization. Anything that decodes to the same string hashes the same.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -40,6 +51,7 @@ class ArtifactPage:
     total_chars: int
     next_offset: int | None
     has_more: bool
+    file_sha256: str | None = None
 
 
 def _utc_now() -> str:
@@ -69,6 +81,7 @@ class ArtifactStore:
             "name": name,
             "created_at": _utc_now(),
             "content": content,
+            "file_sha256": sha256_text(content),
         }
         self._artifact_path(session_id, artifact_id).write_text(
             json.dumps(payload, ensure_ascii=False) + "\n",
@@ -90,6 +103,7 @@ class ArtifactStore:
         start = min(offset, total_chars)
         end = min(start + limit, total_chars)
         next_offset = end if end < total_chars else None
+        stored_sha = payload.get("file_sha256")
         return ArtifactPage(
             ref=ArtifactRef(
                 id=str(payload["id"]),
@@ -102,6 +116,7 @@ class ArtifactStore:
             total_chars=total_chars,
             next_offset=next_offset,
             has_more=next_offset is not None,
+            file_sha256=str(stored_sha) if stored_sha else None,
         )
 
     def _session_dir(self, session_id: str) -> Path:

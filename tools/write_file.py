@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..artifacts import sha256_text
 from .base import Tool, ToolExecutionContext
 from .result import ToolOutput
 
@@ -26,7 +27,10 @@ class WriteFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return "写入文件内容。如果文件已存在则覆盖，不存在则创建（含中间目录）。"
+        return (
+            "写入文件内容。如果文件已存在则覆盖（需带 expected_sha256），"
+            "不存在则创建（含中间目录）。"
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -41,6 +45,13 @@ class WriteFileTool(Tool):
                     "type": "string",
                     "description": "要写入的文件内容",
                 },
+                "expected_sha256": {
+                    "type": "string",
+                    "description": (
+                        "覆盖已有文件时必填，应来自最近一次 read_file 或 read_artifact "
+                        "返回的 data.file_sha256；不匹配会返回 conflict。新建文件可不传。"
+                    ),
+                },
             },
             "required": ["path", "content"],
             "additionalProperties": False,
@@ -54,6 +65,7 @@ class WriteFileTool(Tool):
         context: ToolExecutionContext,
         path: str,
         content: str,
+        expected_sha256: str | None = None,
         **kwargs: Any,
     ) -> ToolOutput:
         del context
@@ -67,7 +79,35 @@ class WriteFileTool(Tool):
                 f"内容过大 ({len(content.encode('utf-8'))} bytes)，上限 {self._MAX_SIZE} bytes。",
                 data={"path": path, "size_bytes": len(content.encode('utf-8'))},
             )
+
         existed = p.exists()
+        if existed:
+            try:
+                current_text = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return ToolOutput.failure(
+                    "conflict",
+                    "无法校验现有文件（非 UTF-8），拒绝覆盖。",
+                    data={"path": path},
+                )
+            current_sha = sha256_text(current_text)
+            if expected_sha256 is None:
+                return ToolOutput.failure(
+                    "conflict",
+                    "覆盖已有文件需提供 expected_sha256（请先 read_file 获取）。",
+                    data={"path": path, "current_sha256": current_sha},
+                )
+            if expected_sha256 != current_sha:
+                return ToolOutput.failure(
+                    "conflict",
+                    "文件已被修改，sha256 不匹配。请重新 read_file 再写。",
+                    data={
+                        "path": path,
+                        "expected_sha256": expected_sha256,
+                        "current_sha256": current_sha,
+                    },
+                )
+
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
@@ -83,5 +123,6 @@ class WriteFileTool(Tool):
                 "path": path,
                 "chars_written": len(content),
                 "created": not existed,
+                "file_sha256": sha256_text(content),
             },
         )

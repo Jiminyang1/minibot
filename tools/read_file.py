@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..artifacts import sha256_text
 from .base import Tool, ToolExecutionContext
 from .result import ToolOutput
 
@@ -79,6 +80,7 @@ class ReadFileTool(Tool):
             data={
                 "path": path,
                 "total_chars": total_chars,
+                "file_sha256": sha256_text(content),
             },
             content=content,
             content_kind="file",

@@ -15,6 +15,7 @@ ToolCode: TypeAlias = Literal[
     "permission_denied",
     "timeout",
     "denied",
+    "conflict",
     "error",
     "noop",
 ]
