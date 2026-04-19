@@ -52,6 +52,10 @@ class _MacOSAppTool(Tool):
         super().__init__()
         self.bridge = bridge
 
+    @property
+    def exclusive(self) -> bool:
+        return True
+
     def _bridge_failure(self, exc: AppleScriptBridgeError) -> ToolOutput:
         return ToolOutput.failure(exc.code, exc.message, data=exc.data)
 

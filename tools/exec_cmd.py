@@ -60,6 +60,10 @@ class ExecTool(Tool):
         return True
 
     @property
+    def exclusive(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return "执行 shell 命令"
 

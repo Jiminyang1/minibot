@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from minibot.artifacts import ArtifactStore
 from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
 from minibot.tools.base import ToolExecutionContext
+from minibot.tools.edit_file import EditFileTool
 from minibot.tools.exec_cmd import ExecTool
 from minibot.tools.fetch_url import FetchUrlTool, _FetchedPage
 from minibot.tools.read_artifact import ReadArtifactTool
@@ -451,6 +452,164 @@ class FileHashTests(unittest.TestCase):
                 (workspace / "a.txt").read_text(encoding="utf-8"),
                 original,
             )
+
+
+class EditFileTests(unittest.TestCase):
+    """Cover the hash-guarded, line-based ``edit_file`` contract."""
+
+    def test_edit_file_replace_range_with_matching_hash_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = EditFileTool(workspace=workspace)
+            original = "alpha\nbeta\nrepeat\nrepeat\ngamma\n"
+            (workspace / "note.txt").write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="note.txt",
+                expected_sha256=_sha(original),
+                edits=[
+                    {
+                        "op": "replace",
+                        "start_line": 4,
+                        "end_line": 4,
+                        "old_text": "repeat\n",
+                        "new_text": "delta\n",
+                    }
+                ],
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["previous_sha256"], _sha(original))
+            updated = "alpha\nbeta\nrepeat\ndelta\ngamma\n"
+            self.assertEqual((workspace / "note.txt").read_text(encoding="utf-8"), updated)
+            self.assertEqual(result.data["file_sha256"], _sha(updated))
+
+    def test_edit_file_insert_and_append_in_one_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = EditFileTool(workspace=workspace)
+            original = "first\nthird\n"
+            (workspace / "flow.txt").write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="flow.txt",
+                expected_sha256=_sha(original),
+                edits=[
+                    {
+                        "op": "insert_after",
+                        "line": 1,
+                        "new_text": "second\n",
+                    },
+                    {
+                        "op": "append",
+                        "new_text": "fourth\n",
+                    },
+                ],
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(
+                (workspace / "flow.txt").read_text(encoding="utf-8"),
+                "first\nsecond\nthird\nfourth\n",
+            )
+
+    def test_edit_file_with_stale_hash_returns_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = EditFileTool(workspace=workspace)
+            original = "one\ntwo\n"
+            path = workspace / "a.txt"
+            path.write_text(original, encoding="utf-8")
+            stale_sha = _sha(original)
+            path.write_text("one\nchanged\n", encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="a.txt",
+                expected_sha256=stale_sha,
+                edits=[
+                    {
+                        "op": "replace",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "old_text": "two\n",
+                        "new_text": "three\n",
+                    }
+                ],
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "conflict")
+            self.assertEqual(result.data["expected_sha256"], stale_sha)
+            self.assertEqual(result.data["current_sha256"], _sha("one\nchanged\n"))
+            self.assertEqual(path.read_text(encoding="utf-8"), "one\nchanged\n")
+
+    def test_edit_file_rejects_wrong_old_text_for_line_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = EditFileTool(workspace=workspace)
+            original = "line1\nline2\n"
+            path = workspace / "mismatch.txt"
+            path.write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="mismatch.txt",
+                expected_sha256=_sha(original),
+                edits=[
+                    {
+                        "op": "replace",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "old_text": "wrong\n",
+                        "new_text": "lineX\n",
+                    }
+                ],
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "invalid_args")
+            self.assertIn("actual_text_preview", result.data)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_edit_file_rejects_overlapping_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            context = ToolExecutionContext(session_id="s_test")
+            tool = EditFileTool(workspace=workspace)
+            original = "a\nb\nc\n"
+            path = workspace / "overlap.txt"
+            path.write_text(original, encoding="utf-8")
+
+            result = tool.execute(
+                context=context,
+                path="overlap.txt",
+                expected_sha256=_sha(original),
+                edits=[
+                    {
+                        "op": "replace",
+                        "start_line": 2,
+                        "end_line": 2,
+                        "old_text": "b\n",
+                        "new_text": "beta\n",
+                    },
+                    {
+                        "op": "insert_after",
+                        "line": 2,
+                        "new_text": "after-beta\n",
+                    },
+                ],
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "invalid_args")
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":

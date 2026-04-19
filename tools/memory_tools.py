@@ -30,6 +30,10 @@ class RememberTool(Tool):
         return "remember"
 
     @property
+    def exclusive(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return (
             "把一条关于用户的稳定事实写入长期记忆，跨会话可见。"
@@ -86,6 +90,10 @@ class ForgetTool(Tool):
     @property
     def name(self) -> str:
         return "forget"
+
+    @property
+    def exclusive(self) -> bool:
+        return True
 
     @property
     def description(self) -> str:

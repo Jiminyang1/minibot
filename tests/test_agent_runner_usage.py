@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -72,6 +75,95 @@ class _EchoTool(Tool):
     def execute(self, *, context: ToolExecutionContext, value: str) -> ToolOutput:
         del context
         return ToolOutput.success("ok", data={"value": value})
+
+
+class _TrackingState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.events: list[str] = []
+        self.running = 0
+        self.max_running = 0
+        self.executions: dict[str, int] = {}
+
+    def start(self, name: str) -> None:
+        with self.lock:
+            self.events.append(f"start:{name}")
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            self.executions[name] = self.executions.get(name, 0) + 1
+
+    def end(self, name: str) -> None:
+        with self.lock:
+            self.events.append(f"end:{name}")
+            self.running -= 1
+
+
+class _TrackingTool(Tool):
+    def __init__(
+        self,
+        name: str,
+        *,
+        state: _TrackingState,
+        delay: float = 0.03,
+        read_only: bool = False,
+        exclusive: bool = False,
+        requires_approval: bool = False,
+        body: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._name = name
+        self._state = state
+        self._delay = delay
+        self._read_only = read_only
+        self._exclusive = exclusive
+        self._requires_approval = requires_approval
+        self._body = body
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._name
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    @property
+    def exclusive(self) -> bool:
+        return self._exclusive
+
+    @property
+    def requires_approval(self) -> bool:
+        return self._requires_approval
+
+    def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolOutput:
+        del context, kwargs
+        self._state.start(self._name)
+        try:
+            time.sleep(self._delay)
+            if self._body is not None:
+                return ToolOutput.success(
+                    f"{self._name} ok",
+                    data={"tool": self._name},
+                    content=self._body,
+                    content_kind="text",
+                    content_name=self._name,
+                )
+            return ToolOutput.success(f"{self._name} ok", data={"tool": self._name})
+        finally:
+            self._state.end(self._name)
 
 
 class AgentRunnerUsageTests(unittest.TestCase):
@@ -173,6 +265,267 @@ class AgentRunnerUsageTests(unittest.TestCase):
             self.assertIsNotNone(exc.usage)
             assert exc.usage is not None
             self.assertEqual(exc.usage.total_tokens, 110)
+
+    def test_batches_concurrency_safe_tools_before_exclusive_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(_TrackingTool("read_a", state=state, read_only=True, delay=0.05))
+            registry.register(_TrackingTool("read_b", state=state, read_only=True, delay=0.05))
+            registry.register(
+                _TrackingTool(
+                    "exec_like",
+                    state=state,
+                    read_only=True,
+                    exclusive=True,
+                    delay=0.01,
+                )
+            )
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="read_a", arguments="{}"),
+                                ToolCall(id="call_2", name="read_b", arguments="{}"),
+                                ToolCall(id="call_3", name="exec_like", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                max_parallel_tools=4,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tools"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(state.max_running, 2)
+            self.assertGreater(
+                state.events.index("start:exec_like"),
+                state.events.index("end:read_a"),
+            )
+            self.assertGreater(
+                state.events.index("start:exec_like"),
+                state.events.index("end:read_b"),
+            )
+            self.assertEqual(
+                [event.name for event in outcome.events if event.role == "tool"],
+                ["read_a", "read_b", "exec_like"],
+            )
+
+    def test_parallel_tool_messages_preserve_original_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(_TrackingTool("slow", state=state, read_only=True, delay=0.05))
+            registry.register(_TrackingTool("fast", state=state, read_only=True, delay=0.01))
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="slow", arguments="{}"),
+                                ToolCall(id="call_2", name="fast", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                max_parallel_tools=4,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tools"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(state.max_running, 2)
+            self.assertEqual(
+                [event.name for event in outcome.events if event.role == "tool"],
+                ["slow", "fast"],
+            )
+
+    def test_max_parallel_tools_one_falls_back_to_serial_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(_TrackingTool("read_a", state=state, read_only=True))
+            registry.register(_TrackingTool("read_b", state=state, read_only=True))
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="read_a", arguments="{}"),
+                                ToolCall(id="call_2", name="read_b", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                max_parallel_tools=1,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tools"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(state.max_running, 1)
+            self.assertEqual(
+                state.events,
+                ["start:read_a", "end:read_a", "start:read_b", "end:read_b"],
+            )
+
+    def test_denied_tool_in_safe_batch_does_not_block_other_safe_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(
+                _TrackingTool(
+                    "approved",
+                    state=state,
+                    read_only=True,
+                    requires_approval=True,
+                )
+            )
+            registry.register(
+                _TrackingTool(
+                    "denied",
+                    state=state,
+                    read_only=True,
+                    requires_approval=True,
+                )
+            )
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="denied", arguments="{}"),
+                                ToolCall(id="call_2", name="approved", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                approval_handler=lambda name, args: name != "denied",
+                max_parallel_tools=4,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tools"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(state.executions.get("denied", 0), 0)
+            self.assertEqual(state.executions.get("approved", 0), 1)
+
+            tool_events = [event for event in outcome.events if event.role == "tool"]
+            denied_payload = json.loads(tool_events[0].content)
+            approved_payload = json.loads(tool_events[1].content)
+            self.assertEqual(denied_payload["code"], "denied")
+            self.assertEqual(approved_payload["code"], "success")
+
+    def test_parallel_large_results_materialize_distinct_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(
+                _TrackingTool(
+                    "large_a",
+                    state=state,
+                    read_only=True,
+                    body="A" * 3500,
+                )
+            )
+            registry.register(
+                _TrackingTool(
+                    "large_b",
+                    state=state,
+                    read_only=True,
+                    body="B" * 3600,
+                )
+            )
+            store = ArtifactStore(workspace)
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="large_a", arguments="{}"),
+                                ToolCall(id="call_2", name="large_b", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(store),
+                max_parallel_tools=4,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tools"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            tool_events = [event for event in outcome.events if event.role == "tool"]
+            payload_a = json.loads(tool_events[0].content)
+            payload_b = json.loads(tool_events[1].content)
+            artifact_a = payload_a["artifact"]["id"]
+            artifact_b = payload_b["artifact"]["id"]
+
+            self.assertNotEqual(artifact_a, artifact_b)
+            self.assertEqual(
+                store.read_page("s_test", artifact_a, offset=0, limit=5000).content,
+                "A" * 3500,
+            )
+            self.assertEqual(
+                store.read_page("s_test", artifact_b, offset=0, limit=5000).content,
+                "B" * 3600,
+            )
 
 
 if __name__ == "__main__":

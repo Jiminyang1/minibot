@@ -26,6 +26,10 @@ class WriteFileTool(Tool):
         return True
 
     @property
+    def exclusive(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return (
             "写入文件内容。如果文件已存在则覆盖（需带 expected_sha256），"

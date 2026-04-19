@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..llm import LLMClient, LLMResponse, TokenUsage
+from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from ..session import MessageEvent
 from ..tools import ToolExecutionContext, ToolRegistry
+from ..tools.base import Tool
+from ..tools.registry import PreparedToolCall
 from ..tools.result import ToolOutput
 from .tool_output_materializer import ToolOutputMaterializer
 
@@ -67,6 +70,15 @@ class PartialRunError(Exception):
     reply: str | None = None
 
 
+@dataclass(frozen=True)
+class _PlannedToolCall:
+    """One model-requested tool call annotated with local execution metadata."""
+
+    tool_call: ToolCall
+    args: dict[str, Any]
+    tool: Tool | None
+
+
 class AgentRunner:
     """Execute the tool-calling LLM loop for one prepared request."""
 
@@ -78,12 +90,14 @@ class AgentRunner:
         materializer: ToolOutputMaterializer,
         event_handler: Callable[[str], None] | None = None,
         approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
+        max_parallel_tools: int = 4,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
         self.materializer = materializer
         self.event_handler = event_handler
         self.approval_handler = approval_handler
+        self.max_parallel_tools = max_parallel_tools
 
     def run(self, run_spec: RunSpec) -> RunOutcome:
         """Run one prepared request until the model returns a final answer."""
@@ -125,30 +139,17 @@ class AgentRunner:
             self._emit(
                 f"第 {iteration} 轮: 调用 {len(resp.tool_calls)} 个工具 ({elapsed_ms} ms)"
             )
-            for tc in resp.tool_calls:
-                args = _parse_args(tc.arguments)
-                self._emit(f"工具: {tc.name}({args})")
+            planned_tool_calls = self._plan_tool_calls(resp.tool_calls)
+            tool_outputs = self._execute_tool_calls(planned_tool_calls, tool_context)
 
-                tool = self.tool_registry.get(tc.name)
-                if tool and tool.requires_approval and not self._approve(tc.name, args):
-                    output = ToolOutput.failure(
-                        "denied",
-                        f"工具 {tc.name} 未获批准执行。",
-                        data={"tool": tc.name, "args": args},
-                    )
-                else:
-                    output = self.tool_registry.execute(
-                        tc.name,
-                        args,
-                        context=tool_context,
-                    )
+            for planned, output in zip(planned_tool_calls, tool_outputs):
                 result = self.materializer.materialize(output, context=tool_context)
                 self._emit(f"返回: {result.summary}")
 
                 tool_msg: dict[str, Any] = {
                     "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
+                    "tool_call_id": planned.tool_call.id,
+                    "name": planned.tool_call.name,
                     "content": result.to_model_content(),
                 }
                 messages.append(tool_msg)
@@ -177,6 +178,126 @@ class AgentRunner:
         if self.approval_handler is None:
             return True
         return self.approval_handler(tool_name, args)
+
+    def _plan_tool_calls(self, tool_calls: list[ToolCall]) -> list[_PlannedToolCall]:
+        planned: list[_PlannedToolCall] = []
+        for tool_call in tool_calls:
+            args = _parse_args(tool_call.arguments)
+            self._emit(f"工具: {tool_call.name}({args})")
+            planned.append(
+                _PlannedToolCall(
+                    tool_call=tool_call,
+                    args=args,
+                    tool=self.tool_registry.get(tool_call.name),
+                )
+            )
+        return planned
+
+    def _execute_tool_calls(
+        self,
+        planned_tool_calls: list[_PlannedToolCall],
+        context: ToolExecutionContext,
+    ) -> list[ToolOutput]:
+        outputs: list[ToolOutput] = []
+        for batch in self._partition_tool_batches(planned_tool_calls):
+            if len(batch) > 1:
+                outputs.extend(self._execute_parallel_batch(batch, context))
+                continue
+            outputs.append(self._execute_planned_tool_call(batch[0], context))
+        return outputs
+
+    def _partition_tool_batches(
+        self,
+        planned_tool_calls: list[_PlannedToolCall],
+    ) -> list[list[_PlannedToolCall]]:
+        if self.max_parallel_tools <= 1:
+            return [[planned_tool_call] for planned_tool_call in planned_tool_calls]
+
+        batches: list[list[_PlannedToolCall]] = []
+        current_batch: list[_PlannedToolCall] = []
+        for planned_tool_call in planned_tool_calls:
+            if planned_tool_call.tool and planned_tool_call.tool.concurrency_safe:
+                current_batch.append(planned_tool_call)
+                continue
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+            batches.append([planned_tool_call])
+        if current_batch:
+            batches.append(current_batch)
+        return batches
+
+    def _execute_parallel_batch(
+        self,
+        batch: list[_PlannedToolCall],
+        context: ToolExecutionContext,
+    ) -> list[ToolOutput]:
+        outputs: list[ToolOutput | None] = [None] * len(batch)
+        submitted: list[tuple[int, _PlannedToolCall, Any]] = []
+
+        for index, planned in enumerate(batch):
+            prepared_or_output = self._prepare_tool_call(planned, context)
+            if isinstance(prepared_or_output, ToolOutput):
+                outputs[index] = prepared_or_output
+                continue
+            submitted.append((index, planned, prepared_or_output))
+
+        if submitted:
+            max_workers = min(self.max_parallel_tools, len(submitted))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    (index, planned, executor.submit(self.tool_registry.invoke, prepared))
+                    for index, planned, prepared in submitted
+                ]
+                for index, planned, future in futures:
+                    try:
+                        outputs[index] = future.result()
+                    except Exception as exc:
+                        outputs[index] = ToolOutput.failure(
+                            "error",
+                            f"工具 {planned.tool_call.name} 执行失败: {exc}",
+                            data={"tool": planned.tool_call.name},
+                            meta={"exception": repr(exc)},
+                        )
+
+        return [
+            output
+            if output is not None
+            else ToolOutput.failure(
+                "error",
+                f"工具 {planned.tool_call.name} 未返回结果。",
+                data={"tool": planned.tool_call.name},
+            )
+            for planned, output in zip(batch, outputs)
+        ]
+
+    def _execute_planned_tool_call(
+        self,
+        planned: _PlannedToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolOutput:
+        prepared_or_output = self._prepare_tool_call(planned, context)
+        if isinstance(prepared_or_output, ToolOutput):
+            return prepared_or_output
+        return self.tool_registry.invoke(prepared_or_output)
+
+    def _prepare_tool_call(
+        self,
+        planned: _PlannedToolCall,
+        context: ToolExecutionContext,
+    ) -> PreparedToolCall | ToolOutput:
+        if planned.tool and planned.tool.requires_approval:
+            if not self._approve(planned.tool_call.name, planned.args):
+                return ToolOutput.failure(
+                    "denied",
+                    f"工具 {planned.tool_call.name} 未获批准执行。",
+                    data={"tool": planned.tool_call.name, "args": planned.args},
+                )
+        return self.tool_registry.prepare(
+            planned.tool_call.name,
+            planned.args,
+            context=context,
+        )
 
     def _emit(self, message: str) -> None:
         if self.event_handler:

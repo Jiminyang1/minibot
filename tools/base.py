@@ -55,6 +55,21 @@ class Tool(ABC):
         """Whether this tool needs user confirmation before execution."""
         return False
 
+    @property
+    def read_only(self) -> bool:
+        """Whether this tool is side-effect free and safe to batch."""
+        return False
+
+    @property
+    def exclusive(self) -> bool:
+        """Whether this tool should always run alone."""
+        return False
+
+    @property
+    def concurrency_safe(self) -> bool:
+        """Whether this tool may run with other concurrency-safe tools."""
+        return self.read_only and not self.exclusive
+
     @abstractmethod
     def execute(self, *, context: ToolExecutionContext, **kwargs: Any) -> ToolOutput:
         """Run the tool with named parameters."""

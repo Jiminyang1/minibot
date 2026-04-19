@@ -26,6 +26,10 @@ class ReadFileTool(Tool):
         return "读取文件内容"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",

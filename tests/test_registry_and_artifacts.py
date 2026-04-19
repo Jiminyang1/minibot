@@ -136,6 +136,34 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.code, "error")
 
+    def test_prepare_returns_validated_invocation(self) -> None:
+        prepared = self.registry.prepare(
+            "echo",
+            {"value": "ok"},
+            context=self.context,
+        )
+
+        self.assertEqual(prepared.tool.name, "echo")
+        self.assertEqual(prepared.args, {"value": "ok"})
+        self.assertEqual(prepared.context.session_id, "s_test")
+
+    def test_prepare_reuses_execute_validation_failures(self) -> None:
+        result = self.registry.prepare("echo", {}, context=self.context)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "invalid_args")
+
+    def test_invoke_executes_prepared_call(self) -> None:
+        prepared = self.registry.prepare(
+            "echo",
+            {"value": "hello"},
+            context=self.context,
+        )
+        result = self.registry.invoke(prepared)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["value"], "hello")
+
     def test_list_tools_can_filter_by_layer(self) -> None:
         self.assertEqual(
             [tool.name for tool in self.registry.list_tools(layer="kernel")],

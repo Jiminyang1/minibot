@@ -14,12 +14,14 @@ from minibot.skills import SkillRegistry
 from minibot.tools import (
     EditFileTool,
     ExecTool,
+    FetchUrlTool,
     ForgetTool,
     ListDirTool,
     ReadArtifactTool,
     ReadFileTool,
     RememberTool,
     SearchFilesTool,
+    WebSearchTool,
     WriteFileTool,
 )
 from minibot.tools.base import Tool, ToolExecutionContext
@@ -271,6 +273,34 @@ class ToolLayerTests(unittest.TestCase):
             ]
 
             self.assertTrue(all(tool.layer == "kernel" for tool in tools))
+
+    def test_concurrency_metadata_matches_v1_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            artifact_store = ArtifactStore(workspace)
+            memory_store = UserMemoryStore(root=workspace / "state")
+            skills = SkillRegistry.from_directory(workspace / "skills")
+
+            concurrency_safe = [
+                ReadFileTool(workspace=workspace),
+                ReadArtifactTool(artifact_store),
+                ReadSkillTool(skills),
+                ListDirTool(workspace=workspace),
+                SearchFilesTool(workspace=workspace),
+            ]
+            serial_only = [
+                WriteFileTool(workspace=workspace),
+                EditFileTool(workspace=workspace),
+                ExecTool(workspace=workspace),
+                RememberTool(memory_store),
+                ForgetTool(memory_store),
+                WebSearchTool(workspace=None),
+                FetchUrlTool(),
+            ]
+
+            self.assertTrue(all(tool.concurrency_safe for tool in concurrency_safe))
+            self.assertTrue(all(not tool.concurrency_safe for tool in serial_only))
+            self.assertTrue(all(tool.exclusive for tool in serial_only))
 
 
 if __name__ == "__main__":

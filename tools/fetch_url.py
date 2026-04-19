@@ -205,6 +205,14 @@ class FetchUrlTool(Tool):
         return "fetch_url"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def exclusive(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return (
             "抓取公开网页并提取可读正文、标题和链接。"

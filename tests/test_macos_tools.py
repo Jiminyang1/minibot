@@ -170,6 +170,21 @@ class MacOSToolTests(unittest.TestCase):
         self.assertTrue(NotesCreateTool(self.bridge).requires_approval)
         self.assertTrue(NotesAppendTool(self.bridge).requires_approval)
 
+    def test_all_macos_tools_are_serialized_for_v1(self) -> None:
+        tools = [
+            CalendarListEventsTool(self.bridge),
+            CalendarCreateEventTool(self.bridge),
+            RemindersListTool(self.bridge),
+            RemindersCreateTool(self.bridge),
+            RemindersCompleteTool(self.bridge),
+            NotesSearchTool(self.bridge),
+            NotesCreateTool(self.bridge),
+            NotesAppendTool(self.bridge),
+        ]
+
+        self.assertTrue(all(tool.exclusive for tool in tools))
+        self.assertTrue(all(not tool.concurrency_safe for tool in tools))
+
     def test_write_tools_return_stable_refs(self) -> None:
         calendar_result = CalendarCreateEventTool(self.bridge).execute(
             context=self.context,

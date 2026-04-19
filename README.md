@@ -17,6 +17,7 @@
 OPENAI_API_KEY=sk-xxx
 OPENAI_BASE_URL=
 MINIBOT_MODEL=gpt-5.4-mini
+MINIBOT_MAX_PARALLEL_TOOLS=4
 ```
 
 安装依赖并启动：
@@ -65,6 +66,7 @@ minibot/
 - `TurnEngine` 负责单轮编排和持久化
 - `ContextManager` 负责 system prompt、历史、memory 和 compact
 - `AgentRunner` 负责 tool-calling 循环
+- `AgentRunner` 支持对单轮内连续的安全只读工具做批并发执行
 - `ToolOutputMaterializer` 决定工具产出内联还是落盘为 artifact
 - `ToolRegistry` 统一管理工具定义和执行，支持按 `kernel`/`extension` 分层
 - 会话消息保存在 `.minibot/sessions/<session_id>/messages.jsonl`
@@ -177,6 +179,7 @@ skill_toolset()     → ReadSkillTool (按需加载 skills/*.md)  [kernel]
 ```bash
 MINIBOT_MODEL=gpt-5.4-mini
 MINIBOT_MAX_ITERATIONS=20
+MINIBOT_MAX_PARALLEL_TOOLS=4
 MINIBOT_MAX_HISTORY_TURNS=40
 MINIBOT_COMPACT_TOKEN_THRESHOLD=40000
 MINIBOT_RESERVED_COMPLETION_TOKENS=4096

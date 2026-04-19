@@ -48,6 +48,14 @@ class WebSearchTool(Tool):
         return "web_search"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def exclusive(self) -> bool:
+        return True
+
+    @property
     def description(self) -> str:
         return (
             "搜索公开互联网并返回结果标题、摘要和链接。"

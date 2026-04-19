@@ -33,6 +33,10 @@ class ReadArtifactTool(Tool):
         return "读取先前工具返回的大结果 artifact，按字符分页回查。"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",

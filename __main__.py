@@ -83,6 +83,7 @@ def main() -> None:
         materializer=ToolOutputMaterializer(artifact_store),
         event_handler=tool_log,
         approval_handler=None if config.auto_approve else prompt_approval,
+        max_parallel_tools=config.max_parallel_tools,
     )
     turn_engine = TurnEngine(
         runner,

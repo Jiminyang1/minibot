@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 import inspect
 from typing import Any
 
 from .base import Tool, ToolExecutionContext, ToolLayer
 from .result import ToolOutput
+
+
+@dataclass(frozen=True)
+class PreparedToolCall:
+    """Validated tool invocation ready for execution."""
+
+    tool: Tool
+    args: dict[str, Any]
+    context: ToolExecutionContext
 
 
 class ToolRegistry:
@@ -35,13 +45,13 @@ class ToolRegistry:
     def get_definitions(self, *, layer: ToolLayer | None = None) -> list[dict[str, Any]]:
         return [tool.to_definition() for tool in self.list_tools(layer=layer)]
 
-    def execute(
+    def prepare(
         self,
         name: str,
         args: dict[str, Any],
         *,
         context: ToolExecutionContext,
-    ) -> ToolOutput:
+    ) -> PreparedToolCall | ToolOutput:
         if not isinstance(args, dict):
             return ToolOutput.failure(
                 "invalid_args",
@@ -66,19 +76,34 @@ class ToolRegistry:
                 data={"tool": name, "args": args},
             )
 
+        return PreparedToolCall(tool=tool, args=args, context=context)
+
+    def invoke(self, prepared: PreparedToolCall) -> ToolOutput:
         try:
-            result = tool.execute(context=context, **args)
+            result = prepared.tool.execute(context=prepared.context, **prepared.args)
         except Exception as exc:
             return ToolOutput.failure(
                 "error",
-                f"工具 {name} 执行失败: {exc}",
-                data={"tool": name},
+                f"工具 {prepared.tool.name} 执行失败: {exc}",
+                data={"tool": prepared.tool.name},
                 meta={"exception": repr(exc)},
             )
         if not isinstance(result, ToolOutput):
             return ToolOutput.failure(
                 "error",
-                f"工具 {name} 返回了无效结果类型。",
-                data={"tool": name, "returned_type": type(result).__name__},
+                f"工具 {prepared.tool.name} 返回了无效结果类型。",
+                data={"tool": prepared.tool.name, "returned_type": type(result).__name__},
             )
         return result
+
+    def execute(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        context: ToolExecutionContext,
+    ) -> ToolOutput:
+        prepared = self.prepare(name, args, context=context)
+        if isinstance(prepared, ToolOutput):
+            return prepared
+        return self.invoke(prepared)

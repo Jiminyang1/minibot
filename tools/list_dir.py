@@ -25,6 +25,10 @@ class ListDirTool(Tool):
         return "列出目录内容。返回文件名列表，目录名以 / 结尾。"
 
     @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
