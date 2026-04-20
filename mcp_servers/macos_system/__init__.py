@@ -1,4 +1,4 @@
-"""macOS-specific integrations."""
+"""Self-contained macOS MCP service implementation."""
 
 from .bridge import (
     AppleScriptBridge,

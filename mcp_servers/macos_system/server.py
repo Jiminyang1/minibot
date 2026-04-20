@@ -9,8 +9,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from minibot.macos import (  # type: ignore
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from bridge import (  # type: ignore
         AppleScriptBridge,
         AppleScriptBridgeError,
         CalendarEventRecord,
@@ -18,7 +18,7 @@ if __package__ in {None, ""}:
         ReminderRecord,
     )
 else:
-    from ..macos import (
+    from .bridge import (
         AppleScriptBridge,
         AppleScriptBridgeError,
         CalendarEventRecord,

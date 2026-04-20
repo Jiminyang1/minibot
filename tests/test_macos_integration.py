@@ -10,17 +10,8 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.macos import AppleScriptBridge
-from minibot.tools.base import ToolExecutionContext
-from minibot.tools.macos_apps import (
-    CalendarCreateEventTool,
-    CalendarListEventsTool,
-    NotesAppendTool,
-    NotesCreateTool,
-    NotesSearchTool,
-    RemindersCompleteTool,
-    RemindersCreateTool,
-)
+from minibot.mcp_servers.macos_system.bridge import AppleScriptBridge
+from minibot.mcp_servers.macos_system.server import MacOSSystemService
 
 
 _RUN_MACOS_INTEGRATION = (
@@ -50,7 +41,7 @@ def _run_cleanup(lines: list[str], *, args: list[str]) -> None:
 class MacOSIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge = AppleScriptBridge()
-        self.context = ToolExecutionContext(session_id="s_integration")
+        self.service = MacOSSystemService(self.bridge)
 
     def test_calendar_create_and_list_event(self) -> None:
         title = f"minibot-calendar-{uuid.uuid4().hex[:8]}"
@@ -61,27 +52,23 @@ class MacOSIntegrationTests(unittest.TestCase):
         calendar_name: str | None = None
 
         try:
-            created = CalendarCreateEventTool(self.bridge).execute(
-                context=self.context,
+            created = self.service.create_calendar_event(
                 title=title,
                 start_at=_iso_local(start_dt),
                 end_at=_iso_local(end_dt),
             )
-            self.assertTrue(created.ok, created.summary)
-            event_id = created.data["event_id"]
-            calendar_name = created.data["calendar_name"]
+            event_id = created["event_id"]
+            calendar_name = created["calendar_name"]
 
-            listed = CalendarListEventsTool(self.bridge).execute(
-                context=self.context,
+            listed = self.service.list_calendar_events(
                 start_at=_iso_local(start_dt - timedelta(hours=1)),
                 end_at=_iso_local(end_dt + timedelta(hours=1)),
                 calendar_name=calendar_name,
                 limit=10,
             )
-            self.assertTrue(listed.ok, listed.summary)
             self.assertIn(
                 event_id,
-                {item["event_id"] for item in listed.data["events"]},
+                {item["event_id"] for item in listed["events"]},
             )
         finally:
             if event_id and calendar_name:
@@ -99,19 +86,11 @@ class MacOSIntegrationTests(unittest.TestCase):
         reminder_id: str | None = None
 
         try:
-            created = RemindersCreateTool(self.bridge).execute(
-                context=self.context,
-                title=title,
-            )
-            self.assertTrue(created.ok, created.summary)
-            reminder_id = created.data["reminder_id"]
+            created = self.service.create_reminder(title=title)
+            reminder_id = created["reminder_id"]
 
-            completed = RemindersCompleteTool(self.bridge).execute(
-                context=self.context,
-                reminder_id=reminder_id,
-            )
-            self.assertTrue(completed.ok, completed.summary)
-            self.assertTrue(completed.data["completed"])
+            completed = self.service.complete_reminder(reminder_id=reminder_id)
+            self.assertTrue(completed["completed"])
         finally:
             if reminder_id:
                 _run_cleanup(
@@ -128,30 +107,25 @@ class MacOSIntegrationTests(unittest.TestCase):
         note_id: str | None = None
 
         try:
-            created = NotesCreateTool(self.bridge).execute(
-                context=self.context,
+            created = self.service.create_note(
                 title=title,
                 content="first line",
             )
-            self.assertTrue(created.ok, created.summary)
-            note_id = created.data["note_id"]
+            note_id = created["note_id"]
 
-            appended = NotesAppendTool(self.bridge).execute(
-                context=self.context,
+            appended = self.service.append_note(
                 note_id=note_id,
                 content="second line",
             )
-            self.assertTrue(appended.ok, appended.summary)
+            self.assertEqual(appended["note_id"], note_id)
 
-            listed = NotesSearchTool(self.bridge).execute(
-                context=self.context,
+            listed = self.service.search_notes(
                 query=title,
                 limit=10,
             )
-            self.assertTrue(listed.ok, listed.summary)
             self.assertIn(
                 note_id,
-                {item["note_id"] for item in listed.data["notes"]},
+                {item["note_id"] for item in listed["notes"]},
             )
         finally:
             if note_id:

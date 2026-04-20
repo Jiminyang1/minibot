@@ -24,7 +24,7 @@
         "type": "stdio",
         "command": "python3",
         "args": [
-          "mcp_servers/macos_system_server.py"
+          "mcp_servers/macos_system/server.py"
         ],
         "cwd": ".",
         "env": {}

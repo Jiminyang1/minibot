@@ -6,13 +6,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.macos import (
+from minibot.mcp_servers.macos_system.bridge import (
     AppleScriptBridgeError,
     CalendarEventRecord,
     NoteRecord,
     ReminderRecord,
 )
-from minibot.mcp_servers.macos_system_server import MacOSSystemService
+from minibot.mcp_servers.macos_system.server import MacOSSystemService
 
 
 class _FakeBridge:
