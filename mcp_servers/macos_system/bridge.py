@@ -752,6 +752,8 @@ class AppleScriptBridge:
                 f"{field_name} 必须是本地日期时间，例如 2026-04-18T10:30 或 2026-04-18 10:30。",
                 data={"field": field_name, "value": value},
             )
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
         try:
             dt = datetime.fromisoformat(text)
         except ValueError as exc:
@@ -761,11 +763,7 @@ class AppleScriptBridge:
                 data={"field": field_name, "value": value},
             ) from exc
         if dt.tzinfo is not None:
-            raise AppleScriptBridgeError(
-                "invalid_args",
-                f"{field_name} 必须是不带时区的本地时间。",
-                data={"field": field_name, "value": value},
-            )
+            dt = dt.astimezone().replace(tzinfo=None)
         return dt.replace(microsecond=0)
 
     @staticmethod
