@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 import time
 from typing import TYPE_CHECKING
 
@@ -82,6 +83,12 @@ class TurnEngine:
             reply = outcome.reply
             turn_events = outcome.events
             usage = outcome.usage
+            (
+                mcp_tool_call_count,
+                mcp_servers_used,
+                mcp_transports_used,
+                mcp_error_count,
+            ) = self._summarize_mcp_usage(turn_events)
             for event in turn_events:
                 session.add_message(event)
             self.manager.append_messages(session.session_id, turn_events)
@@ -111,6 +118,10 @@ class TurnEngine:
                     llm_call_count=self._count_messages(turn_events, role="assistant"),
                     tool_call_count=self._count_messages(turn_events, role="tool"),
                     tools_used=self._tools_used(turn_events),
+                    mcp_tool_call_count=mcp_tool_call_count,
+                    mcp_servers_used=mcp_servers_used,
+                    mcp_transports_used=mcp_transports_used,
+                    mcp_error_count=mcp_error_count,
                     final_reply_preview=preview_text(reply, 200),
                     error_type=None,
                     error_message_preview=None,
@@ -121,6 +132,12 @@ class TurnEngine:
             reply = exc.reply
             turn_events = exc.events
             usage = exc.usage
+            (
+                mcp_tool_call_count,
+                mcp_servers_used,
+                mcp_transports_used,
+                mcp_error_count,
+            ) = self._summarize_mcp_usage(turn_events)
             self._persist_turn_events(session, turn_events)
             self._append_run_log(
                 RunLogRecord(
@@ -141,6 +158,10 @@ class TurnEngine:
                     llm_call_count=self._count_messages(turn_events, role="assistant"),
                     tool_call_count=self._count_messages(turn_events, role="tool"),
                     tools_used=self._tools_used(turn_events),
+                    mcp_tool_call_count=mcp_tool_call_count,
+                    mcp_servers_used=mcp_servers_used,
+                    mcp_transports_used=mcp_transports_used,
+                    mcp_error_count=mcp_error_count,
                     final_reply_preview=(
                         None if reply is None else preview_text(reply, 200)
                     ),
@@ -150,6 +171,12 @@ class TurnEngine:
             )
             raise exc.cause from exc
         except Exception as exc:
+            (
+                mcp_tool_call_count,
+                mcp_servers_used,
+                mcp_transports_used,
+                mcp_error_count,
+            ) = self._summarize_mcp_usage(turn_events)
             self._append_run_log(
                 RunLogRecord(
                     run_id=run_id,
@@ -169,6 +196,10 @@ class TurnEngine:
                     llm_call_count=self._count_messages(turn_events, role="assistant"),
                     tool_call_count=self._count_messages(turn_events, role="tool"),
                     tools_used=self._tools_used(turn_events),
+                    mcp_tool_call_count=mcp_tool_call_count,
+                    mcp_servers_used=mcp_servers_used,
+                    mcp_transports_used=mcp_transports_used,
+                    mcp_error_count=mcp_error_count,
                     final_reply_preview=(
                         None if reply is None else preview_text(reply, 200)
                     ),
@@ -218,6 +249,49 @@ class TurnEngine:
     @staticmethod
     def _tools_used(events: list[MessageEvent]) -> list[str]:
         return [event.name for event in events if event.role == "tool" and event.name]
+
+    def _summarize_mcp_usage(
+        self,
+        events: list[MessageEvent],
+    ) -> tuple[int, list[str], list[str], int]:
+        tool_call_count = 0
+        servers_used: set[str] = set()
+        transports_used: set[str] = set()
+        error_count = 0
+
+        for event in events:
+            if event.role != "tool" or not event.name:
+                continue
+            tool = self.runner.tool_registry.get(event.name)
+            if tool is None or getattr(tool, "source", "local") != "mcp":
+                continue
+            tool_call_count += 1
+
+            server_name = getattr(tool, "server_name", None)
+            if isinstance(server_name, str) and server_name:
+                servers_used.add(server_name)
+
+            transport_type = getattr(tool, "transport_type", None)
+            if isinstance(transport_type, str) and transport_type:
+                transports_used.add(transport_type)
+
+            if self._tool_event_failed(event):
+                error_count += 1
+
+        return (
+            tool_call_count,
+            sorted(servers_used),
+            sorted(transports_used),
+            error_count,
+        )
+
+    @staticmethod
+    def _tool_event_failed(event: MessageEvent) -> bool:
+        try:
+            payload = json.loads(event.content)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return payload.get("ok") is False
 
     def _persist_turn_events(
         self,

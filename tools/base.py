@@ -11,6 +11,7 @@ from .result import ToolOutput
 
 
 ToolLayer: TypeAlias = Literal["kernel", "extension"]
+ToolSource: TypeAlias = Literal["local", "mcp"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,16 @@ class Tool(ABC):
     def layer(self) -> ToolLayer:
         """Architectural layer for the tool."""
         return "extension"
+
+    @property
+    def source(self) -> ToolSource:
+        """High-level source category for UI/logging."""
+        return "local"
+
+    @property
+    def display_name(self) -> str:
+        """Human-friendly tool label for logs."""
+        return self.name
 
     @property
     def requires_approval(self) -> bool:

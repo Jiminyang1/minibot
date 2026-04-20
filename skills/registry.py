@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
+import warnings
 
 
 @dataclass(frozen=True)
@@ -34,10 +36,12 @@ class SkillRegistry:
     def from_directory(cls, directory: Path) -> "SkillRegistry":
         if not directory.exists():
             return cls([])
-        skills = [
-            _load_skill(path)
-            for path in sorted(directory.glob("*.md"))
-        ]
+        skills: list[Skill] = []
+        for path in sorted(directory.glob("*.md")):
+            try:
+                skills.append(_load_skill(path))
+            except ValueError as exc:
+                warnings.warn(f"跳过无效 skill 文件 {path.name}: {exc}", stacklevel=2)
         return cls(skills)
 
     def list(self) -> list[Skill]:
@@ -51,8 +55,7 @@ def _load_skill(path: Path) -> Skill:
     raw = path.read_text(encoding="utf-8")
     if not raw.startswith("---\n"):
         raise ValueError(f"Skill 文件缺少 frontmatter: {path}")
-    _, rest = raw.split("---\n", 1)
-    frontmatter, body = rest.split("\n---\n", 1)
+    frontmatter, body = _split_frontmatter(raw)
     meta = _parse_frontmatter(frontmatter)
     return Skill(
         name=str(meta["name"]),
@@ -61,6 +64,48 @@ def _load_skill(path: Path) -> Skill:
         body=body.strip(),
         path=path,
     )
+
+
+def _split_frontmatter(raw: str) -> tuple[str, str]:
+    rest = raw[len("---\n"):]
+    if "\n---\n" in rest:
+        return rest.split("\n---\n", 1)
+
+    frontmatter_lines: list[str] = []
+    body_start = 0
+    current_list_key: str | None = None
+    lines = rest.splitlines(keepends=True)
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped:
+            frontmatter_lines.append(raw_line)
+            continue
+        candidate = raw_line.lstrip()
+        if candidate.startswith("- "):
+            if current_list_key is None:
+                body_start = index
+                break
+            frontmatter_lines.append(raw_line)
+            continue
+        if ":" in raw_line:
+            key, raw_value = raw_line.split(":", 1)
+            normalized_key = key.strip()
+            if normalized_key.startswith("#"):
+                normalized_key = normalized_key.lstrip("#").strip()
+            if normalized_key:
+                current_list_key = normalized_key if not raw_value.strip() else None
+                frontmatter_lines.append(raw_line)
+                continue
+        body_start = index
+        break
+    else:
+        body_start = len(lines)
+
+    frontmatter = "".join(frontmatter_lines).strip("\n")
+    body = "".join(lines[body_start:])
+    if not frontmatter.strip():
+        raise ValueError("frontmatter 缺少结束分隔符。")
+    return frontmatter, body
 
 
 def _parse_frontmatter(frontmatter: str) -> dict[str, object]:
@@ -85,6 +130,8 @@ def _parse_frontmatter(frontmatter: str) -> dict[str, object]:
             raise ValueError(f"frontmatter 行无法解析: {line}")
         key, raw_value = line.split(":", 1)
         key = key.strip()
+        if key.startswith("#"):
+            key = key.lstrip("#").strip()
         value = raw_value.strip()
         if not value:
             data[key] = []

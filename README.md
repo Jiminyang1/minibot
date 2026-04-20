@@ -1,17 +1,17 @@
 # MiniBot
 
-本地命令行 AI agent，基于 OpenAI-compatible `chat.completions`，支持：
+本地命令行 AI agent，基于 OpenAI-compatible `chat.completions`，当前支持：
 
 - tool calling
-- 会话持久化
-- 自动 compact
+- 会话持久化与自动 compact
 - 用户长期记忆
 - skills 按需读取
-- macOS Calendar / Reminders / Notes 工具
+- MCP tools（`stdio` + `streamable_http`）
+- bundled local MCP servers（SQLite demo、macOS system）
 
 ## 快速开始
 
-在仓库根目录创建 `.env`：
+在 `minibot/.env` 写入基础配置：
 
 ```bash
 OPENAI_API_KEY=sk-xxx
@@ -23,8 +23,83 @@ MINIBOT_MAX_PARALLEL_TOOLS=4
 安装依赖并启动：
 
 ```bash
-pip install -r requirements.txt
+cd /Users/jiminyang/Desktop/ai-projects/agent
+pip install -r minibot/requirements.txt
 python -m minibot
+```
+
+如果你当前就在 `.../agent/minibot` 目录里，先 `cd ..` 再运行；这个项目要从包的上一级目录启动。
+
+## MCP 配置
+
+MiniBot 启动时会优先读取当前目录下的 `mcp.json`；如果没有，再回退到 `minibot/mcp.json`。
+
+支持的 transport：
+
+- `stdio`
+- `streamable_http`
+
+几个关键规则：
+
+- `enabled: true` 的 server 会在启动时立刻连接并做 tool discovery
+- 单个 server 失败只会告警并跳过，不会阻止整体启动
+- 工具名统一注册成 `mcp__<server>__<tool>`
+- `trusted: true` 的 server 免审批；否则走正常审批流
+- `transport.headers` / `transport.env` 支持 `${ENV_VAR}` 占位符
+- `transport.cwd` 的相对路径按 `mcp.json` 所在目录解析
+
+默认 bundled servers：
+
+- `sqlite`
+  - 启动脚本：`mcp_servers/sqlite_server.py`
+  - 默认数据源：`examples/mcp/demo.sqlite3`
+  - 可用 `SQLITE_PATH` 覆盖
+- `macos_system`
+  - 启动脚本：`mcp_servers/macos_system_server.py`
+  - 提供 Calendar / Reminders / Notes 能力
+
+最小本地 `stdio` 示例：
+
+```json
+{
+  "servers": [
+    {
+      "name": "sqlite",
+      "enabled": true,
+      "trusted": true,
+      "timeout_seconds": 30,
+      "transport": {
+        "type": "stdio",
+        "command": "python3",
+        "args": ["mcp_servers/sqlite_server.py"],
+        "cwd": ".",
+        "env": {}
+      }
+    }
+  ]
+}
+```
+
+最小远端 `streamable_http` 示例：
+
+```json
+{
+  "servers": [
+    {
+      "name": "figma",
+      "enabled": true,
+      "trusted": false,
+      "timeout_seconds": 30,
+      "transport": {
+        "type": "streamable_http",
+        "url": "https://example.com/mcp",
+        "headers": {
+          "Authorization": "Bearer ${FIGMA_MCP_TOKEN}"
+        }
+      }
+    }
+  ]
+}
 ```
 
 ## 常用命令
@@ -40,169 +115,22 @@ python -m minibot
 - `/skills` 查看可用 skills
 - `/help` 显示帮助
 
-## 关键目录
-
-```text
-minibot/
-├── __main__.py            # 组装依赖，启动 REPL
-├── cli.py                 # REPL 与斜杠命令
-├── config.py              # 集中配置
-├── llm.py                 # LLM 适配器 (OpenAI-compatible)
-├── prompts.py             # 系统提示词
-├── ui.py                  # 终端样式与交互原语
-├── artifacts.py           # ArtifactStore / ArtifactRef / ArtifactPage
-├── user_memory.py         # 用户长期记忆
-├── run_log.py             # 运行日志
-├── runtime/               # TurnEngine / AgentRunner / ContextManager / Materializer
-├── session/               # SessionManager + 消息模型
-├── tools/                 # Tool 基类、Registry、各工具实现
-├── skills/                # Markdown 技能文档
-├── macos/                 # AppleScript 桥接
-└── tests/
-```
-
-## 运行方式
-
-- `TurnEngine` 负责单轮编排和持久化
-- `ContextManager` 负责 system prompt、历史、memory 和 compact
-- `AgentRunner` 负责 tool-calling 循环
-- `AgentRunner` 支持对单轮内连续的安全只读工具做批并发执行
-- `ToolOutputMaterializer` 决定工具产出内联还是落盘为 artifact
-- `ToolRegistry` 统一管理工具定义和执行，支持按 `kernel`/`extension` 分层
-- 会话消息保存在 `.minibot/sessions/<session_id>/messages.jsonl`
-- Artifact 保存在 `.minibot/sessions/<session_id>/artifacts/`
-- run log 保存在 `.minibot/runs.jsonl`
-
-## 架构图
-
-### 分层视图
-
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│  入口 & UI 层                                                        │
-│  ┌──────────────┐     ┌────────────┐                                │
-│  │ __main__.py  │────▶│   cli.py   │◀────┐  ui.py (终端样式)        │
-│  │ (组装依赖)    │     │  (REPL)    │     │  prompts.py              │
-│  └──────────────┘     └─────┬──────┘     │                          │
-└─────────────────────────────┼────────────┼──────────────────────────┘
-                              │            │ event_handler
-                              ▼            │ approval_handler
-┌─────────────────────────────────────────────────────────────────────┐
-│  运行时编排层 (runtime/)                                             │
-│                                                                      │
-│   ┌──────────────┐   ┌─────────────────┐   ┌──────────────────┐    │
-│   │ TurnEngine   │──▶│ ContextManager  │──▶│  AgentRunner     │    │
-│   │ (单轮协调)    │   │ (上下文/Compact) │   │  (Tool 循环)      │    │
-│   └──────────────┘   └─────────────────┘   └────────┬─────────┘    │
-│                                                      │               │
-│                                                      ▼  materialize()│
-│                     ┌───────────────────────┐                        │
-│                     │ ToolOutputMaterializer│  阈值决策中枢          │
-│                     │  content ≤ 3K → 内联  │                        │
-│                     │  content > 3K → 落盘  │                        │
-│                     └───────────────────────┘                        │
-└─────────────────────────────────────────────────────────────────────┘
-         │                       │                        │
-         ▼                       ▼                        ▼
-┌──────────────────┐  ┌────────────────────┐  ┌──────────────────────┐
-│  LLM 适配层       │  │  能力层 (tools/)    │  │  持久化层             │
-│  ┌────────────┐  │  │  ┌──────────────┐  │  │  ┌───────────────┐   │
-│  │ LLMClient  │  │  │  │ ToolRegistry │  │  │  │SessionManager │   │
-│  │(抽象接口)   │  │  │  │ (layer 过滤) │  │  │  │(消息 JSONL)   │   │
-│  └─────┬──────┘  │  │  └──────┬───────┘  │  │  └───────────────┘   │
-│        ▼          │  │         ▼          │  │  ┌───────────────┐   │
-│  ┌────────────┐  │  │  ┌──────────────┐  │  │  │ ArtifactStore │◀──┤
-│  │OpenAIClient│  │  │  │    Tool      │  │  │  │(独立存储)      │   │
-│  └────────────┘  │  │  │ kernel/ext   │  │  │  └───────────────┘   │
-└──────────────────┘  │  └──────┬───────┘  │  │  ┌───────────────┐   │
-                      │         ▼          │  │  │UserMemoryStore│   │
-                      │   返回 ToolOutput  │  │  │ (全局 JSON)    │   │
-                      │                    │  │  └───────────────┘   │
-                      └────────────────────┘  │  ┌───────────────┐   │
-                                              │  │  RunLogStore  │   │
-                                              │  └───────────────┘   │
-                                              └──────────────────────┘
-```
-
-### 工具两阶段数据流
-
-```text
-        ┌────────┐                                ┌──────────┐
-        │  Tool  │                                │   LLM    │
-        └───┬────┘                                └────▲─────┘
-            │                                          │
-   execute()│ 返回                         tool_msg    │
-            ▼                                          │
-     ┌────────────┐                            ┌───────────────┐
-     │ ToolOutput │                            │  ToolResult   │
-     │ ─ content  │  ─────materialize()────▶   │ ─ artifact    │
-     │ ─ data     │                            │ ─ data        │
-     │ ─ summary  │                            │ ─ summary     │
-     └────────────┘                            └───────────────┘
-        工具语义                                  模型可见形态
-       (无存储知识)                               (统一决策过)
-                       │
-                       ▼
-               ArtifactStore.put_text()
-               (大内容落盘，返回 ArtifactRef)
-```
-
-工具只负责产出 `ToolOutput`（含原始 `content`），不关心存储策略；`ToolOutputMaterializer` 统一决定内联还是落盘，模型拿到的是规范化的 `ToolResult`。
-
-### 工具集合
-
-```text
-filesystem_toolset(workspace, artifact_store)
-   ├─ ReadFileTool      [kernel]
-   ├─ WriteFileTool     [kernel]
-   ├─ EditFileTool      [kernel]
-   ├─ ListDirTool       [kernel]
-   ├─ SearchFilesTool   [kernel]
-   └─ ReadArtifactTool  [kernel]   持有 ArtifactStore
-
-shell_toolset(workspace)
-   └─ ExecTool          [kernel]
-
-network_toolset()
-   ├─ WebSearchTool     [extension]
-   └─ FetchUrlTool      [extension]
-
-macos_toolset()     → Calendar / Reminders / Notes  [extension]
-memory_toolset()    → RememberTool / ForgetTool     [kernel]
-skill_toolset()     → ReadSkillTool (按需加载 skills/*.md)  [kernel]
-```
-
-## 配置
-
-可用环境变量：
-
-```bash
-MINIBOT_MODEL=gpt-5.4-mini
-MINIBOT_MAX_ITERATIONS=20
-MINIBOT_MAX_PARALLEL_TOOLS=4
-MINIBOT_MAX_HISTORY_TURNS=40
-MINIBOT_COMPACT_TOKEN_THRESHOLD=40000
-MINIBOT_RESERVED_COMPLETION_TOKENS=4096
-MINIBOT_COMPACT_KEEP_RECENT=10
-MINIBOT_AUTO_APPROVE=false
-```
-
 ## 测试
 
-运行全部测试：
+在 `minibot/` 目录运行：
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-运行 macOS integration：
+只跑 MCP 相关：
 
 ```bash
-MINIBOT_RUN_MACOS_INTEGRATION=1 python -m unittest tests.test_macos_integration
+python -m unittest tests.test_mcp_config tests.test_mcp_client tests.test_mcp_manager tests.test_mcp_tools
 ```
 
 ## 说明
 
-- `fetch_url` 更适合公开网页和普通文章页，不保证拿到纯前端站点的完整正文
-- skill 采用 pull 模式：目录常驻，正文由模型通过 `read_skill` 按需读取
-- 工具产出统一为 `ToolOutput`；大内容由 `ToolOutputMaterializer` 落盘为 artifact，而不是让工具自己管存储
+- `read_skill` 读取到的正文不会进入 system prompt，只会作为当前会话里的 tool result
+- 对模型来说，MCP tool 和本地 tool 没区别；它看到的是统一后的 tool schema
+- SQLite 路径、数据库账户、AppleScript 细节这类底层配置属于各自 MCP server，不属于 agent 本身

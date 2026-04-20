@@ -155,6 +155,34 @@ class SkillCatalogTests(unittest.TestCase):
             self.assertNotIn("## Matched Skills", prompt)
             self.assertNotIn("Skill: calendar", prompt)
 
+    def test_loader_accepts_frontmatter_without_closing_delimiter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            (directory / "calendar.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "## name: calendar",
+                        "description: calendar skill",
+                        "tools:",
+                        "  - calendar_list_events",
+                        "",
+                        "1. 确认时间范围",
+                        "2. 创建事件",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry.from_directory(directory)
+
+        skills = registry.list()
+        self.assertEqual(len(skills), 1)
+        self.assertEqual(skills[0].name, "calendar")
+        self.assertEqual(skills[0].tools, ("calendar_list_events",))
+        self.assertIn("1. 确认时间范围", skills[0].body)
+
 
 class ReadSkillToolTests(unittest.TestCase):
     def _make_registry_with(self, tmpdir: Path) -> SkillRegistry:

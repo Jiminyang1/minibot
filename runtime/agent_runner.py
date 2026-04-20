@@ -40,6 +40,16 @@ def _latest_user_input(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _tool_label(tool: Tool | None, fallback: str) -> str:
+    if tool is None:
+        return fallback
+    return tool.display_name
+
+
+def _is_mcp_tool(tool: Tool | None) -> bool:
+    return tool is not None and tool.source == "mcp"
+
+
 @dataclass(frozen=True)
 class RunSpec:
     """One concrete agent execution prepared by the turn engine."""
@@ -144,7 +154,10 @@ class AgentRunner:
 
             for planned, output in zip(planned_tool_calls, tool_outputs):
                 result = self.materializer.materialize(output, context=tool_context)
-                self._emit(f"返回: {result.summary}")
+                if _is_mcp_tool(planned.tool):
+                    self._emit(f"MCP 返回: {result.summary}")
+                else:
+                    self._emit(f"返回: {result.summary}")
 
                 tool_msg: dict[str, Any] = {
                     "role": "tool",
@@ -183,12 +196,16 @@ class AgentRunner:
         planned: list[_PlannedToolCall] = []
         for tool_call in tool_calls:
             args = _parse_args(tool_call.arguments)
-            self._emit(f"工具: {tool_call.name}({args})")
+            tool = self.tool_registry.get(tool_call.name)
+            if _is_mcp_tool(tool):
+                self._emit(f"MCP 调用: {_tool_label(tool, tool_call.name)}({args})")
+            else:
+                self._emit(f"工具: {tool_call.name}({args})")
             planned.append(
                 _PlannedToolCall(
                     tool_call=tool_call,
                     args=args,
-                    tool=self.tool_registry.get(tool_call.name),
+                    tool=tool,
                 )
             )
         return planned

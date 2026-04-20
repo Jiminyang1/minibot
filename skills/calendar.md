@@ -2,8 +2,8 @@
 name: calendar
 description: 使用 macOS 日历工具查看和创建日程事件
 tools:
-  - calendar_list_events
-  - calendar_create_event
+  - mcp__macos_system__calendar_list_events
+  - mcp__macos_system__calendar_create_event
 ---
 当用户要查询或创建日程事件时：
 

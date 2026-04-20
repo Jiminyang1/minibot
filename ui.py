@@ -15,6 +15,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
+from .mcp_host import MCPHostSummary, MCPServerStatus
 from .user_memory import MemoryItem
 from .session import Session
 
@@ -99,6 +100,8 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
     ("/resume <id>", "恢复指定会话"),
     ("/delete <id|current>", "删除会话"),
     ("/compact", "压缩当前会话"),
+    ("/mcp", "查看 MCP server 状态"),
+    ("/mcp tools [server]", "查看 MCP 工具列表"),
     ("/skills", "查看当前可用 skills"),
     ("/memory", "查看长期记忆 (clear / forget <id>)"),
     ("/help", "显示帮助"),
@@ -124,6 +127,7 @@ def print_status(
     memory_count: int,
     resumed: bool,
     skill_count: int = 0,
+    mcp_summary: MCPHostSummary | None = None,
 ) -> None:
     status_tag = c("已恢复", "green") if resumed else c("新建", "yellow")
     memory_label = (
@@ -132,13 +136,14 @@ def print_status(
     skill_label = (
         c(f"{skill_count} 条", "green") if skill_count > 0 else c("空", "gray")
     )
-    rows = (
+    rows = [
         ("会话", f"{session.session_id}  {status_tag}"),
         ("标题", session.title),
         ("进度", f"{session.turn_count()} 轮 · {len(session.messages)} 条消息"),
         ("记忆", memory_label),
         ("技能", skill_label),
-    )
+        ("MCP", _format_mcp_brief(mcp_summary)),
+    ]
     for label, value in rows:
         print(f"  {c(label.ljust(4), 'gray')}  {value}")
     print()
@@ -197,3 +202,96 @@ def print_skills(skills: Iterable[tuple[str, str, tuple[str, ...]]]) -> None:
             f"  {c('·', 'gray')} tools: {c(tool_text, 'dim')}"
         )
     print()
+
+
+def print_mcp_status(
+    summary: MCPHostSummary,
+    statuses: Iterable[MCPServerStatus],
+) -> None:
+    statuses = list(statuses)
+    if summary.configured_servers == 0:
+        info("当前未配置 MCP server。")
+        return
+
+    print()
+    print(c("  MCP", "bold"))
+    print(f"    {c('配置', 'gray')}  {summary.config_path or '未找到 mcp.json'}")
+    overview = (
+        f"{summary.connected_servers}/{summary.enabled_servers} 已连接"
+        f"  {c('·', 'gray')} {summary.tool_count} tools"
+    )
+    if summary.failed_servers > 0:
+        overview += f"  {c('·', 'gray')} {summary.failed_servers} failed"
+    print(f"    {c('摘要', 'gray')}  {overview}")
+    for status in statuses:
+        state_text, state_style = _format_mcp_state(status)
+        tool_suffix = c(f"{status.tool_count} tools", "dim")
+        trust_suffix = c("trusted", "green") if status.trusted else c("approval", "yellow")
+        print(
+            f"    {c(status.name, 'cyan')}  "
+            f"{c(status.transport, 'blue')}  "
+            f"{c(state_text, state_style)}  "
+            f"{tool_suffix}  "
+            f"{trust_suffix}"
+        )
+        if status.last_error:
+            print(f"      {c('error', 'yellow')}  {status.last_error}")
+    print()
+
+
+def print_mcp_tools(
+    statuses: Iterable[MCPServerStatus],
+    *,
+    server_name: str | None = None,
+) -> None:
+    statuses = list(statuses)
+    if server_name is not None:
+        statuses = [status for status in statuses if status.name == server_name]
+        if not statuses:
+            warn(f"未找到 MCP server: {server_name}")
+            return
+
+    if not statuses:
+        info("当前没有可展示的 MCP tool。")
+        return
+
+    print()
+    print(c("  MCP Tools", "bold"))
+    for status in statuses:
+        state_text, _ = _format_mcp_state(status)
+        print(
+            f"    {c(status.name, 'cyan')}  "
+            f"{c('·', 'gray')} {c(status.transport, 'blue')}  "
+            f"{c('·', 'gray')} {state_text}"
+        )
+        if not status.tool_names:
+            print(f"      {c('(无已发现工具)', 'dim')}")
+            continue
+        for tool_name in status.tool_names:
+            print(f"      {c(tool_name, 'dim')}")
+    print()
+
+
+def _format_mcp_brief(summary: MCPHostSummary | None) -> str:
+    if summary is None or summary.configured_servers == 0:
+        return c("未配置", "gray")
+    if summary.enabled_servers == 0:
+        return c("全部禁用", "gray")
+
+    parts = [
+        c(f"{summary.connected_servers}/{summary.enabled_servers} 已连接", "green"),
+        c(f"{summary.tool_count} tools", "dim"),
+    ]
+    if summary.failed_servers > 0:
+        parts.append(c(f"{summary.failed_servers} failed", "yellow"))
+    return f" {c('·', 'gray')} ".join(parts)
+
+
+def _format_mcp_state(status: MCPServerStatus) -> tuple[str, str]:
+    if not status.enabled:
+        return "disabled", "gray"
+    if status.connected:
+        return "connected", "green"
+    if status.last_error:
+        return "failed", "yellow"
+    return "pending", "gray"

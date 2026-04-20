@@ -1,0 +1,34 @@
+{
+  "servers": [
+    {
+      "name": "sqlite",
+      "enabled": true,
+      "trusted": true,
+      "timeout_seconds": 30,
+      "transport": {
+        "type": "stdio",
+        "command": "python3",
+        "args": [
+          "mcp_servers/sqlite_server.py"
+        ],
+        "cwd": ".",
+        "env": {}
+      }
+    },
+    {
+      "name": "macos_system",
+      "enabled": true,
+      "trusted": false,
+      "timeout_seconds": 30,
+      "transport": {
+        "type": "stdio",
+        "command": "python3",
+        "args": [
+          "mcp_servers/macos_system_server.py"
+        ],
+        "cwd": ".",
+        "env": {}
+      }
+    }
+  ]
+}

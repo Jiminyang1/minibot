@@ -15,6 +15,7 @@ except ImportError:
 from typing import TYPE_CHECKING
 
 from . import ui
+from .mcp_host import MCPHost
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -136,6 +137,22 @@ def _handle_skills(turn_engine: TurnEngine) -> None:
     ui.print_skills(turn_engine.list_available_skills())
 
 
+def _handle_mcp(raw: str, mcp_host: MCPHost | None) -> None:
+    if mcp_host is None:
+        ui.info("当前未初始化 MCP host。")
+        return
+
+    parts = raw.strip().split()
+    if len(parts) == 1:
+        ui.print_mcp_status(mcp_host.summary(), mcp_host.status_snapshot())
+        return
+    if parts[1] == "tools":
+        server_name = parts[2] if len(parts) >= 3 else None
+        ui.print_mcp_tools(mcp_host.status_snapshot(), server_name=server_name)
+        return
+    ui.info("用法: /mcp | /mcp tools [server]")
+
+
 # ── REPL loop ────────────────────────────────────────────────────
 
 
@@ -143,12 +160,19 @@ def run_repl(
     turn_engine: TurnEngine,
     manager: SessionManager,
     memory_store: UserMemoryStore,
+    mcp_host: MCPHost | None = None,
 ) -> None:
     current, resumed = _startup_session(manager)
     skill_count = len(turn_engine.list_available_skills())
 
     ui.print_banner()
-    ui.print_status(current, len(memory_store.list()), resumed, skill_count)
+    ui.print_status(
+        current,
+        len(memory_store.list()),
+        resumed,
+        skill_count,
+        mcp_summary=None if mcp_host is None else mcp_host.summary(),
+    )
     ui.print_help()
     print(ui.RULE)
 
@@ -179,6 +203,9 @@ def run_repl(
             continue
         if user_msg == "/compact":
             _handle_compact(current, turn_engine)
+            continue
+        if user_msg == "/mcp" or user_msg.startswith("/mcp "):
+            _handle_mcp(user_msg, mcp_host)
             continue
         if user_msg == "/skills":
             _handle_skills(turn_engine)

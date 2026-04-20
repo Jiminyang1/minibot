@@ -2,9 +2,9 @@
 name: reminders
 description: 使用 macOS 提醒事项工具查看、创建和完成提醒
 tools:
-  - reminders_list
-  - reminders_create
-  - reminders_complete
+  - mcp__macos_system__reminders_list
+  - mcp__macos_system__reminders_create
+  - mcp__macos_system__reminders_complete
 ---
 当用户要创建、查看或完成提醒事项时：
 

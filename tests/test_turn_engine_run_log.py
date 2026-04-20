@@ -11,11 +11,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.config import Config
 from minibot.llm import TokenUsage
+from minibot.mcp_host.models import MCPToolSpec
+from minibot.mcp_host.provider import MCPToolProxy
 from minibot.run_log import RunLogStore
 from minibot.runtime.agent_runner import PartialRunError, RunOutcome
 from minibot.runtime.context_manager import PreparedContext
 from minibot.runtime.turn_engine import TurnEngine
 from minibot.session import MessageEvent, SessionManager
+from minibot.tools.registry import ToolRegistry
+from mcp.types import CallToolResult, TextContent
+
+
+class _FakeMCPClient:
+    def __init__(self, transport_type: str = "streamable_http") -> None:
+        self.config = type(
+            "_Config",
+            (),
+            {"transport": type("_Transport", (), {"type": transport_type})()},
+        )()
+
+    def call_tool(self, remote_name: str, arguments: dict[str, object]) -> CallToolResult:
+        del remote_name, arguments
+        return CallToolResult(content=[TextContent(type="text", text="ok")])
 
 
 class _StubContextManager:
@@ -65,11 +82,13 @@ class _StubRunner:
         events: list[MessageEvent] | None = None,
         usage: TokenUsage | None = None,
         exc: Exception | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._reply = reply
         self._events = list(events or [])
         self._usage = usage
         self._exc = exc
+        self.tool_registry = tool_registry or ToolRegistry()
         self.seen_run_spec = None
 
     def run(self, run_spec: object) -> RunOutcome:
@@ -186,6 +205,10 @@ class TurnEngineRunLogTests(unittest.TestCase):
             self.assertEqual(log["tool_call_count"], 1)
             self.assertEqual(log["llm_call_count"], 2)
             self.assertEqual(log["tools_used"], ["read_file"])
+            self.assertEqual(log["mcp_tool_call_count"], 0)
+            self.assertEqual(log["mcp_servers_used"], [])
+            self.assertEqual(log["mcp_transports_used"], [])
+            self.assertEqual(log["mcp_error_count"], 0)
             self.assertEqual(log["compact_message"], "已压缩: 20 -> 8 条消息")
             self.assertEqual(log["model"], Config().model)
             self.assertEqual(log["input_tokens"], 111)
@@ -260,6 +283,67 @@ class TurnEngineRunLogTests(unittest.TestCase):
                     "new answer",
                 ],
             )
+
+    def test_run_log_records_mcp_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            session = manager.create_session("s_test")
+            prepared = PreparedContext(
+                messages=[{"role": "system", "content": "sys"}],
+                tool_definitions=[],
+                did_compact=False,
+                compact_message=None,
+            )
+            registry = ToolRegistry()
+            registry.register(
+                MCPToolProxy(
+                    client=_FakeMCPClient("stdio"),
+                    tool_spec=MCPToolSpec(
+                        server_name="sqlite",
+                        remote_name="query",
+                        title=None,
+                        description="query",
+                        input_schema={"type": "object", "properties": {}},
+                    ),
+                    trusted=True,
+                )
+            )
+            tool_payload = {
+                "ok": False,
+                "code": "error",
+                "summary": "sqlite.query 返回错误结果。",
+                "data": {"server": "sqlite"},
+                "artifact": None,
+                "truncated": False,
+            }
+            engine = TurnEngine(
+                _StubRunner(
+                    reply="done",
+                    events=[
+                        MessageEvent.create(
+                            role="tool",
+                            content=json.dumps(tool_payload, ensure_ascii=False),
+                            tool_call_id="call_1",
+                            name="mcp__sqlite__query",
+                        ),
+                        MessageEvent.create(role="assistant", content="done"),
+                    ],
+                    tool_registry=registry,
+                ),
+                manager,
+                Config(),
+                context_manager=_StubContextManager(prepared=prepared),
+                run_log_store=RunLogStore(workspace),
+            )
+
+            engine.handle_turn(session, "query db")
+
+            log = _read_run_logs(workspace)[0]
+            self.assertEqual(log["mcp_tool_call_count"], 1)
+            self.assertEqual(log["mcp_servers_used"], ["sqlite"])
+            self.assertEqual(log["mcp_transports_used"], ["stdio"])
+            self.assertEqual(log["mcp_error_count"], 1)
 
     def test_failed_turn_from_context_manager_still_writes_failed_run_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

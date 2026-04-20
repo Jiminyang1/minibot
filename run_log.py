@@ -56,6 +56,10 @@ class RunLogRecord:
     llm_call_count: int
     tool_call_count: int
     tools_used: list[str]
+    mcp_tool_call_count: int
+    mcp_servers_used: list[str]
+    mcp_transports_used: list[str]
+    mcp_error_count: int
     final_reply_preview: str | None
     error_type: str | None
     error_message_preview: str | None
