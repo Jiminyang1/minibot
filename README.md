@@ -229,10 +229,11 @@ python -m minibot
 - `stdio`：MiniBot 启动本地子进程，适合本机能力（SQLite、macOS 等）
 - `streamable_http`：连接已有的远端 server，不由 MiniBot 启动
 
-默认 bundled servers：
+默认配置包含这些 MCP servers：
 
 - `sqlite` → `mcp_servers/sqlite_server.py`（默认库 `examples/mcp/demo.sqlite3`，可用 `SQLITE_PATH` 覆盖）
 - `macos_system` → `mcp_servers/macos_system/server.py`（Calendar / Reminders / Notes）
+- `drawio` → `npx -y @drawio/mcp`（官方 draw.io MCP tool server，暴露 `open_drawio_xml/csv/mermaid`；首次启动需要本机有 Node.js / npx，且可能联网拉取 npm 包）
 
 最小本地 `stdio` 示例：
 

@@ -99,6 +99,16 @@ def _make_context_manager(
 
 
 class SkillCatalogTests(unittest.TestCase):
+    def test_packaged_skills_include_drawio(self) -> None:
+        package_skills_dir = Path(__file__).resolve().parents[1] / "skills"
+        registry = SkillRegistry.from_directory(package_skills_dir)
+
+        drawio = registry.get_by_name("drawio")
+        self.assertIsNotNone(drawio)
+        assert drawio is not None
+        self.assertIn("write_file", drawio.tools)
+        self.assertIn("exec", drawio.tools)
+
     def test_catalog_lists_skills_whose_tools_are_registered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)

@@ -29,6 +29,22 @@
         "cwd": ".",
         "env": {}
       }
+    },
+    {
+      "name": "drawio",
+      "enabled": true,
+      "trusted": false,
+      "timeout_seconds": 60,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@drawio/mcp"
+        ],
+        "cwd": ".",
+        "env": {}
+      }
     }
   ]
 }
