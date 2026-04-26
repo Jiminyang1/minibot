@@ -1,20 +1,20 @@
 {
   "servers": [
-    {
-      "name": "sqlite",
-      "enabled": true,
-      "trusted": true,
-      "timeout_seconds": 30,
-      "transport": {
-        "type": "stdio",
-        "command": "python3",
-        "args": [
-          "mcp_servers/sqlite_server.py"
-        ],
-        "cwd": ".",
-        "env": {}
-      }
-    },
+    // {
+    //   "name": "sqlite",
+    //   "enabled": true,
+    //   "trusted": true,
+    //   "timeout_seconds": 30,
+    //   "transport": {
+    //     "type": "stdio",
+    //     "command": "python3",
+    //     "args": [
+    //       "mcp_servers/sqlite_server.py"
+    //     ],
+    //     "cwd": ".",
+    //     "env": {}
+    //   }
+    // },
     {
       "name": "macos_system",
       "enabled": true,
@@ -29,22 +29,22 @@
         "cwd": ".",
         "env": {}
       }
-    },
-    {
-      "name": "drawio",
-      "enabled": true,
-      "trusted": false,
-      "timeout_seconds": 60,
-      "transport": {
-        "type": "stdio",
-        "command": "npx",
-        "args": [
-          "-y",
-          "@drawio/mcp"
-        ],
-        "cwd": ".",
-        "env": {}
-      }
     }
+    // {
+    //   "name": "drawio",
+    //   "enabled": true,
+    //   "trusted": false,
+    //   "timeout_seconds": 60,
+    //   "transport": {
+    //     "type": "stdio",
+    //     "command": "npx",
+    //     "args": [
+    //       "-y",
+    //       "@drawio/mcp"
+    //     ],
+    //     "cwd": ".",
+    //     "env": {}
+    //   }
+    // }
   ]
 }

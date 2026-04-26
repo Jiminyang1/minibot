@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 import tempfile
@@ -84,6 +85,7 @@ def _make_context_manager(
     *,
     registry: SkillRegistry,
     tool_registry: ToolRegistry,
+    now_provider=None,
 ) -> ContextManager:
     return ContextManager(
         base_system_prompt="BASE PROMPT",
@@ -95,10 +97,48 @@ def _make_context_manager(
         reserved_completion_tokens=1000,
         compact_keep_recent=4,
         summarizer=lambda messages: "summary",
+        now_provider=now_provider,
     )
 
 
 class SkillCatalogTests(unittest.TestCase):
+    def test_prompt_includes_local_time_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            _write_skill(
+                directory,
+                name="calendar",
+                description="calendar skill",
+                tools=["calendar_list_events"],
+                body="calendar body",
+            )
+            registry = SkillRegistry.from_directory(directory)
+            tool_registry = ToolRegistry()
+            tool_registry.register(_DummyTool("calendar_list_events"))
+            manager = _make_context_manager(
+                registry=registry,
+                tool_registry=tool_registry,
+                now_provider=lambda: datetime(
+                    2026,
+                    4,
+                    23,
+                    13,
+                    2,
+                    5,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            )
+
+            prompt = manager._build_request(
+                session=Session("s_test"),
+                user_input="今天干嘛",
+            ).messages[0]["content"]
+
+            self.assertIn("## Local Time Context", prompt)
+            self.assertIn("now_local: 2026-04-23T13:02:05+08:00", prompt)
+            self.assertIn("today_local: 2026-04-23", prompt)
+            self.assertIn("timezone_local:", prompt)
+
     def test_packaged_skills_include_drawio(self) -> None:
         package_skills_dir = Path(__file__).resolve().parents[1] / "skills"
         registry = SkillRegistry.from_directory(package_skills_dir)

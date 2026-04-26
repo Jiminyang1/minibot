@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ..llm import LLMClient
@@ -135,6 +136,7 @@ class ContextManager:
 
     _DEFAULT_MAX_INLINE_MEMORY_TOKENS = 1200
     _MAX_MEMORY_FACT_CHARS = 240
+    _WEEKDAY_NAMES = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
     def __init__(
         self,
@@ -149,6 +151,7 @@ class ContextManager:
         compact_keep_recent: int,
         summarizer: Callable[[list[dict[str, Any]]], str],
         max_inline_memory_tokens: int = _DEFAULT_MAX_INLINE_MEMORY_TOKENS,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.base_system_prompt = base_system_prompt
         self.memory_store = memory_store
@@ -160,6 +163,7 @@ class ContextManager:
         self.compact_keep_recent = compact_keep_recent
         self.summarizer = summarizer
         self.max_inline_memory_tokens = max_inline_memory_tokens
+        self.now_provider = now_provider or (lambda: datetime.now().astimezone())
 
     def prepare_for_turn(
         self,
@@ -258,10 +262,12 @@ class ContextManager:
     ) -> _BuiltRequest:
         history = session.history_for_model(self.max_history_turns)
         memory_block, memory_tokens = self._render_memory_block()
+        time_context_block = self._render_time_context_block()
         skill_catalog_block = self._render_skill_catalog_block()
         tool_definitions = self.tool_registry.get_definitions()
         system_prompt = self._build_system_prompt(
             memory_block,
+            time_context_block,
             skill_catalog_block,
         )
         messages = _compose_messages(
@@ -279,14 +285,42 @@ class ContextManager:
     def _build_system_prompt(
         self,
         memory_block: str,
+        time_context_block: str,
         skill_catalog_block: str,
     ) -> str:
         parts = [self.base_system_prompt, MEMORY_INSTRUCTIONS]
         if memory_block:
             parts.append(memory_block)
+        if time_context_block:
+            parts.append(time_context_block)
         if skill_catalog_block:
             parts.append(skill_catalog_block)
         return "\n\n".join(parts)
+
+    def _render_time_context_block(self) -> str:
+        current = self.now_provider()
+        if current.tzinfo is None:
+            current = current.astimezone()
+
+        offset = current.strftime("%z")
+        if len(offset) == 5:
+            offset = f"{offset[:3]}:{offset[3:]}"
+        elif not offset:
+            offset = "+00:00"
+
+        tz_name = current.tzname() or "local"
+        weekday = self._WEEKDAY_NAMES[current.weekday()]
+
+        lines = [
+            "## Local Time Context",
+            "以下时间由当前机器实时生成。处理“今天 / 明天 / 本周 / 下周”等相对时间时，必须以这里的本地时间为准，不要猜测，也不要沿用旧对话里的日期。",
+            f"- now_local: {current.isoformat(timespec='seconds')}",
+            f"- today_local: {current.date().isoformat()}",
+            f"- weekday_local: {weekday}",
+            f"- timezone_local: {tz_name} (UTC{offset})",
+            "如果用户的问题依赖相对日期，先用这些值锚定时间，再决定是否调用日历、提醒事项或其他工具。",
+        ]
+        return "\n".join(lines)
 
     def _render_skill_catalog_block(self) -> str:
         skills = self.list_available_skills()
