@@ -150,7 +150,9 @@ RuntimeEvent(
 )
 ```
 
-`TurnEngine` / `AgentRunner` 通过 `RuntimeEventEmitter` 发事件；CLI 只负责把事件格式化成终端文本，Web server 则把同一批事件转成标准 SSE 的 `id/event/data`。第一版不做 token 级 streaming，只在最终回答完成后发 `message.completed`。
+`TurnEngine` / `AgentRunner` 通过 `RuntimeEventEmitter` 发事件；CLI 只负责把事件格式化成终端文本，Web server 则把同一批事件写入进程内 `RunEventStore`，再通过标准 SSE 的 `id/event/data` 给订阅者。第一版不做 token 级 streaming，只在最终回答完成后发 `message.completed`。
+
+Web 侧把"创建 run"和"订阅事件"分开：`POST /runs` 立即返回 `run_id`，前端再用 `EventSource` 连接 `GET /runs/{run_id}/events`。SSE 断开只会取消订阅，不会取消后台 run；取消 run 必须显式调用 `POST /runs/{run_id}/cancel`。`/events` 支持浏览器自动发送的 `Last-Event-ID`，可以从已收到的 `seq` 之后 replay。
 
 当前事件类型：
 
@@ -211,9 +213,13 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 
 第一版 Web API 暴露 MiniBot 自己的 agent event stream，不伪装成 OpenAI API：
 
-- `POST /runs/stream`：body 为 `{"input":"...", "session_id":"current"}`，返回 `text/event-stream`
+- `POST /runs`：body 为 `{"input":"...", "session_id":"current"}`，返回 `{"run_id":"...","status":"running"}`
+- `GET /runs/{run_id}/events`：返回 `text/event-stream`，支持 `Last-Event-ID`
+- `POST /runs/{run_id}/cancel`：显式取消后台 run
 - `POST /runs/{run_id}/approvals/{approval_id}`：body 为 `{"approved": true}`，用于继续需要审批的工具调用
 - `GET /sessions` / `GET /sessions/{session_id}/messages`：供 Web UI 读取会话列表和最终对话历史
+
+兼容入口 `POST /runs/stream` 仍保留，但新 UI 不再使用它。
 
 ## 配置
 
@@ -233,6 +239,7 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 | `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | 触发自动 compact 的 token 阈值 |
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 留给 completion 的 token 预算 |
 | `MINIBOT_COMPACT_KEEP_RECENT` | `10` | compact 时保留的最近消息数 |
+| `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | `auto` 时 DeepSeek endpoint/model 会把 `reasoning_content` 回传给模型；OpenAI 默认剥离。可设 `true` / `false` 强制覆盖 |
 
 持久化路径（按约定生成，无需配置）：
 

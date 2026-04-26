@@ -1,8 +1,43 @@
+import { marked } from "https://cdn.jsdelivr.net/npm/marked@15/+esm";
+import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3/+esm";
+
+marked.setOptions({ breaks: true, gfm: true });
+
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text || ""));
+}
+
+function formatClock(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function eventCategory(type) {
+  if (type === "run.failed" || type === "tool_call.failed") return "fail";
+  if (type.startsWith("run.")) return "run";
+  if (type.startsWith("model.")) return "model";
+  if (type.startsWith("tool_call.")) return "tool";
+  if (type.startsWith("approval.")) return "approval";
+  if (type.startsWith("message.")) return "message";
+  if (type.startsWith("context.")) return "context";
+  return "other";
+}
+
 const form = document.querySelector("#form");
 const input = document.querySelector("#input");
 const session = document.querySelector("#session");
 const sessionSelect = document.querySelector("#sessionSelect");
 const reloadHistory = document.querySelector("#reloadHistory");
+const newSessionBtn = document.querySelector("#newSession");
+const renameSessionBtn = document.querySelector("#renameSession");
+const deleteSessionBtn = document.querySelector("#deleteSession");
 const feed = document.querySelector("#feed");
 const conversation = document.querySelector("#conversation");
 const statusEl = document.querySelector("#status");
@@ -12,8 +47,51 @@ const sessionTag = document.querySelector("#sessionTag");
 const send = document.querySelector("#send");
 
 const THEME_KEY = "minibot.theme";
+const RUNTIME_EVENT_TYPES = [
+  "run.started",
+  "context.usage",
+  "context.compacted",
+  "model.request.started",
+  "model.request.completed",
+  "tool_call.started",
+  "approval.required",
+  "approval.resolved",
+  "tool_call.completed",
+  "tool_call.failed",
+  "message.completed",
+  "run.completed",
+  "run.cancelled",
+  "run.failed",
+];
 
 let activeSessionId = "current";
+let currentRunId = null;
+let currentEventSource = null;
+
+function setSendState(state) {
+  const next = state === "stop" ? "stop" : "send";
+  send.dataset.state = next;
+  send.setAttribute(
+    "aria-label",
+    next === "stop" ? "stop run" : "send message",
+  );
+  send.title = next === "stop" ? "Stop running" : "Send (⌘/Ctrl + Enter)";
+  send.disabled = false;
+}
+
+async function cancelRun() {
+  if (!currentRunId) return;
+  send.disabled = true;
+  try {
+    await fetch(`/runs/${encodeURIComponent(currentRunId)}/cancel`, {
+      method: "POST",
+    });
+  } catch (error) {
+    console.error("cancel failed", error);
+  } finally {
+    send.disabled = false;
+  }
+}
 
 function applyTheme(theme) {
   const resolved = theme === "light" ? "light" : "dark";
@@ -33,6 +111,12 @@ function clearEvents() {
   runTag.textContent = "no run";
 }
 
+function closeEventSource() {
+  if (!currentEventSource) return;
+  currentEventSource.close();
+  currentEventSource = null;
+}
+
 function scrollConversation() {
   conversation.scrollTop = conversation.scrollHeight;
 }
@@ -41,6 +125,23 @@ function setActiveSession(sessionId) {
   activeSessionId = sessionId || "current";
   session.value = activeSessionId;
   sessionTag.textContent = activeSessionId;
+  updateSessionButtons();
+}
+
+function updateSessionButtons() {
+  const protectedAlias = !activeSessionId || activeSessionId === "current";
+  renameSessionBtn.disabled = protectedAlias;
+  deleteSessionBtn.disabled = protectedAlias;
+}
+
+function findSessionTitle(sessionId) {
+  for (const option of sessionSelect.options) {
+    if (option.value !== sessionId) continue;
+    const parts = option.textContent.split("·");
+    if (parts.length < 2) return "";
+    return parts.slice(1).join("·").trim();
+  }
+  return "";
 }
 
 function renderEmptyConversation(text = "empty") {
@@ -72,15 +173,50 @@ function appendMessage(message) {
   const row = document.createElement("div");
   row.className = `message ${message.role || ""}`;
 
-  const role = document.createElement("div");
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+
+  const role = document.createElement("span");
   role.className = "message-role";
   role.textContent = messageLabel(message);
+  meta.append(role);
+
+  const time = formatClock(message.created_at);
+  if (time) {
+    const timeEl = document.createElement("span");
+    timeEl.className = "message-time";
+    timeEl.textContent = time;
+    meta.append(timeEl);
+  }
 
   const content = document.createElement("div");
   content.className = "message-content";
-  content.textContent = messageContent(message);
+  const text = messageContent(message);
+  if (message.role === "assistant") {
+    content.classList.add("markdown");
+    content.innerHTML = renderMarkdown(text);
 
-  row.append(role, content);
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "message-copy";
+    copyBtn.textContent = "copy";
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = "copied";
+        setTimeout(() => {
+          copyBtn.textContent = "copy";
+        }, 1200);
+      } catch {
+        copyBtn.textContent = "failed";
+      }
+    });
+    meta.append(copyBtn);
+  } else {
+    content.textContent = text;
+  }
+
+  row.append(meta, content);
   conversation.append(row);
   scrollConversation();
 }
@@ -147,28 +283,49 @@ function summarize(event) {
   if (event.type === "approval.resolved") return p.approved ? "approved" : "denied";
   if (event.type === "message.completed") return "assistant message";
   if (event.type === "run.completed") return "done";
+  if (event.type === "run.cancelled") return "cancelled by user";
   if (event.type === "run.failed") return `${p.error_type || "error"}: ${p.message || ""}`;
   return JSON.stringify(p);
+}
+
+function finishRun(status, state) {
+  setStatus(status, state);
+  setSendState("send");
+  currentRunId = null;
+  closeEventSource();
+  loadSessions().catch((error) => console.error("load sessions failed", error));
 }
 
 function appendEvent(event) {
   if (feed.querySelector(".empty")) feed.innerHTML = "";
   runTag.textContent = event.run_id || "run";
+  if (event.type === "run.started" && event.run_id) {
+    currentRunId = event.run_id;
+  }
   if (event.session_id) setActiveSession(event.session_id);
 
   const row = document.createElement("div");
   row.className = "event";
+  row.dataset.category = eventCategory(event.type);
+  if (event.type === "approval.required") row.classList.add("is-approval");
 
-  const type = document.createElement("div");
-  type.className = "event-type";
-  type.textContent = event.type;
+  const time = document.createElement("span");
+  time.className = "event-time";
+  time.textContent = formatClock(event.created_at);
+
+  const pill = document.createElement("span");
+  pill.className = "event-pill";
+  pill.textContent = event.type;
 
   const body = document.createElement("div");
   body.className = "event-body";
-  body.textContent = summarize(event);
+  const summary = document.createElement("div");
+  summary.className = "event-summary";
+  summary.textContent = summarize(event);
+  body.append(summary);
 
   if (event.type === "approval.required") {
-    const actions = document.createElement("span");
+    const actions = document.createElement("div");
     actions.className = "approval-actions";
     const approve = document.createElement("button");
     approve.className = "small approve";
@@ -181,6 +338,7 @@ function appendEvent(event) {
     const resolve = async (approved) => {
       approve.disabled = true;
       deny.disabled = true;
+      row.classList.add("is-resolved");
       await fetch(`/runs/${event.run_id}/approvals/${event.payload.approval_id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -193,7 +351,7 @@ function appendEvent(event) {
     body.append(actions);
   }
 
-  row.append(type, body);
+  row.append(time, pill, body);
   feed.append(row);
   feed.scrollTop = feed.scrollHeight;
 
@@ -204,53 +362,68 @@ function appendEvent(event) {
       created_at: event.created_at,
     });
   }
-  if (event.type === "run.completed") setStatus("done", "done");
-  if (event.type === "run.failed") setStatus("failed", "error");
+  if (event.type === "run.completed") finishRun("done", "done");
+  if (event.type === "run.cancelled") finishRun("cancelled", "error");
+  if (event.type === "run.failed") finishRun("failed", "error");
 }
 
-async function readSSE(response) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\\n\\n");
-    buffer = chunks.pop() || "";
-    for (const chunk of chunks) {
-      const lines = chunk.split("\\n");
-      const dataLine = lines.find((line) => line.startsWith("data: "));
-      if (!dataLine) continue;
-      appendEvent(JSON.parse(dataLine.slice(6)));
-    }
+function subscribeRun(runId) {
+  closeEventSource();
+  const source = new EventSource(`/runs/${encodeURIComponent(runId)}/events`);
+  currentEventSource = source;
+
+  for (const type of RUNTIME_EVENT_TYPES) {
+    source.addEventListener(type, (event) => {
+      try {
+        appendEvent(JSON.parse(event.data));
+      } catch (error) {
+        console.error("bad SSE event:", event.data, error);
+      }
+    });
   }
+
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED && currentRunId === runId) {
+      finishRun("disconnected", "error");
+    }
+  };
 }
+
+send.addEventListener("click", (event) => {
+  if (send.dataset.state === "stop") {
+    event.preventDefault();
+    cancelRun();
+  }
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (send.dataset.state === "stop") return;
   const text = input.value.trim();
   if (!text) return;
   clearEvents();
   appendMessage({ role: "user", content: text });
   input.value = "";
-  send.disabled = true;
+  currentRunId = null;
+  setSendState("stop");
   setStatus("running", "running");
   const requestedSession = session.value.trim() || "current";
   try {
-    const response = await fetch("/runs/stream", {
+    const payload = await jsonRequest("/runs", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         input: text,
         session_id: requestedSession,
       }),
     });
-    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-    await readSSE(response);
-    await loadSessions();
+    currentRunId = payload.run_id;
+    runTag.textContent = currentRunId || "run";
+    subscribeRun(currentRunId);
   } catch (error) {
     setStatus("failed", "error");
+    setSendState("send");
+    currentRunId = null;
     appendEvent({
       id: "client-error",
       run_id: "client",
@@ -260,8 +433,6 @@ form.addEventListener("submit", async (event) => {
       created_at: new Date().toISOString(),
       payload: { error_type: "ClientError", message: String(error) },
     });
-  } finally {
-    send.disabled = false;
   }
 });
 
@@ -284,8 +455,103 @@ reloadHistory.addEventListener("click", async () => {
   await loadHistory(session.value.trim() || "current");
 });
 
+async function jsonRequest(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body && body.detail) detail = body.detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+async function createNewSession() {
+  newSessionBtn.disabled = true;
+  try {
+    const payload = await jsonRequest("/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const id = payload.session.session_id;
+    clearEvents();
+    setStatus("idle", "idle");
+    setActiveSession(id);
+    await loadHistory(id);
+  } catch (error) {
+    alert(`新建失败: ${error.message}`);
+  } finally {
+    newSessionBtn.disabled = false;
+  }
+}
+
+async function renameCurrentSession() {
+  const id = activeSessionId;
+  if (!id || id === "current") return;
+  const current = findSessionTitle(id);
+  const proposed = prompt(`Rename session ${id}`, current);
+  if (proposed == null) return;
+  const trimmed = proposed.trim();
+  if (!trimmed || trimmed === current) return;
+  try {
+    await jsonRequest(`/sessions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: trimmed }),
+    });
+    await loadSessions();
+    sessionSelect.value = id;
+  } catch (error) {
+    alert(`重命名失败: ${error.message}`);
+  }
+}
+
+async function deleteCurrentSession() {
+  const id = activeSessionId;
+  if (!id || id === "current") return;
+  if (!confirm(`确认删除会话 ${id}? 此操作不可恢复。`)) return;
+  try {
+    await jsonRequest(`/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    clearEvents();
+    setStatus("idle", "idle");
+    setActiveSession("current");
+    await loadHistory("current");
+  } catch (error) {
+    alert(`删除失败: ${error.message}`);
+  }
+}
+
+newSessionBtn.addEventListener("click", () => {
+  createNewSession();
+});
+
+renameSessionBtn.addEventListener("click", () => {
+  renameCurrentSession();
+});
+
+deleteSessionBtn.addEventListener("click", () => {
+  deleteCurrentSession();
+});
+
+input.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    if (send.dataset.state === "stop") {
+      cancelRun();
+    } else if (!send.disabled) {
+      form.requestSubmit();
+    }
+  }
+});
+
 applyTheme(localStorage.getItem(THEME_KEY) || "dark");
 clearEvents();
+updateSessionButtons();
 loadHistory("current").catch((error) => {
   setStatus("failed", "error");
   renderEmptyConversation(String(error));

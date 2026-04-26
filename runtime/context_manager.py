@@ -152,6 +152,7 @@ class ContextManager:
         summarizer: Callable[[list[dict[str, Any]]], str],
         max_inline_memory_tokens: int = _DEFAULT_MAX_INLINE_MEMORY_TOKENS,
         now_provider: Callable[[], datetime] | None = None,
+        include_reasoning_content: bool = False,
     ) -> None:
         self.base_system_prompt = base_system_prompt
         self.memory_store = memory_store
@@ -164,6 +165,7 @@ class ContextManager:
         self.summarizer = summarizer
         self.max_inline_memory_tokens = max_inline_memory_tokens
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
+        self.include_reasoning_content = include_reasoning_content
 
     def prepare_for_turn(
         self,
@@ -260,7 +262,10 @@ class ContextManager:
         session: Session,
         user_input: str | None,
     ) -> _BuiltRequest:
-        history = session.history_for_model(self.max_history_turns)
+        history = session.history_for_model(
+            self.max_history_turns,
+            include_reasoning_content=self.include_reasoning_content,
+        )
         memory_block, memory_tokens = self._render_memory_block()
         time_context_block = self._render_time_context_block()
         skill_catalog_block = self._render_skill_catalog_block()

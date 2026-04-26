@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 from .artifacts import ArtifactStore
@@ -114,6 +115,7 @@ def build_runtime(
         reserved_completion_tokens=config.reserved_completion_tokens,
         compact_keep_recent=config.compact_keep_recent,
         summarizer=summarizer,
+        include_reasoning_content=_should_include_reasoning_content(config.model),
     )
     runner = AgentRunner(
         llm,
@@ -151,3 +153,15 @@ def build_runtime(
         controller=controller,
         approval_broker=approval_broker,
     )
+
+
+def _should_include_reasoning_content(model: str) -> bool:
+    raw = os.environ.get("MINIBOT_INCLUDE_REASONING_CONTENT", "auto").strip().lower()
+    if raw in {"1", "true", "yes", "always"}:
+        return True
+    if raw in {"0", "false", "no", "never"}:
+        return False
+
+    base_url = os.environ.get("OPENAI_BASE_URL", "").lower()
+    model_name = model.lower()
+    return "deepseek" in base_url or model_name.startswith("deepseek-")

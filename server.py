@@ -10,13 +10,16 @@ import threading
 from typing import Any
 
 from pydantic import BaseModel, Field
+from starlette.requests import Request
 
 from .bootstrap import MiniBotRuntime, build_runtime
 from .config import Config, load_env
 from .runtime import ApprovalBroker, RuntimeEvent
+from .runtime.controller import RunCancelled
 from .runtime.events import RuntimeEventEmitter
 from .run_log import make_run_id
 from .session import MessageEvent, Session
+from .session.models import utc_now
 
 
 _SENTINEL = object()
@@ -32,22 +35,32 @@ class ApprovalResolution(BaseModel):
     approved: bool
 
 
+class SessionCreateRequest(BaseModel):
+    session_id: str | None = None
+    title: str | None = None
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
 def _json_default(value: Any) -> str:
     return str(value)
 
 
 def _to_sse(event: RuntimeEvent) -> str:
     data = json.dumps(event.to_dict(), ensure_ascii=False, default=_json_default)
-    return f"id: {event.id}\nevent: {event.type}\ndata: {data}\n\n"
+    return f"id: {event.seq}\nevent: {event.type}\ndata: {data}\n\n"
 
 
 def _error_event(
     *,
+    run_id: str | None = None,
     session_id: str | None,
     exc: Exception,
 ) -> RuntimeEvent:
     emitter = RuntimeEventEmitter(
-        run_id=make_run_id(),
+        run_id=run_id or make_run_id(),
         session_id=session_id or "",
     )
     return emitter.emit(
@@ -58,6 +71,100 @@ def _error_event(
             "message": str(exc),
         },
     )
+
+
+def _last_event_seq(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    candidate = raw.rsplit(":", 1)[-1]
+    try:
+        return int(candidate)
+    except ValueError:
+        return None
+
+
+class RunEventStore:
+    """In-process event backlog and fan-out for active HTTP subscribers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[str, list[RuntimeEvent]] = {}
+        self._subscribers: dict[str, list[Queue[RuntimeEvent | object]]] = {}
+        self._status: dict[str, str] = {}
+
+    def create(self, run_id: str) -> None:
+        with self._lock:
+            self._events.setdefault(run_id, [])
+            self._status[run_id] = "running"
+
+    def is_terminal(self, run_id: str) -> bool:
+        with self._lock:
+            return self._status.get(run_id) in {
+                "completed",
+                "failed",
+                "cancelled",
+            }
+
+    def append(self, event: RuntimeEvent) -> None:
+        terminal_status = _terminal_status(event.type)
+        with self._lock:
+            self._events.setdefault(event.run_id, []).append(event)
+            self._status.setdefault(event.run_id, "running")
+            if terminal_status is not None:
+                self._status[event.run_id] = terminal_status
+            subscribers = list(self._subscribers.get(event.run_id, []))
+            if terminal_status is not None:
+                self._subscribers.pop(event.run_id, None)
+
+            for queue in subscribers:
+                queue.put(event)
+                if terminal_status is not None:
+                    queue.put(_SENTINEL)
+
+    def subscribe(
+        self,
+        run_id: str,
+        *,
+        last_seq: int | None = None,
+    ) -> Queue[RuntimeEvent | object] | None:
+        queue: Queue[RuntimeEvent | object] = Queue()
+        with self._lock:
+            if run_id not in self._events:
+                return None
+
+            backlog = self._events[run_id]
+            if last_seq is not None:
+                backlog = [event for event in backlog if event.seq > last_seq]
+            for event in backlog:
+                queue.put(event)
+
+            status = self._status.get(run_id)
+            if status in {"completed", "failed", "cancelled"}:
+                queue.put(_SENTINEL)
+            else:
+                self._subscribers.setdefault(run_id, []).append(queue)
+        return queue
+
+    def unsubscribe(self, run_id: str, queue: Queue[RuntimeEvent | object]) -> None:
+        with self._lock:
+            subscribers = self._subscribers.get(run_id)
+            if not subscribers:
+                return
+            self._subscribers[run_id] = [
+                subscriber for subscriber in subscribers if subscriber is not queue
+            ]
+            if not self._subscribers[run_id]:
+                self._subscribers.pop(run_id, None)
+
+
+def _terminal_status(event_type: str) -> str | None:
+    if event_type == "run.completed":
+        return "completed"
+    if event_type == "run.failed":
+        return "failed"
+    if event_type == "run.cancelled":
+        return "cancelled"
+    return None
 
 
 def _session_payload(session: Session) -> dict[str, Any]:
@@ -101,6 +208,37 @@ def create_app(runtime: MiniBotRuntime):
 
     app = FastAPI(title="MiniBot", version="0.1.0")
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="static")
+    event_store = RunEventStore()
+
+    def start_run(request: RunStreamRequest) -> str:
+        run_id = make_run_id()
+        event_store.create(run_id)
+
+        def sink(event: RuntimeEvent) -> None:
+            event_store.append(event)
+
+        def worker() -> None:
+            try:
+                runtime.controller.run_turn(
+                    session_id=request.session_id,
+                    user_input=request.input,
+                    event_handler=sink,
+                    run_id=run_id,
+                )
+            except RunCancelled:
+                pass
+            except Exception as exc:
+                if not event_store.is_terminal(run_id):
+                    event_store.append(
+                        _error_event(
+                            run_id=run_id,
+                            session_id=request.session_id,
+                            exc=exc,
+                        )
+                    )
+
+        threading.Thread(target=worker, daemon=True).start()
+        return run_id
 
     @app.get("/")
     def index() -> FileResponse:
@@ -123,6 +261,50 @@ def create_app(runtime: MiniBotRuntime):
         session = _load_or_create_current_session(runtime)
         return JSONResponse({"session": _session_payload(session)})
 
+    @app.post("/sessions")
+    def create_session_endpoint(
+        request: SessionCreateRequest = Body(default_factory=SessionCreateRequest),
+    ) -> JSONResponse:
+        try:
+            session = runtime.manager.create_session(
+                session_id=request.session_id,
+                title=request.title,
+            )
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        runtime.manager.set_current_session(session.session_id)
+        return JSONResponse(
+            {"session": _session_payload(session)}, status_code=201
+        )
+
+    @app.patch("/sessions/{session_id}")
+    def update_session(
+        session_id: str,
+        request: SessionUpdateRequest = Body(...),
+    ) -> JSONResponse:
+        if session_id == "current":
+            raise HTTPException(
+                status_code=400, detail="cannot update the 'current' alias"
+            )
+        session = runtime.manager.load(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        session.title = request.title.strip()
+        session.updated_at = utc_now()
+        runtime.manager.update_metadata(session)
+        return JSONResponse({"session": _session_payload(session)})
+
+    @app.delete("/sessions/{session_id}")
+    def delete_session_endpoint(session_id: str) -> JSONResponse:
+        if session_id == "current":
+            raise HTTPException(
+                status_code=400, detail="cannot delete the 'current' alias"
+            )
+        removed = runtime.manager.delete_session(session_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="session not found")
+        return JSONResponse({"ok": True, "session_id": session_id})
+
     @app.get("/sessions/{session_id}")
     def get_session(session_id: str) -> JSONResponse:
         session = _resolve_session(runtime, session_id)
@@ -142,47 +324,83 @@ def create_app(runtime: MiniBotRuntime):
             }
         )
 
-    @app.post("/runs/stream")
-    def stream_run(request: RunStreamRequest = Body(...)) -> StreamingResponse:
-        queue: Queue[RuntimeEvent | object] = Queue()
-        emitted_types: list[str] = []
+    @app.post("/runs")
+    def create_run(request: RunStreamRequest = Body(...)) -> JSONResponse:
+        run_id = start_run(request)
+        return JSONResponse(
+            {
+                "run_id": run_id,
+                "session_id": request.session_id,
+                "status": "running",
+            },
+            status_code=202,
+        )
 
-        def sink(event: RuntimeEvent) -> None:
-            emitted_types.append(event.type)
-            queue.put(event)
-
-        def worker() -> None:
-            try:
-                runtime.controller.run_turn(
-                    session_id=request.session_id,
-                    user_input=request.input,
-                    event_handler=sink,
-                )
-            except Exception as exc:
-                if "run.failed" not in emitted_types:
-                    queue.put(_error_event(session_id=request.session_id, exc=exc))
-            finally:
-                queue.put(_SENTINEL)
-
-        threading.Thread(target=worker, daemon=True).start()
+    @app.get("/runs/{run_id}/events")
+    def stream_run_events(run_id: str, request: Request) -> StreamingResponse:
+        queue = event_store.subscribe(
+            run_id,
+            last_seq=_last_event_seq(request.headers.get("last-event-id")),
+        )
+        if queue is None:
+            raise HTTPException(status_code=404, detail="run not found")
 
         def events():
-            while True:
-                try:
-                    item = queue.get(timeout=15)
-                except Empty:
-                    yield ": keepalive\n\n"
-                    continue
-                if item is _SENTINEL:
-                    break
-                assert isinstance(item, RuntimeEvent)
-                yield _to_sse(item)
+            try:
+                while True:
+                    try:
+                        item = queue.get(timeout=10)
+                    except Empty:
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is _SENTINEL:
+                        break
+                    assert isinstance(item, RuntimeEvent)
+                    yield _to_sse(item)
+            finally:
+                event_store.unsubscribe(run_id, queue)
 
         return StreamingResponse(
             events(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.post("/runs/stream")
+    def stream_run(request: RunStreamRequest = Body(...)) -> StreamingResponse:
+        run_id = start_run(request)
+        queue = event_store.subscribe(run_id)
+        assert queue is not None
+
+        def events():
+            try:
+                while True:
+                    try:
+                        item = queue.get(timeout=10)
+                    except Empty:
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is _SENTINEL:
+                        break
+                    assert isinstance(item, RuntimeEvent)
+                    yield _to_sse(item)
+            finally:
+                event_store.unsubscribe(run_id, queue)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/runs/{run_id}/cancel")
+    def cancel_run_endpoint(run_id: str) -> JSONResponse:
+        cancelled = runtime.controller.cancel_run(run_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=404, detail="run not found or already finished"
+            )
+        return JSONResponse({"ok": True, "run_id": run_id})
 
     @app.post("/runs/{run_id}/approvals/{approval_id}")
     def resolve_approval(

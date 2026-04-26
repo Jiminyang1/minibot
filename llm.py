@@ -38,6 +38,7 @@ class LLMResponse:
     """Provider-agnostic model response."""
 
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: TokenUsage | None = None
     debug: dict[str, Any] | None = None
@@ -78,6 +79,11 @@ class OpenAIClient(LLMClient):
         base_url = os.environ.get("OPENAI_BASE_URL")
         if base_url:
             kwargs["base_url"] = base_url
+        self.base_url = base_url or ""
+        self.include_reasoning_content = _should_send_reasoning_content(
+            model,
+            self.base_url,
+        )
         self._client = OpenAI(**kwargs)
 
     def chat(
@@ -86,7 +92,14 @@ class OpenAIClient(LLMClient):
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        kwargs: dict[str, Any] = {"model": model or self.model, "messages": messages}
+        request_model = model or self.model
+        kwargs: dict[str, Any] = {
+            "model": request_model,
+            "messages": _prepare_messages_for_provider(
+                messages,
+                include_reasoning_content=self.include_reasoning_content,
+            ),
+        }
         if tools:
             kwargs["tools"] = tools
 
@@ -106,6 +119,7 @@ class OpenAIClient(LLMClient):
 
         return LLMResponse(
             content=_extract_message_content(msg.content),
+            reasoning_content=_extract_reasoning_content(msg),
             tool_calls=tool_calls,
             usage=_extract_token_usage(getattr(resp, "usage", None)),
             debug=_build_response_debug(
@@ -114,6 +128,40 @@ class OpenAIClient(LLMClient):
                 tool_call_count=len(tool_calls),
             ),
         )
+
+
+def _extract_reasoning_content(msg: Any) -> str | None:
+    """Capture provider-specific reasoning text (DeepSeek thinking mode, etc.)."""
+    raw = getattr(msg, "reasoning_content", None)
+    if raw is None and hasattr(msg, "model_extra"):
+        extra = getattr(msg, "model_extra", None) or {}
+        raw = extra.get("reasoning_content")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return None
+
+
+def _should_send_reasoning_content(model: str, base_url: str) -> bool:
+    raw = os.environ.get("MINIBOT_INCLUDE_REASONING_CONTENT", "auto").strip().lower()
+    if raw in {"1", "true", "yes", "always"}:
+        return True
+    if raw in {"0", "false", "no", "never"}:
+        return False
+
+    return "deepseek" in base_url.lower() or model.lower().startswith("deepseek-")
+
+
+def _prepare_messages_for_provider(
+    messages: list[dict[str, Any]],
+    *,
+    include_reasoning_content: bool,
+) -> list[dict[str, Any]]:
+    if include_reasoning_content:
+        return messages
+    return [
+        {key: value for key, value in message.items() if key != "reasoning_content"}
+        for message in messages
+    ]
 
 
 def _extract_message_content(raw_content: Any) -> str | None:

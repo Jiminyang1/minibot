@@ -22,10 +22,11 @@ from minibot.server import create_app
 class _FakeController:
     def __init__(self) -> None:
         self.resolved = None
+        self.cancelled = None
 
-    def run_turn(self, *, session_id, user_input, event_handler):
+    def run_turn(self, *, session_id, user_input, event_handler, run_id=None):
         emitter = RuntimeEventEmitter(
-            run_id="r_test",
+            run_id=run_id or "r_test",
             session_id=session_id or "s_test",
             handler=event_handler,
         )
@@ -38,6 +39,10 @@ class _FakeController:
 
     def resolve_approval(self, *, run_id, approval_id, approved):
         self.resolved = (run_id, approval_id, approved)
+        return True
+
+    def cancel_run(self, run_id):
+        self.cancelled = run_id
         return True
 
 
@@ -95,6 +100,50 @@ class ServerSSETests(unittest.TestCase):
         self.assertIn("event: tool_call.started", response.text)
         self.assertIn("event: message.completed", response.text)
         self.assertIn("data:", response.text)
+
+    def test_create_run_returns_id_and_events_endpoint_replays_backlog(self) -> None:
+        runtime = _runtime()
+        client = TestClient(create_app(runtime))
+
+        created = client.post("/runs", json={"input": "hi"})
+
+        self.assertEqual(created.status_code, 202)
+        run_id = created.json()["run_id"]
+
+        response = client.get(f"/runs/{run_id}/events")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("id: 1", response.text)
+        self.assertIn("event: run.started", response.text)
+        self.assertIn("event: tool_call.started", response.text)
+        self.assertIn("event: message.completed", response.text)
+        self.assertIn("event: run.completed", response.text)
+
+    def test_events_endpoint_honors_last_event_id(self) -> None:
+        runtime = _runtime()
+        client = TestClient(create_app(runtime))
+        run_id = client.post("/runs", json={"input": "hi"}).json()["run_id"]
+
+        response = client.get(
+            f"/runs/{run_id}/events",
+            headers={"Last-Event-ID": "2"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("event: run.started", response.text)
+        self.assertIn("event: tool_call.completed", response.text)
+        self.assertIn("event: run.completed", response.text)
+
+    def test_cancel_endpoint_forwards_run_id_to_controller(self) -> None:
+        controller = _FakeController()
+        runtime = _runtime(controller=controller)
+        client = TestClient(create_app(runtime))
+
+        response = client.post("/runs/r_test/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "run_id": "r_test"})
+        self.assertEqual(controller.cancelled, "r_test")
 
     def test_approval_endpoint_forwards_decision_to_controller(self) -> None:
         controller = _FakeController()

@@ -21,8 +21,16 @@ class _BlockingTurnEngine:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def handle_turn(self, session, user_input, *, run_id=None, event_emitter=None):
-        del session, user_input, run_id
+    def handle_turn(
+        self,
+        session,
+        user_input,
+        *,
+        run_id=None,
+        event_emitter=None,
+        cancel_event=None,
+    ):
+        del session, user_input, run_id, cancel_event
         self.started.set()
         self.release.wait(timeout=2)
         if event_emitter is not None:

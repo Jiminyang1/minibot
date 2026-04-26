@@ -7,10 +7,56 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.llm import TokenUsage, _extract_message_content, _extract_token_usage
+from minibot.llm import (
+    TokenUsage,
+    _extract_message_content,
+    _extract_reasoning_content,
+    _extract_token_usage,
+    _prepare_messages_for_provider,
+)
 
 
 class LLMUsageExtractionTests(unittest.TestCase):
+    def test_extracts_reasoning_content_from_model_extra(self) -> None:
+        msg = types.SimpleNamespace(
+            reasoning_content=None,
+            model_extra={"reasoning_content": "thinking"},
+        )
+
+        self.assertEqual(_extract_reasoning_content(msg), "thinking")
+
+    def test_strips_reasoning_content_for_plain_openai_providers(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "thinking",
+            }
+        ]
+
+        prepared = _prepare_messages_for_provider(
+            messages,
+            include_reasoning_content=False,
+        )
+
+        self.assertNotIn("reasoning_content", prepared[0])
+
+    def test_preserves_reasoning_content_for_deepseek_thinking_mode(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "thinking",
+            }
+        ]
+
+        prepared = _prepare_messages_for_provider(
+            messages,
+            include_reasoning_content=True,
+        )
+
+        self.assertEqual(prepared[0]["reasoning_content"], "thinking")
+
     def test_extract_message_content_joins_text_parts(self) -> None:
         content = [
             {"type": "text", "text": "hello "},

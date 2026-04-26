@@ -11,6 +11,22 @@ from minibot.session import MessageEvent, SessionManager
 
 
 class SessionStoreTests(unittest.TestCase):
+    def test_reasoning_content_is_persisted_but_not_sent_to_model(self) -> None:
+        event = MessageEvent.create(
+            role="assistant",
+            content="final answer",
+            reasoning_content="private chain",
+        )
+
+        self.assertEqual(event.to_dict()["reasoning_content"], "private chain")
+        self.assertNotIn("reasoning_content", event.to_model_message())
+        self.assertEqual(
+            event.to_model_message(include_reasoning_content=True)[
+                "reasoning_content"
+            ],
+            "private chain",
+        )
+
     def test_native_layout_uses_session_directory_and_append_only_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

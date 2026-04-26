@@ -7,7 +7,7 @@ import threading
 
 from ..run_log import make_run_id, preview_text
 from ..session import Session, SessionManager
-from .agent_runner import ApprovalRequest
+from .agent_runner import ApprovalRequest, RunCancelled
 from .events import RuntimeEventEmitter, RuntimeEventHandler
 from .turn_engine import TurnEngine, TurnResult
 
@@ -18,6 +18,15 @@ class SessionBusyError(RuntimeError):
 
 class SessionNotFoundError(RuntimeError):
     """Raised when a requested session id does not exist."""
+
+
+__all__ = [
+    "ApprovalBroker",
+    "RunCancelled",
+    "RunController",
+    "SessionBusyError",
+    "SessionNotFoundError",
+]
 
 
 @dataclass
@@ -77,6 +86,8 @@ class RunController:
         self.approval_broker = approval_broker
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_lock = threading.Lock()
 
     def run_turn(
         self,
@@ -84,13 +95,18 @@ class RunController:
         session_id: str | None,
         user_input: str,
         event_handler: RuntimeEventHandler | None,
+        run_id: str | None = None,
     ) -> TurnResult:
         session = self._resolve_session(session_id)
         session_lock = self._session_lock(session.session_id)
         if not session_lock.acquire(blocking=False):
             raise SessionBusyError(f"会话 {session.session_id} 已有运行中的 turn。")
 
-        run_id = make_run_id()
+        run_id = run_id or make_run_id()
+        cancel_event = threading.Event()
+        with self._cancel_lock:
+            self._cancel_events[run_id] = cancel_event
+
         emitter = RuntimeEventEmitter(
             run_id=run_id,
             session_id=session.session_id,
@@ -109,6 +125,7 @@ class RunController:
                 user_input,
                 run_id=run_id,
                 event_emitter=emitter,
+                cancel_event=cancel_event,
             )
             emitter.emit(
                 "run.completed",
@@ -120,6 +137,12 @@ class RunController:
                 },
             )
             return result
+        except RunCancelled:
+            emitter.emit(
+                "run.cancelled",
+                {"session_id": session.session_id},
+            )
+            raise
         except Exception as exc:
             emitter.emit(
                 "run.failed",
@@ -132,6 +155,17 @@ class RunController:
             raise
         finally:
             session_lock.release()
+            with self._cancel_lock:
+                self._cancel_events.pop(run_id, None)
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Signal the run to stop at the next checkpoint."""
+        with self._cancel_lock:
+            event = self._cancel_events.get(run_id)
+        if event is None:
+            return False
+        event.set()
+        return True
 
     def resolve_approval(
         self,

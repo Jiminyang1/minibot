@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -55,6 +56,7 @@ class TurnEngine:
         *,
         run_id: str | None = None,
         event_emitter: RuntimeEventEmitter | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TurnResult:
         emitter = event_emitter or RuntimeEventEmitter(
             run_id=run_id or make_run_id(),
@@ -98,6 +100,7 @@ class TurnEngine:
                 max_iterations=self.config.max_iterations,
                 run_id=run_id,
                 event_emitter=emitter,
+                cancel_event=cancel_event,
             )
             outcome = self.runner.run(run_spec)
             reply = outcome.reply

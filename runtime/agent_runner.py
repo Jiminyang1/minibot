@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 import uuid
+
+
+class RunCancelled(RuntimeError):
+    """Raised when a run is cooperatively cancelled."""
 
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from ..run_log import make_run_id
@@ -85,6 +90,7 @@ class RunSpec:
     max_iterations: int = 20
     run_id: str | None = None
     event_emitter: RuntimeEventEmitter | None = None
+    cancel_event: threading.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +161,16 @@ class AgentRunner:
 
         events: list[MessageEvent] = []
         usage: TokenUsage | None = None
+
+        def _check_cancel() -> None:
+            if (
+                run_spec.cancel_event is not None
+                and run_spec.cancel_event.is_set()
+            ):
+                raise RunCancelled("run cancelled by user")
+
         for iteration in range(1, run_spec.max_iterations + 1):
+            _check_cancel()
             started = time.perf_counter()
             self._emit(
                 emitter,
@@ -198,7 +213,9 @@ class AgentRunner:
                         "model.request.completed",
                         model_completed_payload,
                     )
-                    assistant_msg = {"role": "assistant", "content": reply}
+                    assistant_msg: dict[str, Any] = {"role": "assistant", "content": reply}
+                    if resp.reasoning_content:
+                        assistant_msg["reasoning_content"] = resp.reasoning_content
                     messages.append(assistant_msg)
                     events.append(_to_event(assistant_msg))
                     self._emit(
@@ -236,6 +253,7 @@ class AgentRunner:
             events.append(_to_event(assistant_msg))
 
             planned_tool_calls = self._plan_tool_calls(resp.tool_calls, emitter)
+            _check_cancel()
             tool_outputs = self._execute_tool_calls(
                 planned_tool_calls,
                 tool_context,
@@ -287,6 +305,8 @@ class AgentRunner:
     @staticmethod
     def _response_to_message(resp: LLMResponse) -> dict[str, Any]:
         msg: dict[str, Any] = {"role": "assistant", "content": resp.content or ""}
+        if resp.reasoning_content:
+            msg["reasoning_content"] = resp.reasoning_content
         if resp.tool_calls:
             msg["tool_calls"] = [
                 {
@@ -506,6 +526,7 @@ def _to_event(message: dict[str, Any]) -> MessageEvent:
         tool_calls=message.get("tool_calls"),
         tool_call_id=message.get("tool_call_id"),
         name=message.get("name"),
+        reasoning_content=message.get("reasoning_content"),
     )
 
 

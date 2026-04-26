@@ -19,7 +19,16 @@ def preview(text: str, limit: int = 30) -> str:
 class MessageEvent:
     """One message in a conversation."""
 
-    __slots__ = ("id", "role", "content", "created_at", "tool_calls", "tool_call_id", "name")
+    __slots__ = (
+        "id",
+        "role",
+        "content",
+        "created_at",
+        "tool_calls",
+        "tool_call_id",
+        "name",
+        "reasoning_content",
+    )
 
     def __init__(
         self,
@@ -31,6 +40,7 @@ class MessageEvent:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
+        reasoning_content: str | None = None,
     ) -> None:
         self.id = id or ("m_" + uuid.uuid4().hex[:12])
         self.role = role
@@ -39,6 +49,7 @@ class MessageEvent:
         self.tool_calls = tool_calls
         self.tool_call_id = tool_call_id
         self.name = name
+        self.reasoning_content = reasoning_content
 
     @classmethod
     def create(
@@ -49,6 +60,7 @@ class MessageEvent:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
+        reasoning_content: str | None = None,
     ) -> "MessageEvent":
         return cls(
             role=role,
@@ -56,6 +68,7 @@ class MessageEvent:
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,
             name=name,
+            reasoning_content=reasoning_content,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +84,8 @@ class MessageEvent:
             data["tool_call_id"] = self.tool_call_id
         if self.name:
             data["name"] = self.name
+        if self.reasoning_content:
+            data["reasoning_content"] = self.reasoning_content
         return data
 
     @classmethod
@@ -83,9 +98,14 @@ class MessageEvent:
             tool_calls=data.get("tool_calls"),
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
+            reasoning_content=data.get("reasoning_content"),
         )
 
-    def to_model_message(self) -> dict[str, Any]:
+    def to_model_message(
+        self,
+        *,
+        include_reasoning_content: bool = False,
+    ) -> dict[str, Any]:
         message: dict[str, Any] = {"role": self.role, "content": self.content}
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
@@ -93,6 +113,12 @@ class MessageEvent:
             message["tool_call_id"] = self.tool_call_id
         if self.name:
             message["name"] = self.name
+        if (
+            include_reasoning_content
+            and self.reasoning_content
+            and self.role == "assistant"
+        ):
+            message["reasoning_content"] = self.reasoning_content
         return message
 
 
@@ -133,13 +159,23 @@ class Session:
         _, turns = self._split_preamble_and_turns()
         return len(turns)
 
-    def history_for_model(self, max_turns: int = 40) -> list[dict[str, Any]]:
+    def history_for_model(
+        self,
+        max_turns: int = 40,
+        *,
+        include_reasoning_content: bool = False,
+    ) -> list[dict[str, Any]]:
         """Return model history while keeping tool-calling turns intact."""
         preamble, turns = self._split_preamble_and_turns()
         if max_turns > 0:
             turns = turns[-max_turns:]
         messages = [*preamble, *self._flatten_turns(turns)]
-        return [message.to_model_message() for message in messages]
+        return [
+            message.to_model_message(
+                include_reasoning_content=include_reasoning_content,
+            )
+            for message in messages
+        ]
 
     def messages_to_compact(self, keep_recent_turns: int) -> list[MessageEvent]:
         """Return the older messages that should be summarized away."""
