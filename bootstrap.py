@@ -1,0 +1,153 @@
+"""Composition root helpers for MiniBot runtimes."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from .artifacts import ArtifactStore
+from .config import Config
+from .llm import OpenAIClient
+from .mcp_host import MCPHost
+from .prompts import SYSTEM_PROMPT
+from .run_log import RunLogStore
+from .runtime import (
+    AgentRunner,
+    ApprovalBroker,
+    ApprovalRequest,
+    ContextManager,
+    RunController,
+    RuntimeEventHandler,
+    ToolOutputMaterializer,
+    TurnEngine,
+    make_summarizer,
+)
+from .session import SessionManager
+from .skills import SkillRegistry
+from .tools import (
+    ToolRegistry,
+    filesystem_toolset,
+    memory_toolset,
+    network_toolset,
+    shell_toolset,
+    skill_toolset,
+)
+from .user_memory import UserMemoryStore
+
+
+@dataclass(frozen=True)
+class MiniBotRuntime:
+    config: Config
+    manager: SessionManager
+    memory_store: UserMemoryStore
+    artifact_store: ArtifactStore
+    run_log_store: RunLogStore
+    skill_registry: SkillRegistry
+    tool_registry: ToolRegistry
+    mcp_host: MCPHost
+    context_manager: ContextManager
+    runner: AgentRunner
+    turn_engine: TurnEngine
+    controller: RunController
+    approval_broker: ApprovalBroker | None = None
+
+    def close(self) -> None:
+        self.mcp_host.close()
+
+
+def build_runtime(
+    *,
+    config: Config,
+    workspace: Path | None = None,
+    run_event_handler: RuntimeEventHandler | None = None,
+    log_handler: Callable[[str], None] | None = None,
+    approval_handler: Callable[[ApprovalRequest], bool] | None = None,
+    approval_broker: ApprovalBroker | None = None,
+) -> MiniBotRuntime:
+    package_dir = Path(__file__).resolve().parent
+    resolved_workspace = (workspace or Path.cwd()).resolve()
+
+    manager = SessionManager(resolved_workspace)
+    artifact_store = ArtifactStore(resolved_workspace)
+    memory_store = UserMemoryStore()
+    run_log_store = RunLogStore(resolved_workspace)
+    llm = OpenAIClient(model=config.model)
+    skill_registry = SkillRegistry.from_directory(package_dir / "skills")
+
+    tool_registry = ToolRegistry()
+    tool_registry.register_all(filesystem_toolset(resolved_workspace, artifact_store))
+    tool_registry.register_all(shell_toolset(resolved_workspace))
+    tool_registry.register_all(network_toolset())
+    tool_registry.register_all(memory_toolset(memory_store))
+    tool_registry.register_all(skill_toolset(skill_registry))
+
+    mcp_config_root = resolved_workspace
+    workspace_mcp_path = resolved_workspace / "mcp.json"
+    package_mcp_path = package_dir / "mcp.json"
+    if not workspace_mcp_path.exists() and package_mcp_path.exists():
+        mcp_config_root = package_dir
+        if log_handler is not None:
+            log_handler(f"当前目录未找到 mcp.json，改用包目录配置: {package_mcp_path}")
+    if (mcp_config_root / "mcp.json").exists() and log_handler is not None:
+        log_handler(f"MCP 配置路径: {mcp_config_root / 'mcp.json'}")
+
+    mcp_host = MCPHost.from_workspace(
+        mcp_config_root,
+        event_handler=log_handler,
+    )
+    for tool in mcp_host.connect_all():
+        if tool_registry.get(tool.name) is not None:
+            if log_handler is not None:
+                log_handler(f"MCP 工具名称冲突，已跳过: {tool.name}")
+            continue
+        tool_registry.register(tool)
+
+    summarizer = make_summarizer(llm)
+    context_manager = ContextManager(
+        base_system_prompt=SYSTEM_PROMPT,
+        memory_store=memory_store,
+        skill_registry=skill_registry,
+        tool_registry=tool_registry,
+        max_history_turns=config.max_history_turns,
+        compact_token_threshold=config.compact_token_threshold,
+        reserved_completion_tokens=config.reserved_completion_tokens,
+        compact_keep_recent=config.compact_keep_recent,
+        summarizer=summarizer,
+    )
+    runner = AgentRunner(
+        llm,
+        tool_registry,
+        materializer=ToolOutputMaterializer(artifact_store),
+        event_handler=run_event_handler,
+        approval_handler=approval_handler,
+        max_parallel_tools=config.max_parallel_tools,
+    )
+    turn_engine = TurnEngine(
+        runner,
+        manager,
+        config,
+        context_manager=context_manager,
+        event_handler=run_event_handler,
+        run_log_store=run_log_store,
+    )
+    controller = RunController(
+        turn_engine=turn_engine,
+        manager=manager,
+        approval_broker=approval_broker,
+    )
+    return MiniBotRuntime(
+        config=config,
+        manager=manager,
+        memory_store=memory_store,
+        artifact_store=artifact_store,
+        run_log_store=run_log_store,
+        skill_registry=skill_registry,
+        tool_registry=tool_registry,
+        mcp_host=mcp_host,
+        context_manager=context_manager,
+        runner=runner,
+        turn_engine=turn_engine,
+        controller=controller,
+        approval_broker=approval_broker,
+    )

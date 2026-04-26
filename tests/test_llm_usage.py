@@ -7,10 +7,20 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.llm import TokenUsage, _extract_token_usage
+from minibot.llm import TokenUsage, _extract_message_content, _extract_token_usage
 
 
 class LLMUsageExtractionTests(unittest.TestCase):
+    def test_extract_message_content_joins_text_parts(self) -> None:
+        content = [
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"},
+        ]
+
+        extracted = _extract_message_content(content)
+
+        self.assertEqual(extracted, "hello world")
+
     def test_extracts_chat_completions_usage_from_object_attributes(self) -> None:
         raw_usage = types.SimpleNamespace(
             prompt_tokens=123,

@@ -1,3 +1,5 @@
 openai>=1.0
 tiktoken>=0.7  # optional: improves token estimation accuracy
 mcp>=1.27,<2
+fastapi>=0.115
+uvicorn>=0.29

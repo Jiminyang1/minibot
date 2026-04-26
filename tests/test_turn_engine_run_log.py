@@ -16,6 +16,7 @@ from minibot.mcp_host.provider import MCPToolProxy
 from minibot.run_log import RunLogStore
 from minibot.runtime.agent_runner import PartialRunError, RunOutcome
 from minibot.runtime.context_manager import PreparedContext
+from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.turn_engine import TurnEngine
 from minibot.session import MessageEvent, SessionManager
 from minibot.tools.registry import ToolRegistry
@@ -123,7 +124,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 did_compact=False,
                 compact_message=None,
             )
-            emitted: list[str] = []
+            emitted: list[RuntimeEvent] = []
             engine = TurnEngine(
                 _StubRunner(reply="ok"),
                 manager,
@@ -138,7 +139,9 @@ class TurnEngineRunLogTests(unittest.TestCase):
 
             engine.handle_turn(session, "hello")
 
-            self.assertIn("当前上下文占用(不含本次输入): 123/456 tokens", emitted)
+            self.assertEqual(emitted[0].type, "context.usage")
+            self.assertEqual(emitted[0].payload["current_tokens"], 123)
+            self.assertEqual(emitted[0].payload["budget"], 456)
 
     def test_successful_turn_appends_summary_log_and_preserves_session_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

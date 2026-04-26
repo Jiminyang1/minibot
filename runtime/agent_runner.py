@@ -8,13 +8,16 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+import uuid
 
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
+from ..run_log import make_run_id
 from ..session import MessageEvent
 from ..tools import ToolExecutionContext, ToolRegistry
 from ..tools.base import Tool
 from ..tools.registry import PreparedToolCall
 from ..tools.result import ToolOutput
+from .events import RuntimeEventEmitter, RuntimeEventHandler
 from .tool_output_materializer import ToolOutputMaterializer
 
 
@@ -40,6 +43,27 @@ def _latest_user_input(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _normalized_reply(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return ""
+
+
 def _tool_label(tool: Tool | None, fallback: str) -> str:
     if tool is None:
         return fallback
@@ -59,6 +83,8 @@ class RunSpec:
     messages: list[dict[str, Any]]
     tool_definitions: list[dict[str, Any]]
     max_iterations: int = 20
+    run_id: str | None = None
+    event_emitter: RuntimeEventEmitter | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +107,18 @@ class PartialRunError(Exception):
 
 
 @dataclass(frozen=True)
+class ApprovalRequest:
+    """One pending approval decision for a sensitive tool call."""
+
+    run_id: str
+    session_id: str
+    approval_id: str
+    tool_call_id: str
+    tool_name: str
+    args: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _PlannedToolCall:
     """One model-requested tool call annotated with local execution metadata."""
 
@@ -98,8 +136,8 @@ class AgentRunner:
         tool_registry: ToolRegistry,
         *,
         materializer: ToolOutputMaterializer,
-        event_handler: Callable[[str], None] | None = None,
-        approval_handler: Callable[[str, dict[str, Any]], bool] | None = None,
+        event_handler: RuntimeEventHandler | None = None,
+        approval_handler: Callable[[ApprovalRequest], bool] | None = None,
         max_parallel_tools: int = 4,
     ) -> None:
         self.llm = llm
@@ -113,13 +151,21 @@ class AgentRunner:
         """Run one prepared request until the model returns a final answer."""
         messages = list(run_spec.messages)
         tool_context = ToolExecutionContext(session_id=run_spec.session_id)
-        self._emit(f"开始处理: {_preview(_latest_user_input(messages))}")
+        emitter = self._resolve_emitter(run_spec)
 
         events: list[MessageEvent] = []
         usage: TokenUsage | None = None
         for iteration in range(1, run_spec.max_iterations + 1):
             started = time.perf_counter()
-            self._emit(f"第 {iteration} 轮: 请求模型...")
+            self._emit(
+                emitter,
+                "model.request.started",
+                {
+                    "iteration": iteration,
+                    "model": run_spec.model,
+                    "input_preview": _preview(_latest_user_input(messages)),
+                },
+            )
 
             try:
                 resp = self.llm.chat(
@@ -137,27 +183,84 @@ class AgentRunner:
                 raise
             usage = _merge_usage(usage, resp.usage)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
+            model_completed_payload: dict[str, Any] = {
+                "iteration": iteration,
+                "elapsed_ms": elapsed_ms,
+                "tool_call_count": len(resp.tool_calls),
+                "usage": _usage_payload(resp.usage),
+            }
 
+            if not resp.tool_calls:
+                reply = _normalized_reply(resp.content).strip()
+                if reply:
+                    self._emit(
+                        emitter,
+                        "model.request.completed",
+                        model_completed_payload,
+                    )
+                    assistant_msg = {"role": "assistant", "content": reply}
+                    messages.append(assistant_msg)
+                    events.append(_to_event(assistant_msg))
+                    self._emit(
+                        emitter,
+                        "message.completed",
+                        {"iteration": iteration, "content": reply},
+                    )
+                    return RunOutcome(reply=reply, events=events, usage=usage)
+
+                model_completed_payload.update(
+                    {
+                        "empty_reply": True,
+                        "usage": _usage_payload(usage),
+                        "response_debug": resp.debug,
+                    }
+                )
+                self._emit(
+                    emitter,
+                    "model.request.completed",
+                    model_completed_payload,
+                )
+                raise PartialRunError(
+                    cause=RuntimeError("模型返回空回复，请重试；详见上一条空回答诊断日志。"),
+                    events=list(events),
+                    usage=usage,
+                )
+
+            self._emit(
+                emitter,
+                "model.request.completed",
+                model_completed_payload,
+            )
             assistant_msg = self._response_to_message(resp)
             messages.append(assistant_msg)
             events.append(_to_event(assistant_msg))
 
-            if not resp.tool_calls:
-                self._emit(f"第 {iteration} 轮: 最终回答 ({elapsed_ms} ms)")
-                return RunOutcome(reply=resp.content or "", events=events, usage=usage)
-
-            self._emit(
-                f"第 {iteration} 轮: 调用 {len(resp.tool_calls)} 个工具 ({elapsed_ms} ms)"
+            planned_tool_calls = self._plan_tool_calls(resp.tool_calls, emitter)
+            tool_outputs = self._execute_tool_calls(
+                planned_tool_calls,
+                tool_context,
+                emitter,
             )
-            planned_tool_calls = self._plan_tool_calls(resp.tool_calls)
-            tool_outputs = self._execute_tool_calls(planned_tool_calls, tool_context)
 
             for planned, output in zip(planned_tool_calls, tool_outputs):
                 result = self.materializer.materialize(output, context=tool_context)
-                if _is_mcp_tool(planned.tool):
-                    self._emit(f"MCP 返回: {result.summary}")
-                else:
-                    self._emit(f"返回: {result.summary}")
+                self._emit(
+                    emitter,
+                    "tool_call.completed" if result.ok else "tool_call.failed",
+                    {
+                        "tool_call_id": planned.tool_call.id,
+                        "tool": planned.tool_call.name,
+                        "display_name": _tool_label(planned.tool, planned.tool_call.name),
+                        "source": None if planned.tool is None else planned.tool.source,
+                        "ok": result.ok,
+                        "code": result.code,
+                        "summary": result.summary,
+                        "artifact": (
+                            None if result.artifact is None else result.artifact.to_dict()
+                        ),
+                        "truncated": result.truncated,
+                    },
+                )
 
                 tool_msg: dict[str, Any] = {
                     "role": "tool",
@@ -169,7 +272,15 @@ class AgentRunner:
                 events.append(_to_event(tool_msg))
 
         fallback = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
-        self._emit(f"已达最大迭代次数 {run_spec.max_iterations}")
+        self._emit(
+            emitter,
+            "message.completed",
+            {
+                "content": fallback,
+                "reason": "max_iterations",
+                "max_iterations": run_spec.max_iterations,
+            },
+        )
         events.append(_to_event({"role": "assistant", "content": fallback}))
         return RunOutcome(reply=fallback, events=events, usage=usage)
 
@@ -187,20 +298,66 @@ class AgentRunner:
             ]
         return msg
 
-    def _approve(self, tool_name: str, args: dict[str, Any]) -> bool:
+    def _approve(
+        self,
+        planned: _PlannedToolCall,
+        emitter: RuntimeEventEmitter | None,
+    ) -> bool:
         if self.approval_handler is None:
             return True
-        return self.approval_handler(tool_name, args)
+        approval_id = "ap_" + uuid.uuid4().hex[:12]
+        request = ApprovalRequest(
+            run_id="" if emitter is None else emitter.run_id,
+            session_id="" if emitter is None else emitter.session_id,
+            approval_id=approval_id,
+            tool_call_id=planned.tool_call.id,
+            tool_name=planned.tool_call.name,
+            args=planned.args,
+        )
+        self._emit(
+            emitter,
+            "approval.required",
+            {
+                "approval_id": approval_id,
+                "tool_call_id": planned.tool_call.id,
+                "tool": planned.tool_call.name,
+                "args": planned.args,
+            },
+        )
+        approved = self.approval_handler(request)
+        self._emit(
+            emitter,
+            "approval.resolved",
+            {
+                "approval_id": approval_id,
+                "tool_call_id": planned.tool_call.id,
+                "tool": planned.tool_call.name,
+                "approved": approved,
+            },
+        )
+        return approved
 
-    def _plan_tool_calls(self, tool_calls: list[ToolCall]) -> list[_PlannedToolCall]:
+    def _plan_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        emitter: RuntimeEventEmitter | None,
+    ) -> list[_PlannedToolCall]:
         planned: list[_PlannedToolCall] = []
         for tool_call in tool_calls:
             args = _parse_args(tool_call.arguments)
             tool = self.tool_registry.get(tool_call.name)
-            if _is_mcp_tool(tool):
-                self._emit(f"MCP 调用: {_tool_label(tool, tool_call.name)}({args})")
-            else:
-                self._emit(f"工具: {tool_call.name}({args})")
+            self._emit(
+                emitter,
+                "tool_call.started",
+                {
+                    "tool_call_id": tool_call.id,
+                    "tool": tool_call.name,
+                    "display_name": _tool_label(tool, tool_call.name),
+                    "source": None if tool is None else tool.source,
+                    "args": args,
+                    "requires_approval": bool(tool and tool.requires_approval),
+                },
+            )
             planned.append(
                 _PlannedToolCall(
                     tool_call=tool_call,
@@ -214,13 +371,14 @@ class AgentRunner:
         self,
         planned_tool_calls: list[_PlannedToolCall],
         context: ToolExecutionContext,
+        emitter: RuntimeEventEmitter | None,
     ) -> list[ToolOutput]:
         outputs: list[ToolOutput] = []
         for batch in self._partition_tool_batches(planned_tool_calls):
             if len(batch) > 1:
-                outputs.extend(self._execute_parallel_batch(batch, context))
+                outputs.extend(self._execute_parallel_batch(batch, context, emitter))
                 continue
-            outputs.append(self._execute_planned_tool_call(batch[0], context))
+            outputs.append(self._execute_planned_tool_call(batch[0], context, emitter))
         return outputs
 
     def _partition_tool_batches(
@@ -248,12 +406,13 @@ class AgentRunner:
         self,
         batch: list[_PlannedToolCall],
         context: ToolExecutionContext,
+        emitter: RuntimeEventEmitter | None,
     ) -> list[ToolOutput]:
         outputs: list[ToolOutput | None] = [None] * len(batch)
         submitted: list[tuple[int, _PlannedToolCall, Any]] = []
 
         for index, planned in enumerate(batch):
-            prepared_or_output = self._prepare_tool_call(planned, context)
+            prepared_or_output = self._prepare_tool_call(planned, context, emitter)
             if isinstance(prepared_or_output, ToolOutput):
                 outputs[index] = prepared_or_output
                 continue
@@ -292,8 +451,9 @@ class AgentRunner:
         self,
         planned: _PlannedToolCall,
         context: ToolExecutionContext,
+        emitter: RuntimeEventEmitter | None,
     ) -> ToolOutput:
-        prepared_or_output = self._prepare_tool_call(planned, context)
+        prepared_or_output = self._prepare_tool_call(planned, context, emitter)
         if isinstance(prepared_or_output, ToolOutput):
             return prepared_or_output
         return self.tool_registry.invoke(prepared_or_output)
@@ -302,9 +462,10 @@ class AgentRunner:
         self,
         planned: _PlannedToolCall,
         context: ToolExecutionContext,
+        emitter: RuntimeEventEmitter | None,
     ) -> PreparedToolCall | ToolOutput:
         if planned.tool and planned.tool.requires_approval:
-            if not self._approve(planned.tool_call.name, planned.args):
+            if not self._approve(planned, emitter):
                 return ToolOutput.failure(
                     "denied",
                     f"工具 {planned.tool_call.name} 未获批准执行。",
@@ -316,9 +477,25 @@ class AgentRunner:
             context=context,
         )
 
-    def _emit(self, message: str) -> None:
-        if self.event_handler:
-            self.event_handler(message)
+    def _resolve_emitter(self, run_spec: RunSpec) -> RuntimeEventEmitter | None:
+        if run_spec.event_emitter is not None:
+            return run_spec.event_emitter
+        if self.event_handler is None:
+            return None
+        return RuntimeEventEmitter(
+            run_id=run_spec.run_id or make_run_id(),
+            session_id=run_spec.session_id,
+            handler=self.event_handler,
+        )
+
+    @staticmethod
+    def _emit(
+        emitter: RuntimeEventEmitter | None,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if emitter is not None:
+            emitter.emit(event_type, payload)
 
 
 def _to_event(message: dict[str, Any]) -> MessageEvent:
@@ -351,3 +528,13 @@ def _sum_optional(left: int | None, right: int | None) -> int | None:
     if left is None or right is None:
         return None
     return left + right
+
+
+def _usage_payload(usage: TokenUsage | None) -> dict[str, int | None] | None:
+    if usage is None:
+        return None
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+    }

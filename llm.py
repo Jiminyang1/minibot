@@ -40,6 +40,7 @@ class LLMResponse:
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: TokenUsage | None = None
+    debug: dict[str, Any] | None = None
 
 
 # ── abstract client ──────────────────────────────────────────────
@@ -104,10 +105,87 @@ class OpenAIClient(LLMClient):
             ]
 
         return LLMResponse(
-            content=msg.content,
+            content=_extract_message_content(msg.content),
             tool_calls=tool_calls,
             usage=_extract_token_usage(getattr(resp, "usage", None)),
+            debug=_build_response_debug(
+                raw_content=msg.content,
+                finish_reason=getattr(resp.choices[0], "finish_reason", None),
+                tool_call_count=len(tool_calls),
+            ),
         )
+
+
+def _extract_message_content(raw_content: Any) -> str | None:
+    if raw_content is None:
+        return None
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for item in raw_content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts) or None
+    return str(raw_content)
+
+
+def _build_response_debug(
+    *,
+    raw_content: Any,
+    finish_reason: Any,
+    tool_call_count: int,
+) -> dict[str, Any]:
+    return {
+        "raw_content_type": type(raw_content).__name__,
+        "raw_content_preview": _preview_raw_content(raw_content),
+        "finish_reason": finish_reason if isinstance(finish_reason, str) else repr(finish_reason),
+        "tool_call_count": tool_call_count,
+    }
+
+
+def _preview_raw_content(raw_content: Any, limit: int = 240) -> str:
+    if raw_content is None:
+        return "None"
+    if isinstance(raw_content, str):
+        compact = " ".join(raw_content.split())
+        return compact if len(compact) <= limit else compact[:limit] + "..."
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for item in raw_content:
+            item_type = type(item).__name__
+            text: str | None = None
+            if isinstance(item, str):
+                text = item
+            elif isinstance(item, dict):
+                candidate = item.get("text")
+                if isinstance(candidate, str):
+                    text = candidate
+            else:
+                candidate = getattr(item, "text", None)
+                if isinstance(candidate, str):
+                    text = candidate
+
+            if text is not None:
+                compact = " ".join(text.split())
+                if len(compact) > 80:
+                    compact = compact[:80] + "..."
+                parts.append(f"{item_type}:{compact}")
+            else:
+                parts.append(item_type)
+
+        preview = " | ".join(parts)
+        return preview if len(preview) <= limit else preview[:limit] + "..."
+    return repr(raw_content)
 
 
 def _extract_token_usage(raw_usage: Any) -> TokenUsage | None:

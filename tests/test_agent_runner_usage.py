@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from minibot.artifacts import ArtifactStore
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from minibot.runtime.agent_runner import AgentRunner, PartialRunError, RunSpec
+from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.base import Tool, ToolExecutionContext
@@ -22,6 +23,7 @@ from minibot.tools.result import ToolOutput
 class _ScriptedLLM(LLMClient):
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._responses = list(responses)
+        self.calls: list[dict[str, object]] = []
 
     def chat(
         self,
@@ -29,7 +31,13 @@ class _ScriptedLLM(LLMClient):
         tools: list[dict[str, object]] | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        del messages, tools, model
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "tools": tools,
+                "model": model,
+            }
+        )
         return self._responses.pop(0)
 
 
@@ -167,6 +175,65 @@ class _TrackingTool(Tool):
 
 
 class AgentRunnerUsageTests(unittest.TestCase):
+    def test_fails_fast_when_model_returns_empty_final_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_EchoTool())
+            llm = _ScriptedLLM(
+                [
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call_1",
+                                name="echo",
+                                arguments='{"value":"hi"}',
+                            )
+                        ],
+                    ),
+                    LLMResponse(
+                        content="",
+                        debug={
+                            "raw_content_type": "list",
+                            "raw_content_preview": "[]",
+                            "finish_reason": "stop",
+                            "tool_call_count": 0,
+                        },
+                    ),
+                ]
+            )
+            emitted: list[RuntimeEvent] = []
+            runner = AgentRunner(
+                llm,
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                event_handler=emitted.append,
+            )
+
+            with self.assertRaises(PartialRunError) as ctx:
+                runner.run(
+                    RunSpec(
+                        session_id="s_test",
+                        model="gpt-5.4-mini",
+                        messages=[{"role": "user", "content": "say hi"}],
+                        tool_definitions=registry.get_definitions(),
+                    )
+                )
+
+            self.assertEqual(
+                str(ctx.exception.cause),
+                "模型返回空回复，请重试；详见上一条空回答诊断日志。",
+            )
+            self.assertEqual(len(ctx.exception.events), 2)
+            self.assertTrue(
+                any(
+                    event.type == "model.request.completed"
+                    and event.payload.get("empty_reply") is True
+                    for event in emitted
+                )
+            )
+            self.assertEqual(len(llm.calls), 2)
+
     def test_aggregates_real_usage_across_multiple_llm_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = ToolRegistry()
@@ -423,6 +490,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     requires_approval=True,
                 )
             )
+            emitted: list[RuntimeEvent] = []
             runner = AgentRunner(
                 _ScriptedLLM(
                     [
@@ -438,7 +506,8 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 ),
                 registry,
                 materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
-                approval_handler=lambda name, args: name != "denied",
+                event_handler=emitted.append,
+                approval_handler=lambda request: request.tool_name != "denied",
                 max_parallel_tools=4,
             )
 
@@ -460,6 +529,15 @@ class AgentRunnerUsageTests(unittest.TestCase):
             approved_payload = json.loads(tool_events[1].content)
             self.assertEqual(denied_payload["code"], "denied")
             self.assertEqual(approved_payload["code"], "success")
+            self.assertIn("approval.required", [event.type for event in emitted])
+            self.assertIn("approval.resolved", [event.type for event in emitted])
+            self.assertTrue(
+                any(
+                    event.type == "tool_call.failed"
+                    and event.payload.get("tool") == "denied"
+                    for event in emitted
+                )
+            )
 
     def test_parallel_large_results_materialize_distinct_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

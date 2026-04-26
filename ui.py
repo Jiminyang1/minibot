@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from collections.abc import Iterable
 from typing import Any
 
 from .mcp_host import MCPHostSummary, MCPServerStatus
+from .runtime.events import RuntimeEvent
 from .user_memory import MemoryItem
 from .session import Session
 
@@ -71,6 +73,58 @@ def tool_log(msg: str) -> None:
     print(f"  {c('›', 'dim')} {c(msg, 'dim')}")
 
 
+def print_runtime_event(event: RuntimeEvent) -> None:
+    """Render one structured runtime event for the terminal UI."""
+    message = format_runtime_event(event)
+    if message:
+        tool_log(message)
+
+
+def format_runtime_event(event: RuntimeEvent) -> str | None:
+    payload = event.payload
+    if event.type == "context.usage":
+        return (
+            "当前上下文占用(不含本次输入): "
+            f"{payload.get('current_tokens')}/{payload.get('budget')} tokens"
+        )
+    if event.type == "model.request.started":
+        return f"第 {payload.get('iteration')} 轮: 请求模型..."
+    if event.type == "model.request.completed":
+        if payload.get("empty_reply"):
+            debug = payload.get("response_debug")
+            return (
+                f"第 {payload.get('iteration')} 轮: 模型返回空回答 · "
+                f"{json.dumps(debug, ensure_ascii=False, default=str)}"
+            )
+        return (
+            f"第 {payload.get('iteration')} 轮: 模型返回 "
+            f"{payload.get('tool_call_count', 0)} 个工具调用"
+        )
+    if event.type == "tool_call.started":
+        args = json.dumps(payload.get("args") or {}, ensure_ascii=False, default=str)
+        label = payload.get("display_name") or payload.get("tool")
+        prefix = "MCP 调用" if payload.get("source") == "mcp" else "工具"
+        return f"{prefix}: {label}({args})"
+    if event.type in {"tool_call.completed", "tool_call.failed"}:
+        prefix = "MCP 返回" if payload.get("source") == "mcp" else "返回"
+        if event.type == "tool_call.failed":
+            prefix = "MCP 失败" if payload.get("source") == "mcp" else "工具失败"
+        return f"{prefix}: {payload.get('summary')}"
+    if event.type == "approval.required":
+        return f"等待批准: {payload.get('tool')}"
+    if event.type == "approval.resolved":
+        state = "已批准" if payload.get("approved") else "已拒绝"
+        return f"{state}: {payload.get('tool')}"
+    if event.type == "message.completed":
+        iteration = payload.get("iteration")
+        if iteration is None:
+            return "最终回答"
+        return f"第 {iteration} 轮: 最终回答"
+    if event.type == "run.failed":
+        return f"运行失败: {payload.get('error_type')}: {payload.get('message')}"
+    return None
+
+
 def prompt_approval(tool_name: str, args: dict[str, Any]) -> bool:
     """Ask the user whether to run a sensitive tool call."""
     preview = ", ".join(f"{k}={v!r}" for k, v in args.items())
@@ -88,7 +142,8 @@ def read_user_input() -> str:
 
 
 def print_agent_reply(reply: str) -> None:
-    print(f"\n  {c('Agent ›', 'bold', 'magenta')} {reply}")
+    visible_reply = reply if reply.strip() else c("（模型返回空回复）", "yellow")
+    print(f"\n  {c('Agent ›', 'bold', 'magenta')} {visible_reply}")
 
 
 # ── REPL panels ──────────────────────────────────────────────────

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import time
 from typing import TYPE_CHECKING
 
 from .agent_runner import PartialRunError, RunSpec
+from .events import RuntimeEventEmitter, RuntimeEventHandler
 from ..run_log import RunLogRecord, make_run_id, preview_text, utc_now
 from ..session import MessageEvent, Session, SessionManager
 
@@ -38,7 +38,7 @@ class TurnEngine:
         config: Config,
         *,
         context_manager: ContextManager,
-        event_handler: Callable[[str], None] | None = None,
+        event_handler: RuntimeEventHandler | None = None,
         run_log_store: RunLogStore | None = None,
     ) -> None:
         self.runner = runner
@@ -48,8 +48,20 @@ class TurnEngine:
         self.event_handler = event_handler
         self.run_log_store = run_log_store
 
-    def handle_turn(self, session: Session, user_input: str) -> TurnResult:
-        run_id = make_run_id()
+    def handle_turn(
+        self,
+        session: Session,
+        user_input: str,
+        *,
+        run_id: str | None = None,
+        event_emitter: RuntimeEventEmitter | None = None,
+    ) -> TurnResult:
+        emitter = event_emitter or RuntimeEventEmitter(
+            run_id=run_id or make_run_id(),
+            session_id=session.session_id,
+            handler=self.event_handler,
+        )
+        run_id = emitter.run_id
         timestamp = utc_now()
         started = time.perf_counter()
         turn_index = session.turn_count() + 1
@@ -60,13 +72,19 @@ class TurnEngine:
         usage = None
 
         try:
-            self._emit_current_context_usage(session)
+            self._emit_current_context_usage(session, emitter)
             prepared = self.context_manager.prepare_for_turn(
                 session=session,
                 user_input=user_input,
             )
             if prepared.did_compact:
                 self.manager.save(session)
+                emitter.emit(
+                    "context.compacted",
+                    {
+                        "message": prepared.compact_message,
+                    },
+                )
             user_event = MessageEvent.create(role="user", content=user_input)
             session.add_message(user_event)
             self.manager.append_messages(session.session_id, [user_event])
@@ -78,6 +96,8 @@ class TurnEngine:
                 messages=prepared.messages,
                 tool_definitions=prepared.tool_definitions,
                 max_iterations=self.config.max_iterations,
+                run_id=run_id,
+                event_emitter=emitter,
             )
             outcome = self.runner.run(run_spec)
             reply = outcome.reply
@@ -222,25 +242,28 @@ class TurnEngine:
     def list_available_skills(self) -> list[tuple[str, str, tuple[str, ...]]]:
         return self.context_manager.list_available_skills()
 
-    def _emit_current_context_usage(self, session: Session) -> None:
+    def _emit_current_context_usage(
+        self,
+        session: Session,
+        emitter: RuntimeEventEmitter,
+    ) -> None:
         current_tokens = self.context_manager.estimate_visible_tokens(session=session)
         budget = self.context_manager.effective_input_budget
-        self._emit(
-            "当前上下文占用(不含本次输入): "
-            f"{current_tokens}/{budget} tokens"
+        emitter.emit(
+            "context.usage",
+            {
+                "current_tokens": current_tokens,
+                "budget": budget,
+            },
         )
-
-    def _emit(self, message: str) -> None:
-        if self.event_handler:
-            self.event_handler(message)
 
     def _append_run_log(self, record: RunLogRecord) -> None:
         if self.run_log_store is None:
             return
         try:
             self.run_log_store.append(record)
-        except Exception as exc:
-            self._emit(f"写入 run log 失败: {exc}")
+        except Exception:
+            return
 
     @staticmethod
     def _count_messages(events: list[MessageEvent], *, role: str) -> int:

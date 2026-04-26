@@ -6,6 +6,7 @@
 
 - tool calling（本地工具 + MCP 工具统一 schema）
 - 会话持久化 + 超阈值自动 compact
+- 结构化 agent event stream + 本地 SSE/Web UI
 - 跨会话的用户长期记忆
 - Skills 按需加载（L1 元数据常驻 + L2 正文懒读）
 - MCP 支持 `stdio` / `streamable_http`
@@ -129,22 +130,36 @@ MCP 在 MiniBot 里是统一的外部能力接入层，分两边：
 
 所以 skill 更像"按需拉取的工作流说明"，不是永久内置规则。写法和已有的 `skills/*.md` 保持一致即可。
 
-### 可观测性（`run_log.py` + `artifacts.py` + `event_handler`）
+### 可观测性（`RuntimeEvent` + SSE + `run_log.py`）
 
 MiniBot 把"一次 turn 发生了什么"分成**运行期事件流**和**事后落盘记录**两类，职责分开。
 
-#### 运行期事件流（in-process callback）
+#### 运行期事件流
 
-核心组件（`TurnEngine` / `AgentRunner` / `MCPHost` / MCP transport）都接受一个 `event_handler: Callable[[str], None]` 回调。在 CLI 场景下 `__main__.py` 里注入的是 `ui.tool_log`，把事件实时打到终端；也可以换成别的实现（结构化 logger、Web UI、OpenTelemetry 等），完全不碰业务代码。
+核心 runtime 现在 emit 结构化 `RuntimeEvent`，而不是中文字符串日志：
 
-目前会 emit 的事件大致包括：
+```python
+RuntimeEvent(
+    id: str,
+    run_id: str,
+    session_id: str,
+    seq: int,
+    type: str,
+    created_at: str,
+    payload: dict,
+)
+```
+
+`TurnEngine` / `AgentRunner` 通过 `RuntimeEventEmitter` 发事件；CLI 只负责把事件格式化成终端文本，Web server 则把同一批事件转成标准 SSE 的 `id/event/data`。第一版不做 token 级 streaming，只在最终回答完成后发 `message.completed`。
+
+当前事件类型：
 
 - **Turn 级**：开始处理 / 每轮 LLM 请求与最终回答耗时 / 达到最大迭代 / compact 触发与结果
 - **Tool 级**：每次 tool 调用的参数预览、返回摘要；MCP 调用会额外标注成 `mcp__<server>__<tool>`
-- **MCP 生命周期**（`MCPHost`）：server 连接成功 / 发现的 tool 数量 / 某个 server 初始化失败跳过 / 工具名称冲突跳过
-- **MCP transport**：子进程 stderr、连接异常、重试等底层事件
+- **审批级**：`approval.required` 暂停等待，`approval.resolved` 后继续或失败
+- **消息级**：`message.completed` 只代表最终 assistant answer，不代表 tool 调用记录
 
-这一层是纯内存 callback，不持久化。它负责"现在正在发生什么、卡在哪"。
+Web UI 里左侧 `events` 展示模型请求、tool 调用、审批和错误；右侧 `conversation` 只展示用户输入和最终 assistant answer。会话历史仍完整落盘，包含 tool call / tool result，但这些不再伪装成聊天气泡。
 
 #### 事后落盘记录
 
@@ -184,6 +199,21 @@ cd /Users/jiminyang/Desktop/ai-projects/agent
 pip install -r minibot/requirements.txt
 python -m minibot
 ```
+
+启动本地 SSE server：
+
+```bash
+cd /Users/jiminyang/Desktop/ai-projects/agent
+python -m minibot.server --host 127.0.0.1 --port 8765
+```
+
+打开 `http://127.0.0.1:8765/` 可以使用本地 Web UI。布局是固定视口高度：左侧 events 独立滚动，右侧 conversation 独立滚动，底部输入区不会被历史消息撑走。
+
+第一版 Web API 暴露 MiniBot 自己的 agent event stream，不伪装成 OpenAI API：
+
+- `POST /runs/stream`：body 为 `{"input":"...", "session_id":"current"}`，返回 `text/event-stream`
+- `POST /runs/{run_id}/approvals/{approval_id}`：body 为 `{"approved": true}`，用于继续需要审批的工具调用
+- `GET /sessions` / `GET /sessions/{session_id}/messages`：供 Web UI 读取会话列表和最终对话历史
 
 ## 配置
 
