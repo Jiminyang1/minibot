@@ -45,15 +45,15 @@ class MCPHost:
         }
 
     @classmethod
-    def from_workspace(
+    def from_config_root(
         cls,
-        workspace: Path,
+        config_root: Path,
         *,
         event_handler: Callable[[str], None] | None = None,
         client_factory: Callable[..., MCPClient] = create_mcp_client,
     ) -> "MCPHost":
-        loaded: MCPConfigLoadResult = load_mcp_config(workspace)
-        config_path = workspace / "mcp.json"
+        loaded: MCPConfigLoadResult = load_mcp_config(config_root)
+        config_path = config_root / "mcp.json"
         if event_handler is not None:
             for warning in loaded.warnings:
                 event_handler(warning)
@@ -62,6 +62,25 @@ class MCPHost:
             event_handler=event_handler,
             client_factory=client_factory,
             config_path=config_path if config_path.exists() else None,
+        )
+
+    @classmethod
+    def from_workspace(
+        cls,
+        workspace: Path,
+        *,
+        event_handler: Callable[[str], None] | None = None,
+        client_factory: Callable[..., MCPClient] = create_mcp_client,
+    ) -> "MCPHost":
+        """Compatibility wrapper for older callers.
+
+        The argument now represents the directory containing ``mcp.json``; MCP
+        config selection itself is handled by the MiniBot composition root.
+        """
+        return cls.from_config_root(
+            workspace,
+            event_handler=event_handler,
+            client_factory=client_factory,
         )
 
     def connect_all(self) -> list[MCPToolProxy]:

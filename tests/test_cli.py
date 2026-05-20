@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -57,6 +58,43 @@ class CLITests(unittest.TestCase):
         self.assertIn("sqlite", output)
         self.assertIn("figma", output)
         self.assertIn("boom", output)
+
+    def test_prompt_approval_reprompts_on_invalid_input(self) -> None:
+        buffer = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=["会议 ID：681 639 607", "y"]) as mock_input,
+            redirect_stdout(buffer),
+        ):
+            approved = ui.prompt_approval("calendar_create_event", {"title": "meeting"})
+
+        self.assertTrue(approved)
+        self.assertEqual(mock_input.call_count, 2)
+        self.assertIn("请输入 y 或 n", buffer.getvalue())
+
+    def test_prompt_approval_empty_input_uses_safe_default_reject(self) -> None:
+        with patch("builtins.input", return_value=""):
+            approved = ui.prompt_approval("calendar_create_event", {"title": "meeting"})
+
+        self.assertFalse(approved)
+
+    def test_read_user_input_returns_single_line_without_paste_guard(self) -> None:
+        with (
+            patch("builtins.input", return_value="  hello  "),
+            patch("minibot.ui._drain_pending_stdin", return_value=""),
+        ):
+            self.assertEqual(ui.read_user_input(), "hello")
+
+    def test_read_user_input_merges_multiline_paste_into_one_message(self) -> None:
+        buffer = io.StringIO()
+        with (
+            patch("builtins.input", return_value="line 1"),
+            patch("minibot.ui._drain_pending_stdin", return_value="line 2\nline 3\n"),
+            redirect_stdout(buffer),
+        ):
+            user_input = ui.read_user_input()
+
+        self.assertEqual(user_input, "line 1\nline 2\nline 3")
+        self.assertIn("检测到 3 行粘贴内容，已合并为一条请求", buffer.getvalue())
 
 
 if __name__ == "__main__":

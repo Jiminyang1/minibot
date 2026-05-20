@@ -1,5 +1,10 @@
+# Compatibility install list only.
+# The source of truth is pyproject.toml + uv.lock. Prefer:
+#   uv sync
+
 openai>=1.0
 tiktoken>=0.7  # optional: improves token estimation accuracy
 mcp>=1.27,<2
 fastapi>=0.115
+httpx>=0.27
 uvicorn>=0.29

@@ -432,7 +432,7 @@ def main() -> None:
             config=config,
             workspace=Path.cwd(),
             approval_broker=broker,
-            approval_handler=None if config.auto_approve else broker.wait,
+            approval_handler=broker.wait,
         )
     except RuntimeError as exc:
         print(f"配置错误: {exc}")

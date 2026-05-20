@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 import uuid
 
+from ..config import ApprovalMode
+
 
 class RunCancelled(RuntimeError):
     """Raised when a run is cooperatively cancelled."""
@@ -144,6 +146,7 @@ class AgentRunner:
         materializer: ToolOutputMaterializer,
         event_handler: RuntimeEventHandler | None = None,
         approval_handler: Callable[[ApprovalRequest], bool] | None = None,
+        approval_mode: ApprovalMode = "ask",
         max_parallel_tools: int = 4,
     ) -> None:
         self.llm = llm
@@ -151,7 +154,20 @@ class AgentRunner:
         self.materializer = materializer
         self.event_handler = event_handler
         self.approval_handler = approval_handler
+        self._approval_mode: ApprovalMode = approval_mode
+        self._approval_mode_lock = threading.Lock()
         self.max_parallel_tools = max_parallel_tools
+
+    @property
+    def approval_mode(self) -> ApprovalMode:
+        with self._approval_mode_lock:
+            return self._approval_mode
+
+    def set_approval_mode(self, mode: ApprovalMode) -> None:
+        if mode not in {"ask", "always"}:
+            raise ValueError("approval mode must be ask or always")
+        with self._approval_mode_lock:
+            self._approval_mode = mode
 
     def run(self, run_spec: RunSpec) -> RunOutcome:
         """Run one prepared request until the model returns a final answer."""
@@ -323,6 +339,18 @@ class AgentRunner:
         planned: _PlannedToolCall,
         emitter: RuntimeEventEmitter | None,
     ) -> bool:
+        if self.approval_mode == "always":
+            self._emit(
+                emitter,
+                "approval.resolved",
+                {
+                    "tool_call_id": planned.tool_call.id,
+                    "tool": planned.tool_call.name,
+                    "approved": True,
+                    "auto": True,
+                },
+            )
+            return True
         if self.approval_handler is None:
             return True
         approval_id = "ap_" + uuid.uuid4().hex[:12]

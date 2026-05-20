@@ -5,6 +5,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, TypeAlias
+
+
+ApprovalMode: TypeAlias = Literal["ask", "always"]
 
 
 def load_env(package_dir: Path | None = None) -> None:
@@ -26,15 +30,17 @@ def load_env(package_dir: Path | None = None) -> None:
 @dataclass(frozen=True)
 class Config:
     model: str = "gpt-5.4-mini"
+    approval_mode: ApprovalMode = "ask"
     max_iterations: int = 20
     max_parallel_tools: int = 4
     max_history_turns: int = 40
     compact_token_threshold: int = 40000
     reserved_completion_tokens: int = 4096
     compact_keep_recent: int = 10
-    auto_approve: bool = False
 
     def __post_init__(self) -> None:
+        if self.approval_mode not in {"ask", "always"}:
+            raise ValueError("approval_mode 必须是 ask 或 always。")
         if self.max_iterations <= 0:
             raise ValueError("max_iterations 必须大于 0。")
         if self.max_parallel_tools < 0:
@@ -48,6 +54,11 @@ class Config:
                 "reserved_completion_tokens 必须小于 compact_token_threshold。"
             )
 
+    @property
+    def auto_approve(self) -> bool:
+        """Backward-compatible flag for old call sites."""
+        return self.approval_mode == "always"
+
     @classmethod
     def from_env(cls) -> Config:
         def _get_int(name: str, default: int) -> int:
@@ -59,17 +70,20 @@ class Config:
             except ValueError as exc:
                 raise ValueError(f"{name} 必须是整数。") from exc
 
-        auto_approve = os.environ.get("MINIBOT_AUTO_APPROVE", "").lower() in {"1", "true", "yes"}
+        approval_mode = _get_approval_mode()
 
         return cls(
             model=os.environ.get("MINIBOT_MODEL", cls.model),
+            approval_mode=approval_mode,
             max_iterations=_get_int("MINIBOT_MAX_ITERATIONS", cls.max_iterations),
             max_parallel_tools=_get_int(
                 "MINIBOT_MAX_PARALLEL_TOOLS",
                 cls.max_parallel_tools,
             ),
-            auto_approve=auto_approve,
-            max_history_turns=_get_int("MINIBOT_MAX_HISTORY_TURNS", cls.max_history_turns),
+            max_history_turns=_get_int(
+                "MINIBOT_MAX_HISTORY_TURNS",
+                cls.max_history_turns,
+            ),
             compact_token_threshold=_get_int(
                 "MINIBOT_COMPACT_TOKEN_THRESHOLD",
                 cls.compact_token_threshold,
@@ -83,3 +97,34 @@ class Config:
                 cls.compact_keep_recent,
             ),
         )
+
+
+def _get_approval_mode() -> ApprovalMode:
+    raw_mode = os.environ.get("MINIBOT_APPROVAL_MODE")
+    if raw_mode is not None and raw_mode.strip():
+        return _parse_approval_mode(raw_mode, env_name="MINIBOT_APPROVAL_MODE")
+
+    raw_auto = os.environ.get("MINIBOT_AUTO_APPROVE")
+    if raw_auto is None or not raw_auto.strip():
+        return "ask"
+    return _parse_approval_mode(raw_auto, env_name="MINIBOT_AUTO_APPROVE")
+
+
+def _parse_approval_mode(raw: str, *, env_name: str) -> ApprovalMode:
+    value = raw.strip().lower()
+    if value in {
+        "ask",
+        "prompt",
+        "permission",
+        "required",
+        "manual",
+        "0",
+        "false",
+        "no",
+    }:
+        return "ask"
+    if value in {"always", "auto", "auto_approve", "approve", "1", "true", "yes"}:
+        return "always"
+    raise ValueError(
+        f"{env_name} 必须是 ask/permission 或 always/auto。"
+    )

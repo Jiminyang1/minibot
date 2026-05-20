@@ -7,7 +7,7 @@
       "timeout_seconds": 30,
       "transport": {
         "type": "stdio",
-        "command": "python3",
+        "command": "${MINIBOT_PYTHON}",
         "args": [
           "mcp_servers/sqlite_server.py"
         ],
@@ -22,7 +22,7 @@
       "timeout_seconds": 30,
       "transport": {
         "type": "stdio",
-        "command": "python3",
+        "command": "${MINIBOT_PYTHON}",
         "args": [
           "mcp_servers/macos_system/server.py"
         ],

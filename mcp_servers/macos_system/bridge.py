@@ -41,6 +41,19 @@ _COMMON_HELPERS = [
     "set AppleScript's text item delimiters to oldDelims",
     "return flattened",
     "end sanitizeText",
+    "on splitCommaText(rawText)",
+    "if rawText is \"\" then return {}",
+    "set oldDelims to AppleScript's text item delimiters",
+    "set AppleScript's text item delimiters to \",\"",
+    "set rawParts to text items of (rawText as string)",
+    "set AppleScript's text item delimiters to oldDelims",
+    "set cleanedParts to {}",
+    "repeat with rawPart in rawParts",
+    "set partText to rawPart as string",
+    "if partText is not \"\" then set end of cleanedParts to partText",
+    "end repeat",
+    "return cleanedParts",
+    "end splitCommaText",
     "on truncateText(txt, maxChars)",
     "set cleaned to sanitizeText(txt)",
     "if (length of cleaned) <= maxChars then return cleaned",
@@ -96,6 +109,60 @@ class NoteRecord:
     preview: str
 
 
+@dataclass(frozen=True)
+class MailboxRecord:
+    account_name: str
+    mailbox_name: str
+    unread_count: int
+    message_count: int
+
+
+@dataclass(frozen=True)
+class MailMessageRecord:
+    message_id: str
+    subject: str
+    sender: str
+    received_at: str
+    mailbox_name: str
+    account_name: str
+    read: bool
+    preview: str
+
+
+@dataclass(frozen=True)
+class MailMessageBodyRecord:
+    message_id: str
+    subject: str
+    sender: str
+    received_at: str
+    mailbox_name: str
+    account_name: str
+    read: bool
+    body: str
+
+
+@dataclass(frozen=True)
+class MailDraftRecord:
+    subject: str
+    to: list[str]
+    cc: list[str]
+    bcc: list[str]
+    sender: str
+    visible: bool
+    preview: str
+
+
+@dataclass(frozen=True)
+class MailSendRecord:
+    subject: str
+    to: list[str]
+    cc: list[str]
+    bcc: list[str]
+    sender: str
+    sent: bool
+    preview: str
+
+
 class AppleScriptBridgeError(RuntimeError):
     """Structured AppleScript failure surfaced to tool layer."""
 
@@ -113,7 +180,7 @@ class AppleScriptBridgeError(RuntimeError):
 
 
 class AppleScriptBridge:
-    """Typed AppleScript operations for Calendar, Reminders, and Notes."""
+    """Typed AppleScript operations for Calendar, Reminders, Notes, and Mail."""
 
     _DEFAULT_TIMEOUT_SECONDS = 20
 
@@ -705,6 +772,568 @@ class AppleScriptBridge:
             preview=item["preview"],
         )
 
+    def list_mailboxes(
+        self,
+        *,
+        account_name: str | None,
+        limit: int,
+    ) -> list[MailboxRecord]:
+        self._validate_limit(limit)
+        normalized_account = (account_name or "").strip()
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set accountFilter to item 1 of argv",
+                "tell application \"Mail\"",
+                "if accountFilter is \"\" then",
+                "set targetAccounts to accounts",
+                "else",
+                "set targetAccounts to {account accountFilter}",
+                "end if",
+                "set rows to {}",
+                "repeat with targetAccount in targetAccounts",
+                "set accountName to name of targetAccount",
+                "repeat with targetMailbox in mailboxes of targetAccount",
+                "set unreadText to \"0\"",
+                "try",
+                "set unreadText to unread count of targetMailbox as string",
+                "end try",
+                "set messageCountText to \"0\"",
+                "try",
+                "set messageCountText to count of messages of targetMailbox as string",
+                "end try",
+                "set end of rows to my joinFields({my sanitizeText(accountName), my sanitizeText(name of targetMailbox), unreadText, messageCountText})",
+                "end repeat",
+                "end repeat",
+                "if (count of rows) is 0 then return \"\"",
+                "return my joinRecords(rows)",
+                "end tell",
+                "end run",
+            ],
+            args=[normalized_account],
+        )
+        records = [
+            MailboxRecord(
+                account_name=item["account_name"],
+                mailbox_name=item["mailbox_name"],
+                unread_count=self._coerce_int(item["unread_count"]),
+                message_count=self._coerce_int(item["message_count"]),
+            )
+            for item in self._parse_records(
+                raw,
+                ("account_name", "mailbox_name", "unread_count", "message_count"),
+            )
+        ]
+        records.sort(key=lambda item: (item.account_name, item.mailbox_name))
+        return records[:limit]
+
+    def search_mail_messages(
+        self,
+        *,
+        query: str,
+        account_name: str | None,
+        mailbox_name: str | None,
+        limit: int,
+        include_body: bool = False,
+    ) -> list[MailMessageRecord]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                "query 不能为空。",
+                data={"field": "query"},
+            )
+        self._validate_limit(limit)
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set queryText to item 1 of argv",
+                "set accountFilter to item 2 of argv",
+                "set mailboxFilter to item 3 of argv",
+                "set rowLimit to item 4 of argv as integer",
+                "set includeBody to false",
+                "if item 5 of argv is \"1\" then set includeBody to true",
+                "tell application \"Mail\"",
+                "if accountFilter is \"\" then",
+                "set targetAccounts to accounts",
+                "else",
+                "set targetAccounts to {account accountFilter}",
+                "end if",
+                "set rows to {}",
+                "repeat with targetAccount in targetAccounts",
+                "set accountName to name of targetAccount",
+                "if mailboxFilter is \"\" then",
+                "set targetMailboxes to mailboxes of targetAccount",
+                "else",
+                "set targetMailboxes to {mailbox mailboxFilter of targetAccount}",
+                "end if",
+                "repeat with targetMailbox in targetMailboxes",
+                "set mailboxName to name of targetMailbox",
+                "repeat with eachMessage in messages of targetMailbox",
+                "set subjectText to \"\"",
+                "try",
+                "set subjectText to subject of eachMessage",
+                "end try",
+                "set senderText to \"\"",
+                "try",
+                "set senderText to sender of eachMessage",
+                "end try",
+                "set contentText to \"\"",
+                "if includeBody then",
+                "try",
+                "set contentText to content of eachMessage",
+                "end try",
+                "end if",
+                "set matchedMessage to false",
+                "ignoring case",
+                "if ((subjectText contains queryText) or (senderText contains queryText)) then set matchedMessage to true",
+                "if includeBody is true then",
+                "if contentText contains queryText then set matchedMessage to true",
+                "end if",
+                "end ignoring",
+                "if matchedMessage then",
+                "set receivedText to \"\"",
+                "try",
+                "set receivedText to my formatDate(date received of eachMessage)",
+                "end try",
+                "set readText to \"false\"",
+                "try",
+                "set readText to read status of eachMessage as string",
+                "end try",
+                "set end of rows to my joinFields({id of eachMessage as string, my sanitizeText(subjectText), my sanitizeText(senderText), receivedText, my sanitizeText(mailboxName), my sanitizeText(accountName), readText, my truncateText(contentText, 180)})",
+                "end if",
+                "if (count of rows) >= rowLimit then exit repeat",
+                "end repeat",
+                "if (count of rows) >= rowLimit then exit repeat",
+                "end repeat",
+                "if (count of rows) >= rowLimit then exit repeat",
+                "end repeat",
+                "if (count of rows) is 0 then return \"\"",
+                "return my joinRecords(rows)",
+                "end tell",
+                "end run",
+            ],
+            args=[
+                normalized_query,
+                account_name or "",
+                mailbox_name or "",
+                str(limit),
+                "1" if include_body else "0",
+            ],
+        )
+        records = [
+            MailMessageRecord(
+                message_id=item["message_id"],
+                subject=item["subject"],
+                sender=item["sender"],
+                received_at=item["received_at"],
+                mailbox_name=item["mailbox_name"],
+                account_name=item["account_name"],
+                read=self._coerce_bool(item["read"]),
+                preview=item["preview"],
+            )
+            for item in self._parse_records(
+                raw,
+                (
+                    "message_id",
+                    "subject",
+                    "sender",
+                    "received_at",
+                    "mailbox_name",
+                    "account_name",
+                    "read",
+                    "preview",
+                ),
+            )
+        ]
+        records.sort(
+            key=lambda item: (item.received_at, item.subject, item.message_id),
+            reverse=True,
+        )
+        return records[:limit]
+
+    def list_mail_messages(
+        self,
+        *,
+        account_name: str | None,
+        mailbox_name: str | None,
+        limit: int,
+        unread_only: bool,
+        days_back: int | None,
+    ) -> list[MailMessageRecord]:
+        self._validate_limit(limit)
+        self._validate_days_back(days_back)
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set accountFilter to item 1 of argv",
+                "set mailboxFilter to item 2 of argv",
+                "set rowLimit to item 3 of argv as integer",
+                "set unreadOnly to false",
+                "if item 4 of argv is \"1\" then set unreadOnly to true",
+                "set daysBackText to item 5 of argv",
+                "set sinceDate to missing value",
+                "if daysBackText is not \"\" then",
+                "set sinceDate to (current date) - ((daysBackText as integer) * days)",
+                "end if",
+                "tell application \"Mail\"",
+                "if accountFilter is \"\" then",
+                "set targetAccounts to accounts",
+                "else",
+                "set targetAccounts to {account accountFilter}",
+                "end if",
+                "set rows to {}",
+                "repeat with targetAccount in targetAccounts",
+                "set accountName to name of targetAccount",
+                "if mailboxFilter is \"\" then",
+                "try",
+                "set targetMailboxes to {mailbox \"INBOX\" of targetAccount}",
+                "on error",
+                "set targetMailboxes to mailboxes of targetAccount",
+                "end try",
+                "else",
+                "set targetMailboxes to {mailbox mailboxFilter of targetAccount}",
+                "end if",
+                "repeat with targetMailbox in targetMailboxes",
+                "set mailboxName to name of targetMailbox",
+                "set targetMessages to messages of targetMailbox",
+                "set messageIndex to count of targetMessages",
+                "repeat while messageIndex >= 1",
+                "set eachMessage to item messageIndex of targetMessages",
+                "set readText to \"false\"",
+                "try",
+                "set readText to read status of eachMessage as string",
+                "end try",
+                "set receivedDate to missing value",
+                "set receivedText to \"\"",
+                "try",
+                "set receivedDate to date received of eachMessage",
+                "set receivedText to my formatDate(receivedDate)",
+                "end try",
+                "set shouldInclude to true",
+                "if sinceDate is not missing value then",
+                "if receivedDate is missing value then",
+                "set shouldInclude to false",
+                "else",
+                "if receivedDate < sinceDate then set shouldInclude to false",
+                "end if",
+                "end if",
+                "if unreadOnly is true then",
+                "if readText is \"true\" then set shouldInclude to false",
+                "end if",
+                "if shouldInclude then",
+                "set subjectText to \"\"",
+                "try",
+                "set subjectText to subject of eachMessage",
+                "end try",
+                "set senderText to \"\"",
+                "try",
+                "set senderText to sender of eachMessage",
+                "end try",
+                "set end of rows to my joinFields({id of eachMessage as string, my sanitizeText(subjectText), my sanitizeText(senderText), receivedText, my sanitizeText(mailboxName), my sanitizeText(accountName), readText, \"\"})",
+                "end if",
+                "set messageIndex to messageIndex - 1",
+                "end repeat",
+                "end repeat",
+                "end repeat",
+                "if (count of rows) is 0 then return \"\"",
+                "return my joinRecords(rows)",
+                "end tell",
+                "end run",
+            ],
+            args=[
+                account_name or "",
+                mailbox_name or "",
+                str(limit),
+                "1" if unread_only else "0",
+                "" if days_back is None else str(days_back),
+            ],
+        )
+        records = [
+            MailMessageRecord(
+                message_id=item["message_id"],
+                subject=item["subject"],
+                sender=item["sender"],
+                received_at=item["received_at"],
+                mailbox_name=item["mailbox_name"],
+                account_name=item["account_name"],
+                read=self._coerce_bool(item["read"]),
+                preview=item["preview"],
+            )
+            for item in self._parse_records(
+                raw,
+                (
+                    "message_id",
+                    "subject",
+                    "sender",
+                    "received_at",
+                    "mailbox_name",
+                    "account_name",
+                    "read",
+                    "preview",
+                ),
+            )
+        ]
+        records.sort(
+            key=lambda item: (item.received_at, item.subject, item.message_id),
+            reverse=True,
+        )
+        return records[:limit]
+
+    def get_mail_message(
+        self,
+        *,
+        message_id: str,
+        account_name: str | None,
+        mailbox_name: str | None,
+    ) -> MailMessageBodyRecord:
+        normalized_id = message_id.strip()
+        if not normalized_id:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                "message_id 不能为空。",
+                data={"field": "message_id"},
+            )
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set targetId to item 1 of argv",
+                "set accountFilter to item 2 of argv",
+                "set mailboxFilter to item 3 of argv",
+                "tell application \"Mail\"",
+                "if accountFilter is \"\" then",
+                "set targetAccounts to accounts",
+                "else",
+                "set targetAccounts to {account accountFilter}",
+                "end if",
+                "repeat with targetAccount in targetAccounts",
+                "set accountName to name of targetAccount",
+                "if mailboxFilter is \"\" then",
+                "set targetMailboxes to mailboxes of targetAccount",
+                "else",
+                "set targetMailboxes to {mailbox mailboxFilter of targetAccount}",
+                "end if",
+                "repeat with targetMailbox in targetMailboxes",
+                "set mailboxName to name of targetMailbox",
+                "repeat with eachMessage in messages of targetMailbox",
+                "if (id of eachMessage as string) is targetId then",
+                "set subjectText to \"\"",
+                "try",
+                "set subjectText to subject of eachMessage",
+                "end try",
+                "set senderText to \"\"",
+                "try",
+                "set senderText to sender of eachMessage",
+                "end try",
+                "set receivedText to \"\"",
+                "try",
+                "set receivedText to my formatDate(date received of eachMessage)",
+                "end try",
+                "set readText to \"false\"",
+                "try",
+                "set readText to read status of eachMessage as string",
+                "end try",
+                "set bodyText to \"\"",
+                "try",
+                "set bodyText to content of eachMessage",
+                "end try",
+                "return my joinFields({id of eachMessage as string, my sanitizeText(subjectText), my sanitizeText(senderText), receivedText, my sanitizeText(mailboxName), my sanitizeText(accountName), readText, my truncateText(bodyText, 5000)})",
+                "end if",
+                "end repeat",
+                "end repeat",
+                "end repeat",
+                "error \"Mail message not found\"",
+                "end tell",
+                "end run",
+            ],
+            args=[normalized_id, account_name or "", mailbox_name or ""],
+        )
+        item = self._parse_single_record(
+            raw,
+            (
+                "message_id",
+                "subject",
+                "sender",
+                "received_at",
+                "mailbox_name",
+                "account_name",
+                "read",
+                "body",
+            ),
+        )
+        return MailMessageBodyRecord(
+            message_id=item["message_id"],
+            subject=item["subject"],
+            sender=item["sender"],
+            received_at=item["received_at"],
+            mailbox_name=item["mailbox_name"],
+            account_name=item["account_name"],
+            read=self._coerce_bool(item["read"]),
+            body=item["body"],
+        )
+
+    def create_mail_draft(
+        self,
+        *,
+        subject: str,
+        body: str,
+        to: list[str] | tuple[str, ...] | str | None,
+        cc: list[str] | tuple[str, ...] | str | None,
+        bcc: list[str] | tuple[str, ...] | str | None,
+        sender: str | None,
+        visible: bool,
+    ) -> MailDraftRecord:
+        normalized_subject = self._require_text(subject, field_name="subject")
+        normalized_body = self._require_text(body, field_name="body")
+        to_items = self._normalize_recipients(to, field_name="to", required=False)
+        cc_items = self._normalize_recipients(cc, field_name="cc", required=False)
+        bcc_items = self._normalize_recipients(bcc, field_name="bcc", required=False)
+        normalized_sender = (sender or "").strip()
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set messageSubject to item 1 of argv",
+                "set messageBody to item 2 of argv",
+                "set toCsv to item 3 of argv",
+                "set ccCsv to item 4 of argv",
+                "set bccCsv to item 5 of argv",
+                "set senderText to item 6 of argv",
+                "set visibleFlag to item 7 of argv",
+                "set visibleValue to false",
+                "if visibleFlag is \"1\" then set visibleValue to true",
+                "tell application \"Mail\"",
+                "set newMessage to make new outgoing message with properties {subject:messageSubject, content:messageBody, visible:visibleValue}",
+                "if senderText is not \"\" then",
+                "try",
+                "set sender of newMessage to senderText",
+                "on error senderError",
+                "error \"Invalid Mail sender: \" & senderError",
+                "end try",
+                "end if",
+                "tell newMessage",
+                "repeat with addressText in my splitCommaText(toCsv)",
+                "make new to recipient at end of to recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "repeat with addressText in my splitCommaText(ccCsv)",
+                "make new cc recipient at end of cc recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "repeat with addressText in my splitCommaText(bccCsv)",
+                "make new bcc recipient at end of bcc recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "end tell",
+                "return my joinFields({my sanitizeText(messageSubject), toCsv, ccCsv, bccCsv, my sanitizeText(senderText), visibleValue as string, my truncateText(messageBody, 180)})",
+                "end tell",
+                "end run",
+            ],
+            args=[
+                normalized_subject,
+                normalized_body,
+                ",".join(to_items),
+                ",".join(cc_items),
+                ",".join(bcc_items),
+                normalized_sender,
+                "1" if visible else "0",
+            ],
+        )
+        item = self._parse_single_record(
+            raw,
+            ("subject", "to", "cc", "bcc", "sender", "visible", "preview"),
+        )
+        return MailDraftRecord(
+            subject=item["subject"],
+            to=self._split_recipients_field(item["to"]),
+            cc=self._split_recipients_field(item["cc"]),
+            bcc=self._split_recipients_field(item["bcc"]),
+            sender=item["sender"],
+            visible=self._coerce_bool(item["visible"]),
+            preview=item["preview"],
+        )
+
+    def send_mail_message(
+        self,
+        *,
+        subject: str,
+        body: str,
+        to: list[str] | tuple[str, ...] | str | None,
+        cc: list[str] | tuple[str, ...] | str | None,
+        bcc: list[str] | tuple[str, ...] | str | None,
+        sender: str | None,
+    ) -> MailSendRecord:
+        normalized_subject = self._require_text(subject, field_name="subject")
+        normalized_body = self._require_text(body, field_name="body")
+        to_items = self._normalize_recipients(to, field_name="to", required=True)
+        cc_items = self._normalize_recipients(cc, field_name="cc", required=False)
+        bcc_items = self._normalize_recipients(bcc, field_name="bcc", required=False)
+        normalized_sender = (sender or "").strip()
+
+        raw = self._run_lines(
+            [
+                *_COMMON_HELPERS,
+                "on run argv",
+                "set messageSubject to item 1 of argv",
+                "set messageBody to item 2 of argv",
+                "set toCsv to item 3 of argv",
+                "set ccCsv to item 4 of argv",
+                "set bccCsv to item 5 of argv",
+                "set senderText to item 6 of argv",
+                "tell application \"Mail\"",
+                "set newMessage to make new outgoing message with properties {subject:messageSubject, content:messageBody, visible:false}",
+                "if senderText is not \"\" then",
+                "try",
+                "set sender of newMessage to senderText",
+                "on error senderError",
+                "error \"Invalid Mail sender: \" & senderError",
+                "end try",
+                "end if",
+                "tell newMessage",
+                "repeat with addressText in my splitCommaText(toCsv)",
+                "make new to recipient at end of to recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "repeat with addressText in my splitCommaText(ccCsv)",
+                "make new cc recipient at end of cc recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "repeat with addressText in my splitCommaText(bccCsv)",
+                "make new bcc recipient at end of bcc recipients with properties {address:(addressText as string)}",
+                "end repeat",
+                "send",
+                "end tell",
+                "return my joinFields({my sanitizeText(messageSubject), toCsv, ccCsv, bccCsv, my sanitizeText(senderText), \"true\", my truncateText(messageBody, 180)})",
+                "end tell",
+                "end run",
+            ],
+            args=[
+                normalized_subject,
+                normalized_body,
+                ",".join(to_items),
+                ",".join(cc_items),
+                ",".join(bcc_items),
+                normalized_sender,
+            ],
+        )
+        item = self._parse_single_record(
+            raw,
+            ("subject", "to", "cc", "bcc", "sender", "sent", "preview"),
+        )
+        return MailSendRecord(
+            subject=item["subject"],
+            to=self._split_recipients_field(item["to"]),
+            cc=self._split_recipients_field(item["cc"]),
+            bcc=self._split_recipients_field(item["bcc"]),
+            sender=item["sender"],
+            sent=self._coerce_bool(item["sent"]),
+            preview=item["preview"],
+        )
+
     def _run_lines(self, lines: list[str], *, args: list[str]) -> str:
         command = [self.osascript_path, "-l", "AppleScript"]
         for line in lines:
@@ -791,6 +1420,72 @@ class AppleScriptBridge:
             )
 
     @staticmethod
+    def _validate_days_back(days_back: int | None) -> None:
+        if days_back is None:
+            return
+        if days_back <= 0 or days_back > 365:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                "days_back 必须在 1 到 365 之间，或传 null 表示不限制日期。",
+                data={"field": "days_back", "value": days_back},
+            )
+
+    @staticmethod
+    def _require_text(value: str, *, field_name: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                f"{field_name} 不能为空。",
+                data={"field": field_name},
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_recipients(
+        value: list[str] | tuple[str, ...] | str | None,
+        *,
+        field_name: str,
+        required: bool,
+    ) -> list[str]:
+        if value is None:
+            raw_items: list[str] = []
+        elif isinstance(value, str):
+            raw_items = [value]
+        else:
+            raw_items = [str(item) for item in value]
+
+        recipients: list[str] = []
+        for raw_item in raw_items:
+            for part in raw_item.split(","):
+                normalized = part.strip()
+                if normalized:
+                    recipients.append(normalized)
+
+        if required and not recipients:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                f"{field_name} 至少需要一个收件人地址。",
+                data={"field": field_name},
+            )
+        return recipients
+
+    @staticmethod
+    def _split_recipients_field(value: str) -> list[str]:
+        return [part for part in value.split(",") if part]
+
+    @staticmethod
+    def _coerce_int(value: str) -> int:
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _coerce_bool(value: str) -> bool:
+        return value.strip().lower() in {"true", "1", "yes"}
+
+    @staticmethod
     def _datetime_components(dt: datetime) -> list[str]:
         return [
             str(dt.year),
@@ -845,8 +1540,18 @@ class AppleScriptBridge:
             return "permission_denied"
         if "read-only" in normalized or "access not allowed" in normalized:
             return "permission_denied"
-        if "-1728" in detail or "can’t get" in normalized or "can't get" in normalized:
+        if (
+            "-1728" in detail
+            or "can’t get" in normalized
+            or "can't get" in normalized
+            or "not found" in normalized
+        ):
             return "not_found"
-        if "-1700" in detail or "-1703" in detail or "格式无效" in normalized:
+        if (
+            "-1700" in detail
+            or "-1703" in detail
+            or "格式无效" in normalized
+            or "invalid mail sender" in normalized
+        ):
             return "invalid_args"
         return "error"

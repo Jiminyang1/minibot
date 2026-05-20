@@ -1,5 +1,13 @@
 .env
+.venv/
+*.egg-info/
 __pycache__/
 .minibot/
 .claude/
 .tmp_*/
+.DS_Store
+
+# Local learning/review notes, not part of product commits.
+learn.md
+learn/
+docs/

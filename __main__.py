@@ -26,7 +26,7 @@ def main() -> None:
             config=config,
             run_event_handler=print_runtime_event,
             log_handler=tool_log,
-            approval_handler=None if config.auto_approve else _approval_handler,
+            approval_handler=_approval_handler,
         )
     except RuntimeError as exc:
         print(f"配置错误: {exc}")
@@ -38,6 +38,7 @@ def main() -> None:
             runtime.manager,
             runtime.memory_store,
             runtime.mcp_host,
+            runtime.config,
         )
     finally:
         runtime.close()

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sys
 
 from .artifacts import ArtifactStore
 from .config import Config
@@ -35,6 +36,8 @@ from .tools import (
     skill_toolset,
 )
 from .user_memory import UserMemoryStore
+
+_GLOBAL_MCP_CONFIG_ENV = "MINIBOT_MCP_CONFIG_PATH"
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,8 @@ def build_runtime(
 ) -> MiniBotRuntime:
     package_dir = Path(__file__).resolve().parent
     resolved_workspace = (workspace or Path.cwd()).resolve()
+    os.environ.setdefault("MINIBOT_PYTHON", sys.executable)
+    os.environ.setdefault("MINIBOT_PACKAGE_DIR", str(package_dir))
 
     manager = SessionManager(resolved_workspace)
     artifact_store = ArtifactStore(resolved_workspace)
@@ -83,17 +88,18 @@ def build_runtime(
     tool_registry.register_all(memory_toolset(memory_store))
     tool_registry.register_all(skill_toolset(skill_registry))
 
-    mcp_config_root = resolved_workspace
-    workspace_mcp_path = resolved_workspace / "mcp.json"
-    package_mcp_path = package_dir / "mcp.json"
-    if not workspace_mcp_path.exists() and package_mcp_path.exists():
-        mcp_config_root = package_dir
-        if log_handler is not None:
-            log_handler(f"当前目录未找到 mcp.json，改用包目录配置: {package_mcp_path}")
-    if (mcp_config_root / "mcp.json").exists() and log_handler is not None:
-        log_handler(f"MCP 配置路径: {mcp_config_root / 'mcp.json'}")
+    mcp_config_root, mcp_config_path, mcp_config_source = _resolve_mcp_config(
+        package_dir,
+    )
+    if log_handler is not None:
+        if mcp_config_path is None:
+            log_handler("未找到全局 MCP 配置，启动时不加载 MCP server。")
+        else:
+            log_handler(
+                f"MCP 配置路径 ({mcp_config_source}): {mcp_config_path}"
+            )
 
-    mcp_host = MCPHost.from_workspace(
+    mcp_host = MCPHost.from_config_root(
         mcp_config_root,
         event_handler=log_handler,
     )
@@ -123,6 +129,7 @@ def build_runtime(
         materializer=ToolOutputMaterializer(artifact_store),
         event_handler=run_event_handler,
         approval_handler=approval_handler,
+        approval_mode=config.approval_mode,
         max_parallel_tools=config.max_parallel_tools,
     )
     turn_engine = TurnEngine(
@@ -165,3 +172,32 @@ def _should_include_reasoning_content(model: str) -> bool:
     base_url = os.environ.get("OPENAI_BASE_URL", "").lower()
     model_name = model.lower()
     return "deepseek" in base_url or model_name.startswith("deepseek-")
+
+
+def _resolve_mcp_config(package_dir: Path) -> tuple[Path, Path | None, str]:
+    """Resolve MiniBot-global MCP config.
+
+    MCP tools are global to the MiniBot installation, not scoped to the
+    project/workspace where the user starts the CLI. Relative stdio paths are
+    still resolved by ``mcp_host.config`` against the returned config root.
+    """
+    package_dir = package_dir.resolve()
+    explicit = os.environ.get(_GLOBAL_MCP_CONFIG_ENV, "").strip()
+    if explicit:
+        explicit_path = Path(explicit).expanduser().resolve()
+        config_path = (
+            explicit_path
+            if explicit_path.name == "mcp.json"
+            else explicit_path / "mcp.json"
+        )
+        return config_path.parent, config_path if config_path.exists() else None, "env"
+
+    user_config_path = (Path.home() / ".minibot" / "mcp.json").resolve()
+    if user_config_path.exists():
+        return user_config_path.parent, user_config_path, "user"
+
+    package_config_path = (package_dir / "mcp.json").resolve()
+    if package_config_path.exists():
+        return package_dir, package_config_path, "bundled"
+
+    return package_dir, None, "none"

@@ -1,4 +1,4 @@
-"""Repo-local ``mcp.json`` loading for MiniBot MCP host."""
+"""``mcp.json`` loading for MiniBot MCP host."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 _SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def load_mcp_config(workspace: Path) -> MCPConfigLoadResult:
-    """Load and validate repo-local MCP config from ``workspace/mcp.json``."""
-    path = workspace / _CONFIG_FILENAME
+def load_mcp_config(config_root: Path) -> MCPConfigLoadResult:
+    """Load and validate MCP config from ``config_root/mcp.json``."""
+    path = config_root / _CONFIG_FILENAME
     if not path.exists():
         return MCPConfigLoadResult()
 
@@ -55,7 +55,7 @@ def load_mcp_config(workspace: Path) -> MCPConfigLoadResult:
         parsed, entry_warnings = _parse_server_entry(
             raw_entry,
             index=index,
-            workspace=workspace,
+            workspace=config_root,
         )
         warnings.extend(entry_warnings)
         if parsed is None:
@@ -164,6 +164,16 @@ def _parse_transport_entry(
             return None, [f"{prefix} 的 `transport.env` 必须是对象。"]
         if raw_cwd is not None and not isinstance(raw_cwd, str):
             return None, [f"{prefix} 的 `transport.cwd` 必须是字符串。"]
+        try:
+            resolved_command = (
+                _resolve_env_placeholders(command) if enabled else command
+            )
+            resolved_args = tuple(
+                _resolve_env_placeholders(item) if enabled else item
+                for item in raw_args
+            )
+        except ValueError as exc:
+            return None, [f"{prefix} 的 `transport.command/args` 无法解析: {exc}"]
         env, warnings = _parse_string_map(
             raw_env,
             label=f"{prefix} 的 transport env",
@@ -183,8 +193,8 @@ def _parse_transport_entry(
                 return None, [f"{prefix} 的 `transport.cwd` 无法解析: {exc}"]
         return (
             StdioTransportConfig(
-                command=command,
-                args=tuple(raw_args),
+                command=resolved_command,
+                args=resolved_args,
                 env=env,
                 cwd=cwd,
             ),

@@ -8,8 +8,12 @@ hand user messages to the turn engine.
 from __future__ import annotations
 
 try:
-    import readline  # noqa: F401
+    import readline
+
+    readline.parse_and_bind("set enable-bracketed-paste on")
 except ImportError:
+    pass
+except Exception:
     pass
 
 from typing import TYPE_CHECKING
@@ -19,6 +23,7 @@ from .mcp_host import MCPHost
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
+    from .config import Config
     from .runtime.turn_engine import TurnEngine
     from .user_memory import UserMemoryStore
 
@@ -153,6 +158,38 @@ def _handle_mcp(raw: str, mcp_host: MCPHost | None) -> None:
     ui.info("用法: /mcp | /mcp tools [server]")
 
 
+def _handle_config(config: Config | None) -> None:
+    if config is None:
+        ui.info("当前未传入运行配置。")
+        return
+    ui.print_config(config)
+
+
+def _handle_permission(raw: str, turn_engine: TurnEngine) -> None:
+    parts = raw.strip().split(maxsplit=1)
+    if len(parts) == 1:
+        ui.print_permission_mode(turn_engine.runner.approval_mode)
+        return
+
+    mode = parts[1].strip().lower()
+    aliases = {
+        "ask": "ask",
+        "permission": "ask",
+        "prompt": "ask",
+        "manual": "ask",
+        "always": "always",
+        "auto": "always",
+        "approve": "always",
+    }
+    resolved = aliases.get(mode)
+    if resolved is None:
+        ui.info("用法: /permission [ask|always]")
+        return
+    turn_engine.runner.set_approval_mode(resolved)
+    ui.success(f"审批模式已切换为 {resolved}")
+    ui.print_permission_mode(turn_engine.runner.approval_mode)
+
+
 # ── REPL loop ────────────────────────────────────────────────────
 
 
@@ -161,6 +198,7 @@ def run_repl(
     manager: SessionManager,
     memory_store: UserMemoryStore,
     mcp_host: MCPHost | None = None,
+    config: Config | None = None,
 ) -> None:
     current, resumed = _startup_session(manager)
     skill_count = len(turn_engine.list_available_skills())
@@ -172,6 +210,7 @@ def run_repl(
         resumed,
         skill_count,
         mcp_summary=None if mcp_host is None else mcp_host.summary(),
+        approval_mode=turn_engine.runner.approval_mode,
     )
     ui.print_help()
     print(ui.RULE)
@@ -210,6 +249,15 @@ def run_repl(
         if user_msg == "/skills":
             _handle_skills(turn_engine)
             continue
+        if user_msg == "/permission" or user_msg.startswith("/permission "):
+            _handle_permission(user_msg, turn_engine)
+            continue
+        if user_msg in {"/config", "/settings"}:
+            if config is None:
+                _handle_config(config)
+            else:
+                ui.print_config(config, approval_mode=turn_engine.runner.approval_mode)
+            continue
         if user_msg.startswith("/memory"):
             _handle_memory(user_msg, memory_store)
             continue
@@ -224,6 +272,9 @@ def run_repl(
 
         try:
             result = turn_engine.handle_turn(current, user_msg)
+        except KeyboardInterrupt:
+            ui.info("\n已中断当前请求。")
+            continue
         except Exception as exc:
             ui.warn(f"运行失败: {exc}")
             continue

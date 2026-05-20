@@ -1,4 +1,4 @@
-"""Bundled stdio MCP server for macOS Calendar, Reminders, and Notes."""
+"""Bundled stdio MCP server for macOS Calendar, Reminders, Notes, and Mail."""
 
 from __future__ import annotations
 
@@ -14,6 +14,11 @@ if __package__ in {None, ""}:
         AppleScriptBridge,
         AppleScriptBridgeError,
         CalendarEventRecord,
+        MailDraftRecord,
+        MailMessageBodyRecord,
+        MailMessageRecord,
+        MailSendRecord,
+        MailboxRecord,
         NoteRecord,
         ReminderRecord,
     )
@@ -22,6 +27,11 @@ else:
         AppleScriptBridge,
         AppleScriptBridgeError,
         CalendarEventRecord,
+        MailDraftRecord,
+        MailMessageBodyRecord,
+        MailMessageRecord,
+        MailSendRecord,
+        MailboxRecord,
         NoteRecord,
         ReminderRecord,
     )
@@ -56,6 +66,65 @@ def _serialize_note(note: NoteRecord) -> dict[str, Any]:
         "title": note.title,
         "folder_name": note.folder_name,
         "preview": note.preview,
+    }
+
+
+def _serialize_mailbox(mailbox: MailboxRecord) -> dict[str, Any]:
+    return {
+        "account_name": mailbox.account_name,
+        "mailbox_name": mailbox.mailbox_name,
+        "unread_count": mailbox.unread_count,
+        "message_count": mailbox.message_count,
+    }
+
+
+def _serialize_mail_message(message: MailMessageRecord) -> dict[str, Any]:
+    return {
+        "message_id": message.message_id,
+        "subject": message.subject,
+        "sender": message.sender,
+        "received_at": message.received_at,
+        "mailbox_name": message.mailbox_name,
+        "account_name": message.account_name,
+        "read": message.read,
+        "preview": message.preview,
+    }
+
+
+def _serialize_mail_message_body(message: MailMessageBodyRecord) -> dict[str, Any]:
+    return {
+        "message_id": message.message_id,
+        "subject": message.subject,
+        "sender": message.sender,
+        "received_at": message.received_at,
+        "mailbox_name": message.mailbox_name,
+        "account_name": message.account_name,
+        "read": message.read,
+        "body": message.body,
+    }
+
+
+def _serialize_mail_draft(draft: MailDraftRecord) -> dict[str, Any]:
+    return {
+        "subject": draft.subject,
+        "to": draft.to,
+        "cc": draft.cc,
+        "bcc": draft.bcc,
+        "sender": draft.sender,
+        "visible": draft.visible,
+        "preview": draft.preview,
+    }
+
+
+def _serialize_mail_send(result: MailSendRecord) -> dict[str, Any]:
+    return {
+        "subject": result.subject,
+        "to": result.to,
+        "cc": result.cc,
+        "bcc": result.bcc,
+        "sender": result.sender,
+        "sent": result.sent,
+        "preview": result.preview,
     }
 
 
@@ -183,6 +252,135 @@ class MacOSSystemService:
         note = self.bridge.append_note(note_id=note_id, content=content)
         return _serialize_note(note)
 
+    def list_mailboxes(
+        self,
+        *,
+        account_name: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        mailboxes = self.bridge.list_mailboxes(
+            account_name=account_name,
+            limit=limit,
+        )
+        return {
+            "mailboxes": [_serialize_mailbox(item) for item in mailboxes],
+            "count": len(mailboxes),
+            "account_name": account_name,
+        }
+
+    def search_mail_messages(
+        self,
+        *,
+        query: str,
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+        limit: int = 10,
+        include_body: bool = False,
+    ) -> dict[str, Any]:
+        messages = self.bridge.search_mail_messages(
+            query=query,
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+            limit=limit,
+            include_body=include_body,
+        )
+        return {
+            "messages": [_serialize_mail_message(item) for item in messages],
+            "count": len(messages),
+            "query": query,
+            "account_name": account_name,
+            "mailbox_name": mailbox_name,
+            "include_body": include_body,
+        }
+
+    def list_mail_messages(
+        self,
+        *,
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+        limit: int = 10,
+        unread_only: bool = False,
+        days_back: int | None = 7,
+    ) -> dict[str, Any]:
+        messages = self.bridge.list_mail_messages(
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+            limit=limit,
+            unread_only=unread_only,
+            days_back=days_back,
+        )
+        return {
+            "messages": [_serialize_mail_message(item) for item in messages],
+            "count": len(messages),
+            "account_name": account_name,
+            "mailbox_name": mailbox_name,
+            "unread_only": unread_only,
+            "days_back": days_back,
+        }
+
+    def get_mail_message(
+        self,
+        *,
+        message_id: str,
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+    ) -> dict[str, Any]:
+        message = self.bridge.get_mail_message(
+            message_id=message_id,
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+        )
+        return _serialize_mail_message_body(message)
+
+    def create_mail_draft(
+        self,
+        *,
+        subject: str,
+        body: str,
+        to: list[str] | str | None = None,
+        cc: list[str] | str | None = None,
+        bcc: list[str] | str | None = None,
+        sender: str | None = None,
+        visible: bool = True,
+    ) -> dict[str, Any]:
+        draft = self.bridge.create_mail_draft(
+            subject=subject,
+            body=body,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            sender=sender,
+            visible=visible,
+        )
+        return _serialize_mail_draft(draft)
+
+    def send_mail_message(
+        self,
+        *,
+        subject: str,
+        body: str,
+        to: list[str] | str,
+        cc: list[str] | str | None = None,
+        bcc: list[str] | str | None = None,
+        sender: str | None = None,
+        confirm_send: bool = False,
+    ) -> dict[str, Any]:
+        if not confirm_send:
+            raise AppleScriptBridgeError(
+                "invalid_args",
+                "confirm_send 必须为 true，才会发送邮件。",
+                data={"field": "confirm_send"},
+            )
+        result = self.bridge.send_mail_message(
+            subject=subject,
+            body=body,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            sender=sender,
+        )
+        return _serialize_mail_send(result)
+
 
 def build_macos_server(*, bridge: AppleScriptBridge | None = None) -> FastMCP:
     if bridge is None:
@@ -282,6 +480,99 @@ def build_macos_server(*, bridge: AppleScriptBridge | None = None) -> FastMCP:
     @app.tool(name="notes_append")
     def notes_append(note_id: str, content: str) -> dict[str, Any]:
         return service.append_note(note_id=note_id, content=content)
+
+    @app.tool(name="mail_list_mailboxes")
+    def mail_list_mailboxes(
+        account_name: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        return service.list_mailboxes(account_name=account_name, limit=limit)
+
+    @app.tool(name="mail_search_messages")
+    def mail_search_messages(
+        query: str,
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+        limit: int = 10,
+        include_body: bool = False,
+    ) -> dict[str, Any]:
+        """Search Mail messages by subject/sender, optionally including body text."""
+        return service.search_mail_messages(
+            query=query,
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+            limit=limit,
+            include_body=include_body,
+        )
+
+    @app.tool(name="mail_list_messages")
+    def mail_list_messages(
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+        limit: int = 10,
+        unread_only: bool = False,
+        days_back: int | None = 7,
+    ) -> dict[str, Any]:
+        """List recent Mail messages within days_back, optionally unread only."""
+        return service.list_mail_messages(
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+            limit=limit,
+            unread_only=unread_only,
+            days_back=days_back,
+        )
+
+    @app.tool(name="mail_get_message")
+    def mail_get_message(
+        message_id: str,
+        account_name: str | None = None,
+        mailbox_name: str | None = None,
+    ) -> dict[str, Any]:
+        return service.get_mail_message(
+            message_id=message_id,
+            account_name=account_name,
+            mailbox_name=mailbox_name,
+        )
+
+    @app.tool(name="mail_create_draft")
+    def mail_create_draft(
+        subject: str,
+        body: str,
+        to: list[str] | str | None = None,
+        cc: list[str] | str | None = None,
+        bcc: list[str] | str | None = None,
+        sender: str | None = None,
+        visible: bool = True,
+    ) -> dict[str, Any]:
+        return service.create_mail_draft(
+            subject=subject,
+            body=body,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            sender=sender,
+            visible=visible,
+        )
+
+    @app.tool(name="mail_send_message")
+    def mail_send_message(
+        subject: str,
+        body: str,
+        to: list[str] | str,
+        cc: list[str] | str | None = None,
+        bcc: list[str] | str | None = None,
+        sender: str | None = None,
+        confirm_send: bool = False,
+    ) -> dict[str, Any]:
+        return service.send_mail_message(
+            subject=subject,
+            body=body,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            sender=sender,
+            confirm_send=confirm_send,
+        )
 
     return app
 

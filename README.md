@@ -97,7 +97,7 @@ MCP 在 MiniBot 里是统一的外部能力接入层，分两边：
 - `mcp_host/`：客户端侧，包含配置解析、transport（`stdio` / `streamable_http`）、host 生命周期管理，以及把每个 MCP tool 包成本地 `Tool` 的 `MCPToolProxy`。
 - `mcp_servers/`：本地自带的 MCP server 实现，每个 server 自包含一个目录/文件：
   - `sqlite_server.py`：只读 SQLite demo
-  - `macos_system/`：Calendar / Reminders / Notes（AppleScript 桥）
+  - `macos_system/`：Calendar / Reminders / Notes / Mail（AppleScript 桥）
 
 运行模型：每个 MCP server 一个后台 asyncio loop thread，`Tool.execute()` 通过 `run_coroutine_threadsafe` 同步等结果。`stdio` server 由 MiniBot 起子进程；`streamable_http` 只是连接已有的远端 server，不由 MiniBot 启动。
 
@@ -184,7 +184,7 @@ Web UI 里左侧 `events` 展示模型请求、tool 调用、审批和错误；�
 
 ## 快速开始
 
-项目本身是一个 Python 包，**从包的上一级目录**启动。
+项目使用 `uv` 管理独立 Python 环境，并通过 `.python-version` 固定解释器版本。所有运行、测试、依赖安装命令都应从 `minibot/` 目录用 `uv` 执行，不直接使用系统 `python` / `pip`。
 
 在 `minibot/.env` 写入基础配置：
 
@@ -197,16 +197,16 @@ MINIBOT_MODEL=gpt-5.4-mini
 安装依赖并启动：
 
 ```bash
-cd /Users/jiminyang/Desktop/ai-projects/agent
-pip install -r minibot/requirements.txt
-python -m minibot
+cd /Users/jimin/Desktop/minibot
+uv sync
+uv run minibot
 ```
 
 启动本地 SSE server：
 
 ```bash
-cd /Users/jiminyang/Desktop/ai-projects/agent
-python -m minibot.server --host 127.0.0.1 --port 8765
+cd /Users/jimin/Desktop/minibot
+uv run minibot-server --host 127.0.0.1 --port 8765
 ```
 
 打开 `http://127.0.0.1:8765/` 可以使用本地 Web UI。布局是固定视口高度：左侧 events 独立滚动，右侧 conversation 独立滚动，底部输入区不会被历史消息撑走。
@@ -232,14 +232,17 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 | `OPENAI_API_KEY` | — | 必填 |
 | `OPENAI_BASE_URL` | 官方 | 指向 proxy / self-hosted endpoint |
 | `MINIBOT_MODEL` | `gpt-5.4-mini` | 模型名 |
+| `MINIBOT_APPROVAL_MODE` | `ask` | 工具审批模式：`ask` 表示敏感工具需要确认，`always` 表示自动批准 |
 | `MINIBOT_MAX_ITERATIONS` | `20` | 单轮 turn 内 LLM ↔ tool 最大循环次数 |
 | `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | 同一响应多 tool call 并发上限 |
-| `MINIBOT_AUTO_APPROVE` | `false` | `true` 时跳过审批 |
+| `MINIBOT_AUTO_APPROVE` | — | 旧变量；未设置 `MINIBOT_APPROVAL_MODE` 时，`true` 会映射成 `always` |
 | `MINIBOT_MAX_HISTORY_TURNS` | `40` | compact 前允许的最大历史 turn |
 | `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | 触发自动 compact 的 token 阈值 |
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 留给 completion 的 token 预算 |
 | `MINIBOT_COMPACT_KEEP_RECENT` | `10` | compact 时保留的最近消息数 |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | `auto` 时 DeepSeek endpoint/model 会把 `reasoning_content` 回传给模型；OpenAI 默认剥离。可设 `true` / `false` 强制覆盖 |
+
+`MINIBOT_APPROVAL_MODE` 只是启动默认值；CLI 启动后可用 `/permission ask` 或 `/permission always` 切换当前进程的审批模式，不会自动写回 `.env`。
 
 持久化路径（按约定生成，无需配置）：
 
@@ -250,7 +253,11 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 
 ### MCP (`mcp.json`)
 
-查找顺序：先找当前工作目录的 `mcp.json`，找不到回退到 `minibot/mcp.json`。
+MCP 配置是 MiniBot 全局配置，不随当前项目目录变化。查找顺序：
+
+1. `MINIBOT_MCP_CONFIG_PATH` 指定的 `mcp.json` 文件或目录
+2. `~/.minibot/mcp.json`
+3. 包内默认配置 `minibot/mcp.json`
 
 几个关键规则：
 
@@ -260,6 +267,7 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 - `trusted: true` 免审批；否则走正常审批流
 - `transport.headers` / `transport.env` 支持 `${ENV_VAR}` 占位符
 - `transport.cwd` 的相对路径按 `mcp.json` 所在目录解析
+- 内置 Python MCP server 可使用 `${MINIBOT_PYTHON}` 和 `${MINIBOT_PACKAGE_DIR}`，分别指向当前 MiniBot 解释器和安装目录
 
 支持两种 transport：
 
@@ -269,7 +277,7 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 默认配置包含这些 MCP servers：
 
 - `sqlite` → `mcp_servers/sqlite_server.py`（默认库 `examples/mcp/demo.sqlite3`，可用 `SQLITE_PATH` 覆盖）
-- `macos_system` → `mcp_servers/macos_system/server.py`（Calendar / Reminders / Notes）
+- `macos_system` → `mcp_servers/macos_system/server.py`（Calendar / Reminders / Notes / Mail）
 - `drawio` → `npx -y @drawio/mcp`（官方 draw.io MCP tool server，暴露 `open_drawio_xml/csv/mermaid`；首次启动需要本机有 Node.js / npx，且可能联网拉取 npm 包）
 
 最小本地 `stdio` 示例：
@@ -327,6 +335,8 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 - `/memory clear` 清空长期记忆
 - `/memory forget <id>` 删除单条长期记忆
 - `/skills` 查看可用 skills
+- `/permission [ask|always]` 查看或切换当前进程的工具审批模式
+- `/config` 查看当前运行配置和审批模式
 - `/help` 显示帮助
 
 ## 测试
@@ -334,11 +344,11 @@ python -m minibot.server --host 127.0.0.1 --port 8765
 在 `minibot/` 目录运行：
 
 ```bash
-python -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```
 
 只跑 MCP 相关：
 
 ```bash
-python -m unittest tests.test_mcp_config tests.test_mcp_client tests.test_mcp_manager tests.test_mcp_tools
+uv run python -m unittest tests.test_mcp_config tests.test_mcp_client tests.test_mcp_manager tests.test_mcp_tools
 ```

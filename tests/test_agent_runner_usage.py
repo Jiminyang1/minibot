@@ -539,6 +539,87 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 )
             )
 
+    def test_approval_mode_always_skips_prompt_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = ToolRegistry()
+            registry.register(
+                _TrackingTool(
+                    "sensitive",
+                    state=state,
+                    requires_approval=True,
+                )
+            )
+            emitted: list[RuntimeEvent] = []
+            handler_calls = 0
+
+            def _approval_handler(request) -> bool:
+                nonlocal handler_calls
+                del request
+                handler_calls += 1
+                return False
+
+            runner = AgentRunner(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(
+                                    id="call_1",
+                                    name="sensitive",
+                                    arguments="{}",
+                                )
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                event_handler=emitted.append,
+                approval_handler=_approval_handler,
+                approval_mode="always",
+                max_parallel_tools=1,
+            )
+
+            outcome = runner.run(
+                RunSpec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[{"role": "user", "content": "run tool"}],
+                    tool_definitions=registry.get_definitions(),
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(handler_calls, 0)
+            self.assertEqual(state.executions.get("sensitive", 0), 1)
+            self.assertNotIn("approval.required", [event.type for event in emitted])
+            self.assertTrue(
+                any(
+                    event.type == "approval.resolved"
+                    and event.payload.get("auto") is True
+                    for event in emitted
+                )
+            )
+
+    def test_approval_mode_can_be_changed_at_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = AgentRunner(
+                _ScriptedLLM([]),
+                ToolRegistry(),
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                approval_mode="ask",
+            )
+
+            self.assertEqual(runner.approval_mode, "ask")
+            runner.set_approval_mode("always")
+            self.assertEqual(runner.approval_mode, "always")
+
+            with self.assertRaises(ValueError):
+                runner.set_approval_mode("maybe")  # type: ignore[arg-type]
+
     def test_parallel_large_results_materialize_distinct_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

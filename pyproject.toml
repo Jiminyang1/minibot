@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minibot"
+version = "0.1.0"
+description = "Local command-line AI agent with tools, MCP, skills, sessions, and memory."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "mcp>=1.27,<2",
+    "openai>=1.0",
+    "tiktoken>=0.7",
+    "uvicorn>=0.29",
+]
+
+[project.scripts]
+minibot = "minibot.__main__:main"
+minibot-server = "minibot.server:main"
+
+[tool.setuptools]
+packages = [
+    "minibot",
+    "minibot.mcp_host",
+    "minibot.mcp_host.transport",
+    "minibot.mcp_servers",
+    "minibot.mcp_servers.macos_system",
+    "minibot.runtime",
+    "minibot.session",
+    "minibot.skills",
+    "minibot.tools",
+]
+
+[tool.setuptools.package-dir]
+"minibot" = "."
+"minibot.mcp_host" = "mcp_host"
+"minibot.mcp_host.transport" = "mcp_host/transport"
+"minibot.mcp_servers" = "mcp_servers"
+"minibot.mcp_servers.macos_system" = "mcp_servers/macos_system"
+"minibot.runtime" = "runtime"
+"minibot.session" = "session"
+"minibot.skills" = "skills"
+"minibot.tools" = "tools"
+
+[tool.setuptools.package-data]
+"minibot" = ["mcp.json", "web/*"]
+"minibot.skills" = ["*.md"]

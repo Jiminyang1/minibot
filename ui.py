@@ -10,9 +10,16 @@ memory items, strings) and produce styled output.
 
 from __future__ import annotations
 
-import os
-import sys
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
+    fcntl = None  # type: ignore[assignment]
+
 import json
+import os
+import select
+import sys
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -48,6 +55,11 @@ def c(text: str, *styles: str) -> str:
 
 
 RULE = c("─" * 46, "gray")
+
+_PASTE_DRAIN_IDLE_SECONDS = 0.05
+_PASTE_DRAIN_MAX_SECONDS = 0.35
+_PASTE_DRAIN_CHUNK_SIZE = 4096
+_PASTE_DRAIN_MAX_BYTES = 64 * 1024
 
 
 # ── generic semantic prints ──────────────────────────────────────
@@ -131,14 +143,78 @@ def prompt_approval(tool_name: str, args: dict[str, Any]) -> bool:
     label = c("批准执行", "yellow", "bold")
     hint = c("[y/N]", "gray")
     line = f"  {label}  {c(tool_name, 'cyan')}({preview}) {hint} "
-    return input(line).strip().lower() in {"y", "yes"}
+    while True:
+        answer = input(line).strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"", "n", "no"}:
+            return False
+        warn("请输入 y 或 n。审批期间不要继续粘贴任务内容。")
+        line = f"  {hint} "
 
 
 # ── REPL input/output ────────────────────────────────────────────
 
 
+def _drain_pending_stdin() -> str:
+    """Return bytes already queued after input(), usually from multiline paste."""
+    if fcntl is None:
+        return ""
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        fd = sys.stdin.fileno()
+        original_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + _PASTE_DRAIN_MAX_SECONDS
+    total = 0
+
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETFL, original_flags | os.O_NONBLOCK)
+        while time.monotonic() < deadline and total < _PASTE_DRAIN_MAX_BYTES:
+            timeout = min(
+                _PASTE_DRAIN_IDLE_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                break
+            try:
+                data = os.read(fd, _PASTE_DRAIN_CHUNK_SIZE)
+            except BlockingIOError:
+                continue
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+    finally:
+        fcntl.fcntl(fd, fcntl.F_SETFL, original_flags)
+
+    if not chunks:
+        return ""
+    encoding = sys.stdin.encoding or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
+def _merge_pasted_input(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+
+    line_count = max(1, len(cleaned.splitlines()))
+    info(f"检测到 {line_count} 行粘贴内容，已合并为一条请求。")
+    return cleaned
+
+
 def read_user_input() -> str:
-    return input(c("\n  You › ", "bold", "cyan")).strip()
+    first_line = input(c("\n  You › ", "bold", "cyan"))
+    pending = _drain_pending_stdin()
+    if pending:
+        return _merge_pasted_input(f"{first_line}\n{pending}")
+    return first_line.strip()
 
 
 def print_agent_reply(reply: str) -> None:
@@ -158,6 +234,8 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
     ("/mcp", "查看 MCP server 状态"),
     ("/mcp tools [server]", "查看 MCP 工具列表"),
     ("/skills", "查看当前可用 skills"),
+    ("/permission [mode]", "查看或切换审批模式"),
+    ("/config", "查看当前运行配置"),
     ("/memory", "查看长期记忆 (clear / forget <id>)"),
     ("/help", "显示帮助"),
     ("exit", "退出"),
@@ -183,6 +261,7 @@ def print_status(
     resumed: bool,
     skill_count: int = 0,
     mcp_summary: MCPHostSummary | None = None,
+    approval_mode: str | None = None,
 ) -> None:
     status_tag = c("已恢复", "green") if resumed else c("新建", "yellow")
     memory_label = (
@@ -199,8 +278,29 @@ def print_status(
         ("技能", skill_label),
         ("MCP", _format_mcp_brief(mcp_summary)),
     ]
+    if approval_mode is not None:
+        rows.append(("审批", _format_approval_mode(approval_mode)))
     for label, value in rows:
         print(f"  {c(label.ljust(4), 'gray')}  {value}")
+    print()
+
+
+def print_config(config: Any, *, approval_mode: str | None = None) -> None:
+    mode = approval_mode or config.approval_mode
+    print()
+    print(c("  Config", "bold"))
+    rows = [
+        ("model", config.model),
+        ("approval_mode", _format_approval_mode(mode)),
+        ("max_iterations", str(config.max_iterations)),
+        ("max_parallel_tools", str(config.max_parallel_tools)),
+        ("max_history_turns", str(config.max_history_turns)),
+        ("compact_token_threshold", str(config.compact_token_threshold)),
+        ("reserved_completion_tokens", str(config.reserved_completion_tokens)),
+        ("compact_keep_recent", str(config.compact_keep_recent)),
+    ]
+    for key, value in rows:
+        print(f"    {c(key.ljust(27), 'gray')}{value}")
     print()
 
 
@@ -211,6 +311,19 @@ def print_session(session: Session) -> None:
         f"{c('·', 'gray')} {session.title}  "
         f"{c('·', 'gray')} {session.turn_count()} 轮 / {len(session.messages)} 条"
     )
+
+
+def _format_approval_mode(mode: str) -> str:
+    if mode == "always":
+        return c("always", "yellow") + c(" · 自动批准敏感工具", "gray")
+    return c("ask", "green") + c(" · 敏感工具需要确认", "gray")
+
+
+def print_permission_mode(mode: str) -> None:
+    print()
+    print(c("  Permission", "bold"))
+    print(f"    {c('mode', 'gray')}  {_format_approval_mode(mode)}")
+    print()
 
 
 def print_sessions(sessions: Iterable[Session]) -> None:
