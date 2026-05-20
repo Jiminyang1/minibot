@@ -10,7 +10,8 @@ from ..tools.result import ToolOutput, ToolResult
 class ToolOutputMaterializer:
     """Decide whether tool content is inlined or stored as an artifact."""
 
-    _INLINE_CONTENT_CHARS = 3000
+    _INLINE_CONTENT_CHARS = 12000
+    _PREVIEW_CHARS = 2000
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self._artifact_store = artifact_store
@@ -49,7 +50,7 @@ class ToolOutputMaterializer:
             kind=output.content_kind,
             name=output.content_name,
         )
-        data.setdefault("preview", output.content[: self._INLINE_CONTENT_CHARS])
+        data.setdefault("preview", output.content[: self._PREVIEW_CHARS])
 
         summary = output.summary
         if "artifact" not in summary and "截断" not in summary:

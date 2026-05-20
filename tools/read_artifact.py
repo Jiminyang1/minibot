@@ -13,8 +13,8 @@ from .result import ToolOutput
 class ReadArtifactTool(Tool):
     """Read a previously stored artifact by character range."""
 
-    _DEFAULT_LIMIT = 4000
-    _MAX_LIMIT = 8000
+    _DEFAULT_LIMIT = 12000
+    _MAX_LIMIT = 24000
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
         super().__init__(workspace=None)
@@ -52,7 +52,7 @@ class ReadArtifactTool(Tool):
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "读取的字符数，默认 4000，上限 8000。",
+                    "description": "读取的字符数，默认 12000，上限 24000。",
                     "minimum": 1,
                     "maximum": self._MAX_LIMIT,
                 },
@@ -116,6 +116,27 @@ class ReadArtifactTool(Tool):
                 data={"artifact_id": artifact_id},
             )
 
+        if not page.content:
+            return ToolOutput.success(
+                (
+                    f"artifact {artifact_id} 在 offset {page.offset} 处已无更多内容"
+                    f"（共 {page.total_chars} 字符）。"
+                ),
+                data={
+                    "artifact_id": artifact_id,
+                    "kind": page.ref.kind,
+                    "name": page.ref.name,
+                    "content": "",
+                    "offset": page.offset,
+                    "limit": page.limit,
+                    "returned_chars": 0,
+                    "next_offset": None,
+                    "has_more": False,
+                    "total_chars": page.total_chars,
+                },
+                truncated=False,
+            )
+
         content = self._fit_content(
             artifact_id=artifact_id,
             kind=page.ref.kind,
@@ -129,7 +150,7 @@ class ReadArtifactTool(Tool):
         if not content:
             return ToolOutput.failure(
                 "error",
-                f"读取 artifact 失败: artifact {artifact_id} 片段过大，无法安全返回。",
+                f"读取 artifact 失败: artifact {artifact_id} 单字符片段仍超出返回上限。",
                 data={"artifact_id": artifact_id},
             )
 

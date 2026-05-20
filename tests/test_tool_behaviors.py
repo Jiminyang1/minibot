@@ -23,6 +23,9 @@ from minibot.tools.read_file import ReadFileTool
 from minibot.tools.search_files import SearchFilesTool
 from minibot.tools.write_file import WriteFileTool
 
+_INLINE = ToolOutputMaterializer._INLINE_CONTENT_CHARS
+_PREVIEW = ToolOutputMaterializer._PREVIEW_CHARS
+
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -35,7 +38,7 @@ class _ArticleHandler(BaseHTTPRequestHandler):
             "<title>China Tech Daily</title>"
             '<meta property="article:published_time" content="2026-04-17T12:30:00Z">'
             "</head><body><article><h1>China Tech Daily</h1><p>"
-            + ("agent news " * 400)
+            + ("agent news " * 1400)
             + "</p></article></body></html>"
         ).encode("utf-8")
         self.send_response(200)
@@ -77,7 +80,7 @@ class ToolBehaviorTests(unittest.TestCase):
             workspace = Path(tmpdir)
             store = ArtifactStore(workspace)
             context = ToolExecutionContext(session_id="s_test")
-            (workspace / "long.txt").write_text("a" * 3500, encoding="utf-8")
+            (workspace / "long.txt").write_text("a" * (_INLINE + 500), encoding="utf-8")
 
             output = ReadFileTool(workspace=workspace).execute(context=context, path="long.txt")
             result = self._materialize(workspace, context, output)
@@ -85,14 +88,14 @@ class ToolBehaviorTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertTrue(result.truncated)
             self.assertIsNotNone(result.artifact)
-            self.assertEqual(len(result.data["preview"]), 3000)
+            self.assertEqual(len(result.data["preview"]), _PREVIEW)
             self.assertNotIn("content", result.data)
 
             artifact_result = ReadArtifactTool(store).execute(
                 context=context,
                 artifact_id=result.artifact.id,
             )
-            self.assertEqual(artifact_result.data["total_chars"], 3500)
+            self.assertEqual(artifact_result.data["total_chars"], _INLINE + 500)
 
     def test_exec_long_output_and_nonzero_exit_code_are_structured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,7 +105,7 @@ class ToolBehaviorTests(unittest.TestCase):
             tool = ExecTool(workspace=workspace)
             command = (
                 f"{shlex.quote(sys.executable)} -c "
-                "\"import sys; print('x'*4000); sys.stderr.write('err'); sys.exit(1)\""
+                "\"import sys; print('x'*13000); sys.stderr.write('err'); sys.exit(1)\""
             )
 
             result = self._materialize(workspace, context, tool.execute(context=context, command=command))
@@ -119,7 +122,14 @@ class ToolBehaviorTests(unittest.TestCase):
                 artifact_id=result.artifact.id,
                 limit=8000,
             )
-            self.assertIn("[stderr]\nerr", artifact_result.data["content"])
+            total = artifact_result.data["total_chars"]
+            tail = ReadArtifactTool(store).execute(
+                context=context,
+                artifact_id=result.artifact.id,
+                offset=max(0, total - 100),
+                limit=100,
+            )
+            self.assertIn("[stderr]\nerr", tail.data["content"])
 
     def test_exec_zero_exit_code_remains_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -212,7 +222,7 @@ class ToolBehaviorTests(unittest.TestCase):
                         final_url="https://example.com/post",
                         status_code=200,
                         content_type="text/markdown",
-                        body_text="headline\n\n" + ("detail " * 800),
+                        body_text="headline\n\n" + ("detail " * 2000),
                         title="Example Headline",
                         extractor="jina",
                     ),
@@ -350,7 +360,7 @@ class FileHashTests(unittest.TestCase):
             workspace = Path(tmpdir)
             store = ArtifactStore(workspace)
             context = ToolExecutionContext(session_id="s_test")
-            body = "a" * 3500
+            body = "a" * (_INLINE + 500)
             (workspace / "long.txt").write_text(body, encoding="utf-8")
 
             output = ReadFileTool(workspace=workspace).execute(

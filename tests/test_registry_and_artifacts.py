@@ -214,18 +214,19 @@ class ReadArtifactToolTests(unittest.TestCase):
             workspace = Path(tmpdir)
             store = ArtifactStore(workspace)
             context = ToolExecutionContext(session_id="s_test")
-            ref = store.put_text("s_test", "x" * 12000, name="large")
+            max_limit = ReadArtifactTool._MAX_LIMIT
+            ref = store.put_text("s_test", "x" * (max_limit * 2), name="large")
             tool = ReadArtifactTool(store)
 
             result = tool.execute(
                 context=context,
                 artifact_id=ref.id,
                 offset=0,
-                limit=8000,
+                limit=max_limit,
             )
 
             self.assertTrue(result.ok)
-            self.assertLess(len(result.data["content"]), 8000)
+            self.assertLess(len(result.data["content"]), max_limit)
             self.assertEqual(result.data["returned_chars"], len(result.data["content"]))
             self.assertEqual(result.data["next_offset"], len(result.data["content"]))
             self.assertTrue(result.data["has_more"])

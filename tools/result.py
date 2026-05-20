@@ -25,7 +25,7 @@ ToolCode: TypeAlias = Literal[
 class ToolOutput:
     """Raw semantic result produced by a tool before runtime materialization."""
 
-    _MAX_DATA_CHARS = 8000
+    _MAX_DATA_CHARS = 24000
 
     ok: bool
     code: ToolCode

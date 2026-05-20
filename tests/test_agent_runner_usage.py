@@ -630,7 +630,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     "large_a",
                     state=state,
                     read_only=True,
-                    body="A" * 3500,
+                    body="A" * 13000,
                 )
             )
             registry.register(
@@ -638,7 +638,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     "large_b",
                     state=state,
                     read_only=True,
-                    body="B" * 3600,
+                    body="B" * 13100,
                 )
             )
             store = ArtifactStore(workspace)
@@ -679,11 +679,11 @@ class AgentRunnerUsageTests(unittest.TestCase):
             self.assertNotEqual(artifact_a, artifact_b)
             self.assertEqual(
                 store.read_page("s_test", artifact_a, offset=0, limit=5000).content,
-                "A" * 3500,
+                "A" * 5000,
             )
             self.assertEqual(
                 store.read_page("s_test", artifact_b, offset=0, limit=5000).content,
-                "B" * 3600,
+                "B" * 5000,
             )
 
 
