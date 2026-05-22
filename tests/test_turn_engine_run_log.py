@@ -17,7 +17,10 @@ from minibot.run_log import RunLogStore
 from minibot.runtime.agent_runner import PartialRunError, RunOutcome
 from minibot.runtime.context_manager import PreparedContext
 from minibot.runtime.events import RuntimeEvent
+from minibot.runtime.hooks import HookContext, RuntimeHook, RuntimeHookManager
+from minibot.runtime.messages import AgentMessage, ModelMessage
 from minibot.runtime.turn_engine import TurnEngine
+from minibot.runtime.turn_engine import TurnResult
 from minibot.session import MessageEvent, SessionManager
 from minibot.tools.registry import ToolRegistry
 from mcp.types import CallToolResult, TextContent
@@ -80,13 +83,13 @@ class _StubRunner:
         self,
         *,
         reply: str = "",
-        events: list[MessageEvent] | None = None,
+        messages: list[AgentMessage] | None = None,
         usage: TokenUsage | None = None,
         exc: Exception | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._reply = reply
-        self._events = list(events or [])
+        self._messages = list(messages or [])
         self._usage = usage
         self._exc = exc
         self.tool_registry = tool_registry or ToolRegistry()
@@ -98,8 +101,18 @@ class _StubRunner:
             raise self._exc
         return RunOutcome(
             reply=self._reply,
-            events=list(self._events),
+            messages=list(self._messages),
             usage=self._usage,
+        )
+
+
+class _RewriteTurnHook(RuntimeHook):
+    def after_turn(self, context: HookContext, result: TurnResult) -> TurnResult:
+        del context
+        return TurnResult(
+            reply="hooked reply",
+            did_compact=result.did_compact,
+            compact_message=result.compact_message,
         )
 
 
@@ -119,7 +132,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
@@ -151,13 +164,13 @@ class TurnEngineRunLogTests(unittest.TestCase):
             user_input = ("hello   world " * 20).strip()
             reply = ("final   answer " * 30).strip()
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=True,
                 compact_message="已压缩: 20 -> 8 条消息",
             )
-            events = [
-                MessageEvent.create(
+            messages = [
+                AgentMessage.create(
                     role="assistant",
                     content="",
                     tool_calls=[
@@ -171,18 +184,18 @@ class TurnEngineRunLogTests(unittest.TestCase):
                         }
                     ],
                 ),
-                MessageEvent.create(
+                AgentMessage.create(
                     role="tool",
                     content="{\"ok\":true}",
                     tool_call_id="call_1",
                     name="read_file",
                 ),
-                MessageEvent.create(role="assistant", content=reply),
+                AgentMessage.create(role="assistant", content=reply),
             ]
             engine = TurnEngine(
                 _StubRunner(
                     reply=reply,
-                    events=events,
+                    messages=messages,
                     usage=TokenUsage(
                         input_tokens=111,
                         output_tokens=29,
@@ -233,6 +246,42 @@ class TurnEngineRunLogTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(reloaded.message_count, 4)
 
+    def test_after_turn_hook_rewrites_result_before_persisting_final_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            session = manager.create_session("s_test")
+            prepared = PreparedContext(
+                messages=[ModelMessage.create(role="system", content="sys")],
+                tool_definitions=[],
+                did_compact=False,
+                compact_message=None,
+            )
+            engine = TurnEngine(
+                _StubRunner(
+                    reply="original reply",
+                    messages=[
+                        AgentMessage.create(role="assistant", content="original reply")
+                    ],
+                ),
+                manager,
+                Config(),
+                context_manager=_StubContextManager(prepared=prepared),
+                hook_manager=RuntimeHookManager([_RewriteTurnHook()]),
+                run_log_store=RunLogStore(workspace),
+            )
+
+            result = engine.handle_turn(session, "hello")
+
+            self.assertEqual(result.reply, "hooked reply")
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual(reloaded.messages[-1].content, "hooked reply")
+            self.assertEqual(
+                _read_run_logs(workspace)[0]["final_reply_preview"],
+                "hooked reply",
+            )
+
     def test_auto_compaction_saves_compacted_transcript_before_appending_new_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -245,7 +294,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             manager.save(session)
 
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=True,
                 compact_message="已压缩: 2 -> 1 条消息",
@@ -263,7 +312,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             engine = TurnEngine(
                 _StubRunner(
                     reply="new answer",
-                    events=[MessageEvent.create(role="assistant", content="new answer")],
+                    messages=[AgentMessage.create(role="assistant", content="new answer")],
                 ),
                 manager,
                 Config(),
@@ -293,7 +342,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
@@ -323,14 +372,14 @@ class TurnEngineRunLogTests(unittest.TestCase):
             engine = TurnEngine(
                 _StubRunner(
                     reply="done",
-                    events=[
-                        MessageEvent.create(
+                    messages=[
+                        AgentMessage.create(
                             role="tool",
                             content=json.dumps(tool_payload, ensure_ascii=False),
                             tool_call_id="call_1",
                             name="mcp__sqlite__query",
                         ),
-                        MessageEvent.create(role="assistant", content="done"),
+                        AgentMessage.create(role="assistant", content="done"),
                     ],
                     tool_registry=registry,
                 ),
@@ -390,7 +439,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
@@ -423,19 +472,19 @@ class TurnEngineRunLogTests(unittest.TestCase):
             self.assertEqual(reloaded.message_count, 1)
             self.assertEqual(reloaded.messages[0].role, "user")
 
-    def test_partial_runner_failure_persists_completed_events_and_logs_usage(self) -> None:
+    def test_partial_runner_failure_persists_completed_messages_and_logs_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
             prepared = PreparedContext(
-                messages=[{"role": "system", "content": "sys"}],
+                messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
             )
-            partial_events = [
-                MessageEvent.create(
+            partial_messages = [
+                AgentMessage.create(
                     role="assistant",
                     content="",
                     tool_calls=[
@@ -449,7 +498,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                         }
                     ],
                 ),
-                MessageEvent.create(
+                AgentMessage.create(
                     role="tool",
                     content="{\"ok\":true}",
                     tool_call_id="call_1",
@@ -460,7 +509,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 _StubRunner(
                     exc=PartialRunError(
                         cause=RuntimeError("llm unavailable"),
-                        events=partial_events,
+                        messages=partial_messages,
                         usage=TokenUsage(
                             input_tokens=100,
                             output_tokens=10,

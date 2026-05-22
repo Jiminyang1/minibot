@@ -23,7 +23,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from .mcp_host import MCPHostSummary, MCPServerStatus
+from .mcp_host.models import MCPHostSummary, MCPServerStatus
 from .runtime.events import RuntimeEvent
 from .user_memory import MemoryItem
 from .session import Session

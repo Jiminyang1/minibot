@@ -4,12 +4,17 @@ from contextlib import redirect_stdout
 import io
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot import ui
+from minibot.cli import run_repl
+from minibot.runtime.hooks_builtin import ApprovalPolicy
+from minibot.runtime.turn_engine import TurnResult
+from minibot.session import SessionManager
 from minibot.mcp_host.models import MCPHostSummary, MCPServerStatus
 
 
@@ -95,6 +100,65 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(user_input, "line 1\nline 2\nline 3")
         self.assertIn("检测到 3 行粘贴内容，已合并为一条请求", buffer.getvalue())
+
+    def test_repl_routes_normal_messages_through_run_controller(self) -> None:
+        class _Controller:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def run_turn(self, *, session_id, user_input, event_handler):
+                self.calls.append((session_id, user_input, event_handler))
+                return TurnResult(reply="ok", did_compact=False)
+
+        class _TurnEngine:
+            def list_available_skills(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            controller = _Controller()
+            buffer = io.StringIO()
+            with (
+                patch("minibot.ui.read_user_input", side_effect=["hello", "exit"]),
+                redirect_stdout(buffer),
+            ):
+                run_repl(
+                    controller,  # type: ignore[arg-type]
+                    _TurnEngine(),  # type: ignore[arg-type]
+                    manager,
+                    memory_store=type("_Memory", (), {"list": lambda self: []})(),
+                    approval_policy=ApprovalPolicy(mode="ask"),
+                )
+
+            self.assertEqual(len(controller.calls), 1)
+            self.assertEqual(controller.calls[0][1], "hello")
+
+    def test_repl_permission_command_uses_approval_policy(self) -> None:
+        class _Controller:
+            def run_turn(self, *, session_id, user_input, event_handler):
+                del session_id, user_input, event_handler
+                raise AssertionError("slash command should not start a run")
+
+        class _TurnEngine:
+            def list_available_skills(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            policy = ApprovalPolicy(mode="ask")
+            with (
+                patch("minibot.ui.read_user_input", side_effect=["/permission always", "exit"]),
+                redirect_stdout(io.StringIO()),
+            ):
+                run_repl(
+                    _Controller(),  # type: ignore[arg-type]
+                    _TurnEngine(),  # type: ignore[arg-type]
+                    manager,
+                    memory_store=type("_Memory", (), {"list": lambda self: []})(),
+                    approval_policy=policy,
+                )
+
+            self.assertEqual(policy.mode, "always")
 
 
 if __name__ == "__main__":

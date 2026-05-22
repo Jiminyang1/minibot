@@ -14,8 +14,8 @@ from starlette.requests import Request
 
 from .bootstrap import MiniBotRuntime, build_runtime
 from .config import Config, load_env
-from .runtime import ApprovalBroker, RuntimeEvent
-from .runtime.controller import RunCancelled
+from .runtime.controller import ApprovalBroker, RunCancelled
+from .runtime.events import RuntimeEvent
 from .runtime.events import RuntimeEventEmitter
 from .run_log import make_run_id
 from .session import MessageEvent, Session
@@ -26,9 +26,10 @@ _SENTINEL = object()
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 
-class RunStreamRequest(BaseModel):
+class RunRequest(BaseModel):
     input: str = Field(min_length=1)
     session_id: str | None = None
+    mode: str = "default"
 
 
 class ApprovalResolution(BaseModel):
@@ -210,7 +211,7 @@ def create_app(runtime: MiniBotRuntime):
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="static")
     event_store = RunEventStore()
 
-    def start_run(request: RunStreamRequest) -> str:
+    def start_run(request: RunRequest) -> str:
         run_id = make_run_id()
         event_store.create(run_id)
 
@@ -224,6 +225,7 @@ def create_app(runtime: MiniBotRuntime):
                     user_input=request.input,
                     event_handler=sink,
                     run_id=run_id,
+                    mode=request.mode,
                 )
             except RunCancelled:
                 pass
@@ -325,12 +327,13 @@ def create_app(runtime: MiniBotRuntime):
         )
 
     @app.post("/runs")
-    def create_run(request: RunStreamRequest = Body(...)) -> JSONResponse:
+    def create_run(request: RunRequest = Body(...)) -> JSONResponse:
         run_id = start_run(request)
         return JSONResponse(
             {
                 "run_id": run_id,
                 "session_id": request.session_id,
+                "mode": request.mode,
                 "status": "running",
             },
             status_code=202,
@@ -344,33 +347,6 @@ def create_app(runtime: MiniBotRuntime):
         )
         if queue is None:
             raise HTTPException(status_code=404, detail="run not found")
-
-        def events():
-            try:
-                while True:
-                    try:
-                        item = queue.get(timeout=10)
-                    except Empty:
-                        yield ": keepalive\n\n"
-                        continue
-                    if item is _SENTINEL:
-                        break
-                    assert isinstance(item, RuntimeEvent)
-                    yield _to_sse(item)
-            finally:
-                event_store.unsubscribe(run_id, queue)
-
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    @app.post("/runs/stream")
-    def stream_run(request: RunStreamRequest = Body(...)) -> StreamingResponse:
-        run_id = start_run(request)
-        queue = event_store.subscribe(run_id)
-        assert queue is not None
 
         def events():
             try:

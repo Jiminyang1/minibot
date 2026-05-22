@@ -9,9 +9,9 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.runtime.agent_runner import ApprovalRequest
 from minibot.runtime.controller import ApprovalBroker, RunController, SessionBusyError
 from minibot.runtime.events import RuntimeEvent, RuntimeEventEmitter
+from minibot.runtime.hooks_builtin import ApprovalRequest
 from minibot.runtime.turn_engine import TurnResult
 from minibot.session import SessionManager
 
@@ -29,8 +29,9 @@ class _BlockingTurnEngine:
         run_id=None,
         event_emitter=None,
         cancel_event=None,
+        mode="default",
     ):
-        del session, user_input, run_id, cancel_event
+        del session, user_input, run_id, cancel_event, mode
         self.started.set()
         self.release.wait(timeout=2)
         if event_emitter is not None:

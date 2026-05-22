@@ -15,7 +15,7 @@ def main() -> None:
         return
 
     from .cli import run_repl
-    from .runtime import ApprovalRequest
+    from .runtime.hooks_builtin import ApprovalRequest
     from .ui import print_runtime_event, prompt_approval, tool_log
 
     def _approval_handler(request: ApprovalRequest) -> bool:
@@ -34,11 +34,14 @@ def main() -> None:
 
     try:
         run_repl(
+            runtime.controller,
             runtime.turn_engine,
             runtime.manager,
             runtime.memory_store,
+            runtime.approval_policy,
             runtime.mcp_host,
             runtime.config,
+            run_event_handler=print_runtime_event,
         )
     finally:
         runtime.close()

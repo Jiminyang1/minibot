@@ -8,6 +8,7 @@ import inspect
 from typing import Any
 
 from .base import Tool, ToolExecutionContext, ToolLayer
+from .definitions import ModelToolDefinition
 from .result import ToolOutput
 
 
@@ -18,6 +19,7 @@ class PreparedToolCall:
     tool: Tool
     args: dict[str, Any]
     context: ToolExecutionContext
+    tool_call_id: str | None = None
 
 
 class ToolRegistry:
@@ -42,8 +44,12 @@ class ToolRegistry:
             return tools
         return [tool for tool in tools if tool.layer == layer]
 
-    def get_definitions(self, *, layer: ToolLayer | None = None) -> list[dict[str, Any]]:
-        return [tool.to_definition() for tool in self.list_tools(layer=layer)]
+    def get_definitions(
+        self,
+        *,
+        layer: ToolLayer | None = None,
+    ) -> list[ModelToolDefinition]:
+        return [tool.to_model_definition() for tool in self.list_tools(layer=layer)]
 
     def prepare(
         self,

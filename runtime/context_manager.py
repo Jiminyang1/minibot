@@ -6,12 +6,19 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..llm import LLMClient
 from ..prompts import MEMORY_INSTRUCTIONS, SUMMARY_SYSTEM_PROMPT
 from ..skills import SkillRegistry
-from ..tools import ToolRegistry
+from ..tools.definitions import ModelToolDefinition
+from ..tools.registry import ToolRegistry
+from .messages import (
+    ModelMessage,
+    format_model_messages_for_summary,
+    model_messages_to_openai,
+    session_message_to_model,
+)
 
 if TYPE_CHECKING:
     from ..user_memory import UserMemoryStore
@@ -30,10 +37,17 @@ def _estimate_tokens(text: str) -> int:
         return max(1, len(text) // 2)
 
 
-def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+def estimate_messages_tokens(
+    messages: list[ModelMessage],
+    *,
+    include_reasoning_content: bool = True,
+) -> int:
     """Estimate total tokens for a list of OpenAI-format messages."""
     total = 0
-    for msg in messages:
+    for msg in model_messages_to_openai(
+        messages,
+        include_reasoning_content=include_reasoning_content,
+    ):
         total += 4  # per-message overhead
         for value in msg.values():
             if isinstance(value, str):
@@ -45,28 +59,42 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def estimate_request_tokens(
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
+    messages: list[ModelMessage],
+    tools: list[ModelToolDefinition] | None = None,
+    *,
+    include_reasoning_content: bool = True,
 ) -> int:
     """Estimate tokens for one concrete model request payload."""
-    total = estimate_messages_tokens(messages)
+    total = estimate_messages_tokens(
+        messages,
+        include_reasoning_content=include_reasoning_content,
+    )
     if tools:
-        total += _estimate_tokens(json.dumps(tools, ensure_ascii=False))
+        from ..llm_providers.openai_compatible import (
+            model_tool_definitions_to_openai,
+        )
+
+        total += _estimate_tokens(
+            json.dumps(
+                model_tool_definitions_to_openai(tools),
+                ensure_ascii=False,
+            )
+        )
     return total
 
 
 def _compose_messages(
     *,
     system_prompt: str,
-    history: list[dict[str, Any]],
+    history: list[ModelMessage],
     user_input: str | None = None,
-) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
+) -> list[ModelMessage]:
+    messages: list[ModelMessage] = [
+        ModelMessage.create(role="system", content=system_prompt),
         *history,
     ]
     if user_input is not None:
-        messages.append({"role": "user", "content": user_input})
+        messages.append(ModelMessage.create(role="user", content=user_input))
     return messages
 
 
@@ -74,50 +102,30 @@ def _compose_messages(
 class PreparedContext:
     """Final request payload returned to the turn engine."""
 
-    messages: list[dict[str, Any]]
-    tool_definitions: list[dict[str, Any]]
+    messages: list[ModelMessage]
+    tool_definitions: list[ModelToolDefinition]
     did_compact: bool
     compact_message: str | None = None
 
 
 @dataclass(frozen=True)
 class _BuiltRequest:
-    messages: list[dict[str, Any]]
-    tool_definitions: list[dict[str, Any]]
+    messages: list[ModelMessage]
+    tool_definitions: list[ModelToolDefinition]
     request_tokens: int
     memory_tokens: int
 
 
-def _format_messages_for_summary(messages: list[dict[str, Any]]) -> str:
-    """Flatten a message list into a readable transcript for the summariser."""
-    lines: list[str] = []
-    for message in messages:
-        role = str(message.get("role", "assistant")).upper()
-        content = str(message.get("content", "")).strip()
-        if content:
-            lines.append(f"{role}: {content}")
-        if tool_calls := message.get("tool_calls"):
-            for call in tool_calls:
-                fn = (call.get("function") or {}) if isinstance(call, dict) else {}
-                name = fn.get("name", "unknown_tool")
-                args = fn.get("arguments", "{}")
-                lines.append(f"ASSISTANT_TOOL_CALL: {name}({args})")
-        if message.get("role") == "tool":
-            name = message.get("name", "tool")
-            lines.append(f"TOOL_RESULT[{name}]: {content}")
-    return "\n".join(lines)
-
-
-def make_summarizer(llm: LLMClient) -> Callable[[list[dict[str, Any]]], str]:
+def make_summarizer(llm: LLMClient) -> Callable[[list[ModelMessage]], str]:
     """Create a summariser closure backed by the given LLM client."""
 
-    def summarize(messages: list[dict[str, Any]]) -> str:
+    def summarize(messages: list[ModelMessage]) -> str:
         if not messages:
             raise ValueError("没有可供摘要的历史消息。")
-        formatted = _format_messages_for_summary(messages)
+        formatted = format_model_messages_for_summary(messages)
         resp = llm.chat([
-            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": formatted},
+            ModelMessage.create(role="system", content=SUMMARY_SYSTEM_PROMPT),
+            ModelMessage.create(role="user", content=formatted),
         ])
         summary = (resp.content or "").strip()
         if not summary:
@@ -149,7 +157,7 @@ class ContextManager:
         compact_token_threshold: int,
         reserved_completion_tokens: int,
         compact_keep_recent: int,
-        summarizer: Callable[[list[dict[str, Any]]], str],
+        summarizer: Callable[[list[ModelMessage]], str],
         max_inline_memory_tokens: int = _DEFAULT_MAX_INLINE_MEMORY_TOKENS,
         now_provider: Callable[[], datetime] | None = None,
         include_reasoning_content: bool = False,
@@ -233,7 +241,15 @@ class ContextManager:
                 )
             return False, "当前会话没有可压缩的旧轮次。"
 
-        summary = self.summarizer([m.to_model_message() for m in old_messages])
+        summary = self.summarizer(
+            [
+                session_message_to_model(
+                    message,
+                    include_reasoning_content=self.include_reasoning_content,
+                )
+                for message in old_messages
+            ]
+        )
         before, after = session.compact_with_summary(summary, self.compact_keep_recent)
         after_tokens = self._build_request(
             session=session,
@@ -262,10 +278,14 @@ class ContextManager:
         session: Session,
         user_input: str | None,
     ) -> _BuiltRequest:
-        history = session.history_for_model(
-            self.max_history_turns,
-            include_reasoning_content=self.include_reasoning_content,
-        )
+        history_messages = session.history_messages(self.max_history_turns)
+        history = [
+            session_message_to_model(
+                message,
+                include_reasoning_content=self.include_reasoning_content,
+            )
+            for message in history_messages
+        ]
         memory_block, memory_tokens = self._render_memory_block()
         time_context_block = self._render_time_context_block()
         skill_catalog_block = self._render_skill_catalog_block()
@@ -283,7 +303,11 @@ class ContextManager:
         return _BuiltRequest(
             messages=messages,
             tool_definitions=tool_definitions,
-            request_tokens=estimate_request_tokens(messages, tool_definitions),
+            request_tokens=estimate_request_tokens(
+                messages,
+                tool_definitions,
+                include_reasoning_content=self.include_reasoning_content,
+            ),
             memory_tokens=memory_tokens,
         )
 

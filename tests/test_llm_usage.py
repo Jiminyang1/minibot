@@ -7,13 +7,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.llm import (
-    TokenUsage,
+from minibot.llm import TokenUsage
+from minibot.llm_providers.openai_compatible import (
     _extract_message_content,
     _extract_reasoning_content,
     _extract_token_usage,
-    _prepare_messages_for_provider,
 )
+from minibot.runtime.messages import ModelMessage, model_messages_to_openai
 
 
 class LLMUsageExtractionTests(unittest.TestCase):
@@ -27,14 +27,14 @@ class LLMUsageExtractionTests(unittest.TestCase):
 
     def test_strips_reasoning_content_for_plain_openai_providers(self) -> None:
         messages = [
-            {
-                "role": "assistant",
-                "content": "answer",
-                "reasoning_content": "thinking",
-            }
+            ModelMessage.create(
+                role="assistant",
+                content="answer",
+                reasoning_content="thinking",
+            )
         ]
 
-        prepared = _prepare_messages_for_provider(
+        prepared = model_messages_to_openai(
             messages,
             include_reasoning_content=False,
         )
@@ -43,14 +43,14 @@ class LLMUsageExtractionTests(unittest.TestCase):
 
     def test_preserves_reasoning_content_for_deepseek_thinking_mode(self) -> None:
         messages = [
-            {
-                "role": "assistant",
-                "content": "answer",
-                "reasoning_content": "thinking",
-            }
+            ModelMessage.create(
+                role="assistant",
+                content="answer",
+                reasoning_content="thinking",
+            )
         ]
 
-        prepared = _prepare_messages_for_provider(
+        prepared = model_messages_to_openai(
             messages,
             include_reasoning_content=True,
         )

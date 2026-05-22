@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
+from pathlib import Path
 import threading
 import time
 from typing import TYPE_CHECKING
 
 from .agent_runner import PartialRunError, RunSpec
 from .events import RuntimeEventEmitter, RuntimeEventHandler
-from ..run_log import RunLogRecord, make_run_id, preview_text, utc_now
-from ..session import MessageEvent, Session, SessionManager
+from .hooks import HookContext, RuntimeHookManager
+from .messages import AgentMessage, replace_final_assistant_reply
+from .turn_recorder import TurnRecorder
+from ..run_log import make_run_id, utc_now
+from ..session import Session, SessionManager
 
 if TYPE_CHECKING:
     from .agent_runner import AgentRunner
@@ -39,15 +42,24 @@ class TurnEngine:
         config: Config,
         *,
         context_manager: ContextManager,
+        hook_manager: RuntimeHookManager | None = None,
         event_handler: RuntimeEventHandler | None = None,
         run_log_store: RunLogStore | None = None,
+        recorder: TurnRecorder | None = None,
+        workspace: Path | None = None,
     ) -> None:
         self.runner = runner
         self.manager = manager
         self.config = config
         self.context_manager = context_manager
+        self.hook_manager = hook_manager or RuntimeHookManager()
         self.event_handler = event_handler
-        self.run_log_store = run_log_store
+        self.recorder = recorder or TurnRecorder(
+            manager=manager,
+            run_log_store=run_log_store,
+            tool_registry=runner.tool_registry,
+        )
+        self.workspace = (workspace or manager.state_dir.parent).resolve()
 
     def handle_turn(
         self,
@@ -57,6 +69,7 @@ class TurnEngine:
         run_id: str | None = None,
         event_emitter: RuntimeEventEmitter | None = None,
         cancel_event: threading.Event | None = None,
+        mode: str = "default",
     ) -> TurnResult:
         emitter = event_emitter or RuntimeEventEmitter(
             run_id=run_id or make_run_id(),
@@ -70,8 +83,17 @@ class TurnEngine:
 
         prepared = None
         reply: str | None = None
-        turn_events: list[MessageEvent] = []
+        turn_messages: list[AgentMessage] = []
+        persisted_turn_messages = False
         usage = None
+        hook_context = HookContext(
+            run_id=run_id,
+            session_id=session.session_id,
+            workspace=self.workspace,
+            mode=mode,
+            emitter=emitter,
+            cancel_event=cancel_event,
+        )
 
         try:
             self._emit_current_context_usage(session, emitter)
@@ -79,18 +101,16 @@ class TurnEngine:
                 session=session,
                 user_input=user_input,
             )
+            prepared = self.hook_manager.after_context(hook_context, prepared)
             if prepared.did_compact:
-                self.manager.save(session)
+                self.recorder.save_session(session)
                 emitter.emit(
                     "context.compacted",
                     {
                         "message": prepared.compact_message,
                     },
                 )
-            user_event = MessageEvent.create(role="user", content=user_input)
-            session.add_message(user_event)
-            self.manager.append_messages(session.session_id, [user_event])
-            self.manager.update_metadata(session)
+            self.recorder.persist_user_message(session, user_input)
 
             run_spec = RunSpec(
                 session_id=session.session_id,
@@ -101,134 +121,82 @@ class TurnEngine:
                 run_id=run_id,
                 event_emitter=emitter,
                 cancel_event=cancel_event,
+                mode=mode,
+                workspace=self.workspace,
             )
             outcome = self.runner.run(run_spec)
             reply = outcome.reply
-            turn_events = outcome.events
+            turn_messages = outcome.messages
             usage = outcome.usage
-            (
-                mcp_tool_call_count,
-                mcp_servers_used,
-                mcp_transports_used,
-                mcp_error_count,
-            ) = self._summarize_mcp_usage(turn_events)
-            for event in turn_events:
-                session.add_message(event)
-            self.manager.append_messages(session.session_id, turn_events)
-            self.manager.update_metadata(session)
-
             result = TurnResult(
                 reply=reply,
                 did_compact=prepared.did_compact,
                 compact_message=prepared.compact_message,
             )
-            self._append_run_log(
-                RunLogRecord(
-                    run_id=run_id,
-                    session_id=session.session_id,
-                    turn_index=turn_index,
-                    timestamp=timestamp,
-                    ended_at=utc_now(),
-                    status="success",
-                    model=self.config.model,
-                    user_input_preview=preview_text(user_input, 120),
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    did_compact=prepared.did_compact,
-                    compact_message=prepared.compact_message,
-                    input_tokens=None if usage is None else usage.input_tokens,
-                    output_tokens=None if usage is None else usage.output_tokens,
-                    total_tokens=None if usage is None else usage.total_tokens,
-                    llm_call_count=self._count_messages(turn_events, role="assistant"),
-                    tool_call_count=self._count_messages(turn_events, role="tool"),
-                    tools_used=self._tools_used(turn_events),
-                    mcp_tool_call_count=mcp_tool_call_count,
-                    mcp_servers_used=mcp_servers_used,
-                    mcp_transports_used=mcp_transports_used,
-                    mcp_error_count=mcp_error_count,
-                    final_reply_preview=preview_text(reply, 200),
-                    error_type=None,
-                    error_message_preview=None,
+            result = self.hook_manager.after_turn(hook_context, result)
+            if result.reply != reply:
+                turn_messages = replace_final_assistant_reply(
+                    turn_messages,
+                    result.reply,
                 )
+                reply = result.reply
+            self.recorder.persist_agent_messages(session, turn_messages)
+            persisted_turn_messages = True
+            self.recorder.record_run(
+                run_id=run_id,
+                session=session,
+                turn_index=turn_index,
+                timestamp=timestamp,
+                status="success",
+                model=self.config.model,
+                user_input=user_input,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                prepared=prepared,
+                messages=turn_messages,
+                usage=usage,
+                reply=result.reply,
             )
             return result
         except PartialRunError as exc:
             reply = exc.reply
-            turn_events = exc.events
+            turn_messages = exc.messages
             usage = exc.usage
-            (
-                mcp_tool_call_count,
-                mcp_servers_used,
-                mcp_transports_used,
-                mcp_error_count,
-            ) = self._summarize_mcp_usage(turn_events)
-            self._persist_turn_events(session, turn_events)
-            self._append_run_log(
-                RunLogRecord(
-                    run_id=run_id,
-                    session_id=session.session_id,
-                    turn_index=turn_index,
-                    timestamp=timestamp,
-                    ended_at=utc_now(),
-                    status="failed",
-                    model=self.config.model,
-                    user_input_preview=preview_text(user_input, 120),
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    did_compact=False if prepared is None else prepared.did_compact,
-                    compact_message=None if prepared is None else prepared.compact_message,
-                    input_tokens=None if usage is None else usage.input_tokens,
-                    output_tokens=None if usage is None else usage.output_tokens,
-                    total_tokens=None if usage is None else usage.total_tokens,
-                    llm_call_count=self._count_messages(turn_events, role="assistant"),
-                    tool_call_count=self._count_messages(turn_events, role="tool"),
-                    tools_used=self._tools_used(turn_events),
-                    mcp_tool_call_count=mcp_tool_call_count,
-                    mcp_servers_used=mcp_servers_used,
-                    mcp_transports_used=mcp_transports_used,
-                    mcp_error_count=mcp_error_count,
-                    final_reply_preview=(
-                        None if reply is None else preview_text(reply, 200)
-                    ),
-                    error_type=type(exc.cause).__name__,
-                    error_message_preview=preview_text(str(exc.cause), 200),
-                )
+            self.recorder.persist_agent_messages(session, turn_messages)
+            self.hook_manager.on_error(hook_context, exc.cause)
+            self.recorder.record_run(
+                run_id=run_id,
+                session=session,
+                turn_index=turn_index,
+                timestamp=timestamp,
+                status="failed",
+                model=self.config.model,
+                user_input=user_input,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                prepared=prepared,
+                messages=turn_messages,
+                usage=usage,
+                reply=reply,
+                error=exc.cause,
             )
             raise exc.cause from exc
         except Exception as exc:
-            (
-                mcp_tool_call_count,
-                mcp_servers_used,
-                mcp_transports_used,
-                mcp_error_count,
-            ) = self._summarize_mcp_usage(turn_events)
-            self._append_run_log(
-                RunLogRecord(
-                    run_id=run_id,
-                    session_id=session.session_id,
-                    turn_index=turn_index,
-                    timestamp=timestamp,
-                    ended_at=utc_now(),
-                    status="failed",
-                    model=self.config.model,
-                    user_input_preview=preview_text(user_input, 120),
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    did_compact=False if prepared is None else prepared.did_compact,
-                    compact_message=None if prepared is None else prepared.compact_message,
-                    input_tokens=None if usage is None else usage.input_tokens,
-                    output_tokens=None if usage is None else usage.output_tokens,
-                    total_tokens=None if usage is None else usage.total_tokens,
-                    llm_call_count=self._count_messages(turn_events, role="assistant"),
-                    tool_call_count=self._count_messages(turn_events, role="tool"),
-                    tools_used=self._tools_used(turn_events),
-                    mcp_tool_call_count=mcp_tool_call_count,
-                    mcp_servers_used=mcp_servers_used,
-                    mcp_transports_used=mcp_transports_used,
-                    mcp_error_count=mcp_error_count,
-                    final_reply_preview=(
-                        None if reply is None else preview_text(reply, 200)
-                    ),
-                    error_type=type(exc).__name__,
-                    error_message_preview=preview_text(str(exc), 200),
-                )
+            if turn_messages and not persisted_turn_messages:
+                self.recorder.persist_agent_messages(session, turn_messages)
+            self.hook_manager.on_error(hook_context, exc)
+            self.recorder.record_run(
+                run_id=run_id,
+                session=session,
+                turn_index=turn_index,
+                timestamp=timestamp,
+                status="failed",
+                model=self.config.model,
+                user_input=user_input,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                prepared=prepared,
+                messages=turn_messages,
+                usage=usage,
+                reply=reply,
+                error=exc,
             )
             raise
 
@@ -259,74 +227,3 @@ class TurnEngine:
                 "budget": budget,
             },
         )
-
-    def _append_run_log(self, record: RunLogRecord) -> None:
-        if self.run_log_store is None:
-            return
-        try:
-            self.run_log_store.append(record)
-        except Exception:
-            return
-
-    @staticmethod
-    def _count_messages(events: list[MessageEvent], *, role: str) -> int:
-        return sum(1 for event in events if event.role == role)
-
-    @staticmethod
-    def _tools_used(events: list[MessageEvent]) -> list[str]:
-        return [event.name for event in events if event.role == "tool" and event.name]
-
-    def _summarize_mcp_usage(
-        self,
-        events: list[MessageEvent],
-    ) -> tuple[int, list[str], list[str], int]:
-        tool_call_count = 0
-        servers_used: set[str] = set()
-        transports_used: set[str] = set()
-        error_count = 0
-
-        for event in events:
-            if event.role != "tool" or not event.name:
-                continue
-            tool = self.runner.tool_registry.get(event.name)
-            if tool is None or getattr(tool, "source", "local") != "mcp":
-                continue
-            tool_call_count += 1
-
-            server_name = getattr(tool, "server_name", None)
-            if isinstance(server_name, str) and server_name:
-                servers_used.add(server_name)
-
-            transport_type = getattr(tool, "transport_type", None)
-            if isinstance(transport_type, str) and transport_type:
-                transports_used.add(transport_type)
-
-            if self._tool_event_failed(event):
-                error_count += 1
-
-        return (
-            tool_call_count,
-            sorted(servers_used),
-            sorted(transports_used),
-            error_count,
-        )
-
-    @staticmethod
-    def _tool_event_failed(event: MessageEvent) -> bool:
-        try:
-            payload = json.loads(event.content)
-        except (TypeError, json.JSONDecodeError):
-            return False
-        return payload.get("ok") is False
-
-    def _persist_turn_events(
-        self,
-        session: Session,
-        turn_events: list[MessageEvent],
-    ) -> None:
-        if not turn_events:
-            return
-        for event in turn_events:
-            session.add_message(event)
-        self.manager.append_messages(session.session_id, turn_events)
-        self.manager.update_metadata(session)

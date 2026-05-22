@@ -54,11 +54,6 @@ class Config:
                 "reserved_completion_tokens 必须小于 compact_token_threshold。"
             )
 
-    @property
-    def auto_approve(self) -> bool:
-        """Backward-compatible flag for old call sites."""
-        return self.approval_mode == "always"
-
     @classmethod
     def from_env(cls) -> Config:
         def _get_int(name: str, default: int) -> int:
@@ -103,28 +98,13 @@ def _get_approval_mode() -> ApprovalMode:
     raw_mode = os.environ.get("MINIBOT_APPROVAL_MODE")
     if raw_mode is not None and raw_mode.strip():
         return _parse_approval_mode(raw_mode, env_name="MINIBOT_APPROVAL_MODE")
-
-    raw_auto = os.environ.get("MINIBOT_AUTO_APPROVE")
-    if raw_auto is None or not raw_auto.strip():
-        return "ask"
-    return _parse_approval_mode(raw_auto, env_name="MINIBOT_AUTO_APPROVE")
+    return "ask"
 
 
 def _parse_approval_mode(raw: str, *, env_name: str) -> ApprovalMode:
     value = raw.strip().lower()
-    if value in {
-        "ask",
-        "prompt",
-        "permission",
-        "required",
-        "manual",
-        "0",
-        "false",
-        "no",
-    }:
+    if value == "ask":
         return "ask"
-    if value in {"always", "auto", "auto_approve", "approve", "1", "true", "yes"}:
+    if value == "always":
         return "always"
-    raise ValueError(
-        f"{env_name} 必须是 ask/permission 或 always/auto。"
-    )
+    raise ValueError(f"{env_name} 必须是 ask 或 always。")

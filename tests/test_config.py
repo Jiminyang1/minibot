@@ -30,31 +30,6 @@ class ConfigTests(unittest.TestCase):
             config = Config.from_env()
 
         self.assertEqual(config.approval_mode, "always")
-        self.assertTrue(config.auto_approve)
-
-    def test_from_env_keeps_legacy_auto_approve_fallback(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {"MINIBOT_AUTO_APPROVE": "true"},
-            clear=True,
-        ):
-            config = Config.from_env()
-
-        self.assertEqual(config.approval_mode, "always")
-
-    def test_approval_mode_takes_precedence_over_legacy_auto_approve(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {
-                "MINIBOT_APPROVAL_MODE": "ask",
-                "MINIBOT_AUTO_APPROVE": "true",
-            },
-            clear=True,
-        ):
-            config = Config.from_env()
-
-        self.assertEqual(config.approval_mode, "ask")
-        self.assertFalse(config.auto_approve)
 
     def test_from_env_rejects_invalid_approval_mode(self) -> None:
         with patch.dict(

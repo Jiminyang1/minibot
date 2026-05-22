@@ -5,8 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
+from .definitions import ModelToolDefinition
 from .result import ToolOutput
 
 
@@ -96,13 +97,10 @@ class Tool(ABC):
             )
         return resolved
 
-    def to_definition(self) -> dict[str, Any]:
-        """Return an OpenAI-compatible function definition."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
+    def to_model_definition(self) -> ModelToolDefinition:
+        """Return a provider-agnostic runtime tool definition."""
+        return ModelToolDefinition(
+            name=self.name,
+            description=self.description,
+            parameters=self.parameters,
+        )

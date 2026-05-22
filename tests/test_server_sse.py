@@ -24,7 +24,16 @@ class _FakeController:
         self.resolved = None
         self.cancelled = None
 
-    def run_turn(self, *, session_id, user_input, event_handler, run_id=None):
+    def run_turn(
+        self,
+        *,
+        session_id,
+        user_input,
+        event_handler,
+        run_id=None,
+        mode="default",
+    ):
+        del mode
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",
             session_id=session_id or "s_test",
@@ -88,18 +97,6 @@ class ServerSSETests(unittest.TestCase):
                 ["user", "assistant"],
             )
             self.assertEqual(payload["messages"][0]["content"], "hello")
-
-    def test_runs_stream_emits_standard_sse_events(self) -> None:
-        runtime = _runtime()
-        client = TestClient(create_app(runtime))
-
-        response = client.post("/runs/stream", json={"input": "hi"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("event: run.started", response.text)
-        self.assertIn("event: tool_call.started", response.text)
-        self.assertIn("event: message.completed", response.text)
-        self.assertIn("data:", response.text)
 
     def test_create_run_returns_id_and_events_endpoint_replays_backlog(self) -> None:
         runtime = _runtime()

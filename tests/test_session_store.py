@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.session import MessageEvent, SessionManager
+from minibot.runtime.messages import model_message_to_openai, session_message_to_model
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -19,11 +20,17 @@ class SessionStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(event.to_dict()["reasoning_content"], "private chain")
-        self.assertNotIn("reasoning_content", event.to_model_message())
+        self.assertIsNone(session_message_to_model(event).reasoning_content)
+        model_message = session_message_to_model(
+            event,
+            include_reasoning_content=True,
+        )
+        self.assertEqual(model_message.reasoning_content, "private chain")
         self.assertEqual(
-            event.to_model_message(include_reasoning_content=True)[
-                "reasoning_content"
-            ],
+            model_message_to_openai(
+                model_message,
+                include_reasoning_content=True,
+            )["reasoning_content"],
             "private chain",
         )
 

@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.artifacts import ArtifactStore
 from minibot.tools.base import Tool, ToolExecutionContext
+from minibot.tools.definitions import ModelToolDefinition
 from minibot.tools.read_artifact import ReadArtifactTool
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.result import ToolOutput
@@ -176,16 +177,17 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_get_definitions_can_filter_by_layer(self) -> None:
         kernel_names = [
-            item["function"]["name"]
+            item.name
             for item in self.registry.get_definitions(layer="kernel")
         ]
         extension_names = [
-            item["function"]["name"]
+            item.name
             for item in self.registry.get_definitions(layer="extension")
         ]
 
         self.assertEqual(kernel_names, ["kernel_echo"])
         self.assertEqual(extension_names, ["echo", "explode", "type_error"])
+        self.assertIsInstance(self.registry.get_definitions()[0], ModelToolDefinition)
 
 
 class ReadArtifactToolTests(unittest.TestCase):

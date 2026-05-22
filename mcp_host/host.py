@@ -64,25 +64,6 @@ class MCPHost:
             config_path=config_path if config_path.exists() else None,
         )
 
-    @classmethod
-    def from_workspace(
-        cls,
-        workspace: Path,
-        *,
-        event_handler: Callable[[str], None] | None = None,
-        client_factory: Callable[..., MCPClient] = create_mcp_client,
-    ) -> "MCPHost":
-        """Compatibility wrapper for older callers.
-
-        The argument now represents the directory containing ``mcp.json``; MCP
-        config selection itself is handled by the MiniBot composition root.
-        """
-        return cls.from_config_root(
-            workspace,
-            event_handler=event_handler,
-            client_factory=client_factory,
-        )
-
     def connect_all(self) -> list[MCPToolProxy]:
         """Eagerly connect enabled servers and build proxy tools."""
         if self._tool_proxies is not None:

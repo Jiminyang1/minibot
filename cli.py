@@ -19,7 +19,10 @@ except Exception:
 from typing import TYPE_CHECKING
 
 from . import ui
-from .mcp_host import MCPHost
+from .mcp_host.host import MCPHost
+from .runtime.controller import RunController
+from .runtime.events import RuntimeEventHandler
+from .runtime.hooks_builtin import ApprovalPolicy
 from .session import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -165,10 +168,10 @@ def _handle_config(config: Config | None) -> None:
     ui.print_config(config)
 
 
-def _handle_permission(raw: str, turn_engine: TurnEngine) -> None:
+def _handle_permission(raw: str, approval_policy: ApprovalPolicy) -> None:
     parts = raw.strip().split(maxsplit=1)
     if len(parts) == 1:
-        ui.print_permission_mode(turn_engine.runner.approval_mode)
+        ui.print_permission_mode(approval_policy.mode)
         return
 
     mode = parts[1].strip().lower()
@@ -185,20 +188,23 @@ def _handle_permission(raw: str, turn_engine: TurnEngine) -> None:
     if resolved is None:
         ui.info("用法: /permission [ask|always]")
         return
-    turn_engine.runner.set_approval_mode(resolved)
+    approval_policy.set_mode(resolved)
     ui.success(f"审批模式已切换为 {resolved}")
-    ui.print_permission_mode(turn_engine.runner.approval_mode)
+    ui.print_permission_mode(approval_policy.mode)
 
 
 # ── REPL loop ────────────────────────────────────────────────────
 
 
 def run_repl(
+    controller: RunController,
     turn_engine: TurnEngine,
     manager: SessionManager,
     memory_store: UserMemoryStore,
+    approval_policy: ApprovalPolicy,
     mcp_host: MCPHost | None = None,
     config: Config | None = None,
+    run_event_handler: RuntimeEventHandler | None = None,
 ) -> None:
     current, resumed = _startup_session(manager)
     skill_count = len(turn_engine.list_available_skills())
@@ -210,7 +216,7 @@ def run_repl(
         resumed,
         skill_count,
         mcp_summary=None if mcp_host is None else mcp_host.summary(),
-        approval_mode=turn_engine.runner.approval_mode,
+        approval_mode=approval_policy.mode,
     )
     ui.print_help()
     print(ui.RULE)
@@ -250,13 +256,13 @@ def run_repl(
             _handle_skills(turn_engine)
             continue
         if user_msg == "/permission" or user_msg.startswith("/permission "):
-            _handle_permission(user_msg, turn_engine)
+            _handle_permission(user_msg, approval_policy)
             continue
         if user_msg in {"/config", "/settings"}:
             if config is None:
                 _handle_config(config)
             else:
-                ui.print_config(config, approval_mode=turn_engine.runner.approval_mode)
+                ui.print_config(config, approval_mode=approval_policy.mode)
             continue
         if user_msg.startswith("/memory"):
             _handle_memory(user_msg, memory_store)
@@ -271,7 +277,14 @@ def run_repl(
             continue
 
         try:
-            result = turn_engine.handle_turn(current, user_msg)
+            result = controller.run_turn(
+                session_id=current.session_id,
+                user_input=user_msg,
+                event_handler=run_event_handler,
+            )
+            reloaded = manager.load(current.session_id)
+            if reloaded is not None:
+                current = reloaded
         except KeyboardInterrupt:
             ui.info("\n已中断当前请求。")
             continue

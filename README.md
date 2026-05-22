@@ -14,15 +14,20 @@
 
 ## 架构概览
 
-数据流自上而下：REPL 把用户输入交给 `TurnEngine`；`ContextManager` 先把长期记忆 / skill L1 / 工具 schema 组装成 prompt；`AgentRunner` 再拿着 prompt 跟 LLM 一来一回，模型返回 `tool_call` 时去 `ToolRegistry` 查到对应的 `Tool` 执行；tool 的结果回灌到 history，直到这一轮没有新的 tool call，`TurnEngine` 把消息写回会话存储。
+数据流自上而下：REPL / Web UI / 未来 SDK 都把用户输入交给 `RunController`，由它创建一次 run 的生命周期、事件 emitter、取消信号和会话锁；`TurnEngine` 编排一次用户 turn，`ContextManager` 只负责组装长期记忆 / skill L1 / 工具 schema / 历史上下文；`RuntimeHookManager` 在上下文、模型请求、模型响应、工具执行和 turn 收尾边界运行内部策略；`AgentRunner` 只跑 LLM ↔ tool loop，模型返回 `tool_call` 时通过 `ToolRegistry` 查到对应的 `Tool` 执行；tool 的结果回灌到 history，直到这一轮没有新的 tool call，`TurnRecorder` 把 runtime message 转成会话消息并追加 run log。
 
 ```
    ┌──────────────┐
    │  REPL / UI   │  user input · approvals · printing
    └──────┬───────┘
           │
+   ┌──────▼────────────┐
+   │  RunController    │   run lifecycle · lock · cancel
+   │ 统一入口           │
+   └──────┬────────────┘
+          │
    ┌──────▼───────┐                           ┌──────────────┐
-   │  TurnEngine  │─── 追加消息 ───────────────►│ Session     │
+   │  TurnEngine  │─── TurnRecorder ───────────►│ Session     │
    │ 单轮协调器     │                           │  Store       │
    └──────┬───────┘                           └──────────────┘
           │ 1. build context
@@ -32,13 +37,19 @@
    │ · system prompt   │◄───────│  SkillRegistry  (L1 元数据)   │
    │ · 历史 / compact   │◄───────│  ToolRegistry  (tool schema) │
    └──────┬────────────┘        └──────────────────────────────┘
-          │ 2. prompt + tool schemas
+          │ 2. after_context hook
+          │
+   ┌──────▼────────────────┐
+   │ RuntimeHookManager    │   internal policy hooks
+   │ approval / future plan│
+   └──────┬────────────────┘
+          │ 3. prompt + tool schemas
           │
    ┌──────▼────────────┐    chat.completion     ┌──────────┐
    │   AgentRunner     │◄──────────────────────►│   LLM    │
    │  LLM ↔ tool loop  │                        └──────────┘
    └──────┬────────────┘
-          │ 3. tool_call(name, args) → 查注册表并执行
+          │ 4. tool_call(name, args) → hooks → 查注册表并执行
           │
    ┌──────▼───────────┐
    │  ToolRegistry    │   对 LLM：本地 / MCP tool 统一接口
@@ -66,16 +77,21 @@
 
 - 主 turn loop 是**同步**的；异步只存在于 MCP client 的后台线程，对上层透明。
 - 对模型来说本地 tool 和 MCP tool 没差别，都是 `ToolRegistry` 里同一种 `Tool`；MCP 工具统一命名 `mcp__<server>__<tool>`。
+- hooks 是内部策略层，不是第三方插件 API。hook context 只暴露 `run_id` / `session_id` / `workspace` / `mode` / `emitter` / `cancel_event`，不暴露 `SessionManager`、`TurnEngine`、`AgentRunner`。
 - function call / tool / MCP 是三层：function call 是模型层调用格式，tool 是 MiniBot 暴露给模型的能力对象，MCP 是外部能力接入协议。
 
 ## 核心模块
 
 ### Core runtime (`runtime/`)
 
-一次用户输入 → `TurnEngine.run_turn` 协调一次 turn：
+一次用户输入 → `RunController.run_turn` 进入统一 run 生命周期：
 
+- `RunController` 是 CLI / Web / 未来 SDK 的统一入口，负责 `run.started` / `run.completed` / `run.failed`、会话并发锁、取消信号和审批 broker 适配。
+- `TurnEngine` 编排一次 turn：调用 context、驱动 runner、协调 hook 和 recorder；手动 `compact_session()` / `delete_session()` / `list_available_skills()` 仍然保留在这里供 slash command 使用。
+- `TurnRecorder` 负责把 `AgentMessage` 转成 session `MessageEvent`，追加会话消息，统计 MCP 用量并写 `RunLogRecord`。
 - `ContextManager` 组装 system prompt（基础 prompt + 长期记忆 + skill L1 元数据 + 工具 schema），管理历史，超过 token 阈值时调用 summarizer 压缩。
-- `AgentRunner` 跑 LLM ↔ tool 的循环；一次响应里的多个 tool call 并发执行（受 `max_parallel_tools` 限制），非 `trusted` 的 tool 走审批。
+- `RuntimeHookManager` 承载横切运行时策略；内置 `ApprovalHook` 处理非 `trusted` tool 的审批，未来 plan mode 可以作为 hook bundle 接入。当前 `mode` 默认为 `"default"`，只透传给 hook context。
+- `AgentRunner` 只跑 LLM ↔ tool 的循环；一次响应里的多个 tool call 并发执行（受 `max_parallel_tools` 限制），并在模型请求/响应和工具 prepare/execute 前后驱动 hook pipeline。
 - `ToolOutputMaterializer` 把体积大的 tool 输出落到 `ArtifactStore`，返回给模型的只是引用，避免撑爆上下文。
 
 ### Tools (`tools/`)
@@ -219,8 +235,6 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 - `POST /runs/{run_id}/approvals/{approval_id}`：body 为 `{"approved": true}`，用于继续需要审批的工具调用
 - `GET /sessions` / `GET /sessions/{session_id}/messages`：供 Web UI 读取会话列表和最终对话历史
 
-兼容入口 `POST /runs/stream` 仍保留，但新 UI 不再使用它。
-
 ## 配置
 
 ### Agent 侧（`.env` / 环境变量）
@@ -235,7 +249,6 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 | `MINIBOT_APPROVAL_MODE` | `ask` | 工具审批模式：`ask` 表示敏感工具需要确认，`always` 表示自动批准 |
 | `MINIBOT_MAX_ITERATIONS` | `20` | 单轮 turn 内 LLM ↔ tool 最大循环次数 |
 | `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | 同一响应多 tool call 并发上限 |
-| `MINIBOT_AUTO_APPROVE` | — | 旧变量；未设置 `MINIBOT_APPROVAL_MODE` 时，`true` 会映射成 `always` |
 | `MINIBOT_MAX_HISTORY_TURNS` | `40` | compact 前允许的最大历史 turn |
 | `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | 触发自动 compact 的 token 阈值 |
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 留给 completion 的 token 预算 |

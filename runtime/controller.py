@@ -7,8 +7,9 @@ import threading
 
 from ..run_log import make_run_id, preview_text
 from ..session import Session, SessionManager
-from .agent_runner import ApprovalRequest, RunCancelled
+from .agent_runner import RunCancelled
 from .events import RuntimeEventEmitter, RuntimeEventHandler
+from .hooks_builtin import ApprovalRequest
 from .turn_engine import TurnEngine, TurnResult
 
 
@@ -96,6 +97,7 @@ class RunController:
         user_input: str,
         event_handler: RuntimeEventHandler | None,
         run_id: str | None = None,
+        mode: str = "default",
     ) -> TurnResult:
         session = self._resolve_session(session_id)
         session_lock = self._session_lock(session.session_id)
@@ -126,6 +128,7 @@ class RunController:
                 run_id=run_id,
                 event_emitter=emitter,
                 cancel_event=cancel_event,
+                mode=mode,
             )
             emitter.emit(
                 "run.completed",

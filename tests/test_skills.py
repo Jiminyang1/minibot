@@ -12,23 +12,20 @@ from minibot.artifacts import ArtifactStore
 from minibot.runtime.context_manager import ContextManager
 from minibot.session import Session
 from minibot.skills import SkillRegistry
-from minibot.tools import (
-    EditFileTool,
-    ExecTool,
-    FetchUrlTool,
-    ForgetTool,
-    ListDirTool,
-    ReadArtifactTool,
-    ReadFileTool,
-    RememberTool,
-    SearchFilesTool,
-    WebSearchTool,
-    WriteFileTool,
-)
 from minibot.tools.base import Tool, ToolExecutionContext
+from minibot.tools.edit_file import EditFileTool
+from minibot.tools.exec_cmd import ExecTool
+from minibot.tools.fetch_url import FetchUrlTool
+from minibot.tools.list_dir import ListDirTool
+from minibot.tools.memory_tools import ForgetTool, RememberTool
+from minibot.tools.read_artifact import ReadArtifactTool
+from minibot.tools.read_file import ReadFileTool
 from minibot.tools.read_skill import ReadSkillTool
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.result import ToolOutput
+from minibot.tools.search_files import SearchFilesTool
+from minibot.tools.web_search import WebSearchTool
+from minibot.tools.write_file import WriteFileTool
 from minibot.user_memory import UserMemoryStore
 
 
@@ -132,7 +129,7 @@ class SkillCatalogTests(unittest.TestCase):
             prompt = manager._build_request(
                 session=Session("s_test"),
                 user_input="今天干嘛",
-            ).messages[0]["content"]
+            ).messages[0].content
 
             self.assertIn("## Local Time Context", prompt)
             self.assertIn("now_local: 2026-04-23T13:02:05+08:00", prompt)
@@ -174,7 +171,7 @@ class SkillCatalogTests(unittest.TestCase):
             prompt = manager._build_request(
                 session=Session("s_test"),
                 user_input="any turn",
-            ).messages[0]["content"]
+            ).messages[0].content
 
             self.assertIn("## Available Skills", prompt)
             self.assertIn("- calendar: calendar skill | tools: calendar_list_events", prompt)
@@ -199,7 +196,7 @@ class SkillCatalogTests(unittest.TestCase):
             prompt = manager._build_request(
                 session=Session("s_test"),
                 user_input="用 calendar 帮我安排 3 点的会议",
-            ).messages[0]["content"]
+            ).messages[0].content
 
             self.assertNotIn("CALENDAR-BODY-MARKER", prompt)
             self.assertNotIn("## Matched Skills", prompt)

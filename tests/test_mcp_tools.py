@@ -16,8 +16,10 @@ from minibot.mcp_host.client import MCPClientTimeoutError
 from minibot.mcp_host.models import MCPToolSpec
 from minibot.mcp_host.provider import MCPToolProxy
 from minibot.runtime.agent_runner import AgentRunner, RunSpec
+from minibot.runtime.messages import ModelMessage
 from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
 from minibot.tools.base import ToolExecutionContext
+from minibot.tools.definitions import ModelToolDefinition
 from minibot.tools.registry import ToolRegistry
 
 
@@ -27,8 +29,8 @@ class _ScriptedLLM(LLMClient):
 
     def chat(
         self,
-        messages: list[dict[str, object]],
-        tools: list[dict[str, object]] | None = None,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
         model: str | None = None,
     ) -> LLMResponse:
         del messages, tools, model
@@ -203,15 +205,17 @@ class MCPRunnerIntegrationTests(unittest.TestCase):
                 RunSpec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
-                    messages=[{"role": "user", "content": "comment"}],
+                    messages=[ModelMessage.create(role="user", content="comment")],
                     tool_definitions=registry.get_definitions(),
                 )
             )
 
             self.assertEqual(outcome.reply, "done")
-            tool_events = [event for event in outcome.events if event.role == "tool"]
-            self.assertEqual(len(tool_events), 1)
-            payload = json.loads(tool_events[0].content)
+            tool_messages = [
+                message for message in outcome.messages if message.role == "tool"
+            ]
+            self.assertEqual(len(tool_messages), 1)
+            payload = json.loads(tool_messages[0].content)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["data"]["server"], "figma")
 

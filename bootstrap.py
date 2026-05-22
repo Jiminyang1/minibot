@@ -10,21 +10,20 @@ import sys
 
 from .artifacts import ArtifactStore
 from .config import Config
-from .llm import OpenAIClient
-from .mcp_host import MCPHost
+from .llm_factory import build_llm_client_from_profile
+from .llm_profile import build_llm_profile
+from .mcp_host.host import MCPHost
 from .prompts import SYSTEM_PROMPT
 from .run_log import RunLogStore
-from .runtime import (
-    AgentRunner,
-    ApprovalBroker,
-    ApprovalRequest,
-    ContextManager,
-    RunController,
-    RuntimeEventHandler,
-    ToolOutputMaterializer,
-    TurnEngine,
-    make_summarizer,
-)
+from .runtime.agent_runner import AgentRunner
+from .runtime.controller import ApprovalBroker, RunController
+from .runtime.context_manager import ContextManager, make_summarizer
+from .runtime.events import RuntimeEventHandler
+from .runtime.hooks import RuntimeHookManager
+from .runtime.hooks_builtin import ApprovalHook, ApprovalPolicy
+from .runtime.hooks_builtin import ApprovalRequest
+from .runtime.tool_output_materializer import ToolOutputMaterializer
+from .runtime.turn_engine import TurnEngine
 from .session import SessionManager
 from .skills import SkillRegistry
 from .tools import (
@@ -54,6 +53,8 @@ class MiniBotRuntime:
     runner: AgentRunner
     turn_engine: TurnEngine
     controller: RunController
+    hook_manager: RuntimeHookManager
+    approval_policy: ApprovalPolicy
     approval_broker: ApprovalBroker | None = None
 
     def close(self) -> None:
@@ -78,7 +79,8 @@ def build_runtime(
     artifact_store = ArtifactStore(resolved_workspace)
     memory_store = UserMemoryStore()
     run_log_store = RunLogStore(resolved_workspace)
-    llm = OpenAIClient(model=config.model)
+    llm_profile = build_llm_profile(model=config.model)
+    llm = build_llm_client_from_profile(llm_profile)
     skill_registry = SkillRegistry.from_directory(package_dir / "skills")
 
     tool_registry = ToolRegistry()
@@ -111,6 +113,11 @@ def build_runtime(
         tool_registry.register(tool)
 
     summarizer = make_summarizer(llm)
+    approval_policy = ApprovalPolicy(
+        handler=approval_handler,
+        mode=config.approval_mode,
+    )
+    hook_manager = RuntimeHookManager([ApprovalHook(approval_policy)])
     context_manager = ContextManager(
         base_system_prompt=SYSTEM_PROMPT,
         memory_store=memory_store,
@@ -121,15 +128,14 @@ def build_runtime(
         reserved_completion_tokens=config.reserved_completion_tokens,
         compact_keep_recent=config.compact_keep_recent,
         summarizer=summarizer,
-        include_reasoning_content=_should_include_reasoning_content(config.model),
+        include_reasoning_content=llm_profile.compat.include_reasoning_content,
     )
     runner = AgentRunner(
         llm,
         tool_registry,
         materializer=ToolOutputMaterializer(artifact_store),
+        hook_manager=hook_manager,
         event_handler=run_event_handler,
-        approval_handler=approval_handler,
-        approval_mode=config.approval_mode,
         max_parallel_tools=config.max_parallel_tools,
     )
     turn_engine = TurnEngine(
@@ -137,8 +143,10 @@ def build_runtime(
         manager,
         config,
         context_manager=context_manager,
+        hook_manager=hook_manager,
         event_handler=run_event_handler,
         run_log_store=run_log_store,
+        workspace=resolved_workspace,
     )
     controller = RunController(
         turn_engine=turn_engine,
@@ -158,22 +166,10 @@ def build_runtime(
         runner=runner,
         turn_engine=turn_engine,
         controller=controller,
+        hook_manager=hook_manager,
+        approval_policy=approval_policy,
         approval_broker=approval_broker,
     )
-
-
-def _should_include_reasoning_content(model: str) -> bool:
-    raw = os.environ.get("MINIBOT_INCLUDE_REASONING_CONTENT", "auto").strip().lower()
-    if raw in {"1", "true", "yes", "always"}:
-        return True
-    if raw in {"0", "false", "no", "never"}:
-        return False
-
-    base_url = os.environ.get("OPENAI_BASE_URL", "").lower()
-    model_name = model.lower()
-    return "deepseek" in base_url or model_name.startswith("deepseek-")
-
-
 def _resolve_mcp_config(package_dir: Path) -> tuple[Path, Path | None, str]:
     """Resolve MiniBot-global MCP config.
 
