@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Literal, TypeAlias
 import uuid
 
@@ -56,6 +57,28 @@ class ArtifactPage:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_ARTIFACT_ID_RE = re.compile(r"^a_[A-Za-z0-9_-]{3,128}$")
+
+
+def _validate_session_id(session_id: str) -> str:
+    normalized = session_id.strip()
+    if not normalized:
+        raise ValueError("session_id 不能为空。")
+    if not _SESSION_ID_RE.fullmatch(normalized):
+        raise ValueError(f"session_id 无效: {session_id!r}")
+    return normalized
+
+
+def _validate_artifact_id(artifact_id: str) -> str:
+    normalized = artifact_id.strip()
+    if not normalized:
+        raise ValueError("artifact_id 不能为空。")
+    if not _ARTIFACT_ID_RE.fullmatch(normalized):
+        raise ValueError(f"artifact_id 无效: {artifact_id!r}")
+    return normalized
 
 
 class ArtifactStore:
@@ -120,7 +143,11 @@ class ArtifactStore:
         )
 
     def _session_dir(self, session_id: str) -> Path:
-        return self.sessions_dir / session_id
+        session_id = _validate_session_id(session_id)
+        path = (self.sessions_dir / session_id).resolve()
+        if path != self.sessions_dir and self.sessions_dir not in path.parents:
+            raise ValueError(f"session_id 无效: {session_id!r}")
+        return path
 
     def _ensure_session_dir(self, session_id: str) -> Path:
         path = self._session_dir(session_id)
@@ -128,15 +155,17 @@ class ArtifactStore:
         return path
 
     def _artifacts_dir(self, session_id: str) -> Path:
-        session_id = session_id.strip()
-        if not session_id:
-            raise ValueError("session_id 不能为空。")
         path = self._ensure_session_dir(session_id) / "artifacts"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _artifact_path(self, session_id: str, artifact_id: str) -> Path:
-        return self._artifacts_dir(session_id) / f"{artifact_id}.json"
+        artifact_id = _validate_artifact_id(artifact_id)
+        artifacts_dir = self._artifacts_dir(session_id)
+        path = (artifacts_dir / f"{artifact_id}.json").resolve()
+        if path != artifacts_dir and artifacts_dir not in path.parents:
+            raise ValueError(f"artifact_id 无效: {artifact_id!r}")
+        return path
 
     def _load_artifact(self, session_id: str, artifact_id: str) -> dict[str, object]:
         path = self._artifact_path(session_id, artifact_id)

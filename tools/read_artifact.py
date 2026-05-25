@@ -105,7 +105,7 @@ class ReadArtifactTool(Tool):
             )
         except ValueError as exc:
             return ToolOutput.failure(
-                "error",
+                "invalid_args",
                 f"读取 artifact 失败: {exc}",
                 data={"artifact_id": artifact_id},
             )

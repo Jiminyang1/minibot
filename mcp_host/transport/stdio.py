@@ -43,6 +43,22 @@ class _PrefixedErrLog:
         return sys.stderr.isatty()
 
 
+class _SilentErrLog:
+    encoding = "utf-8"
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def fileno(self) -> int:
+        return sys.stderr.fileno()
+
+    def isatty(self) -> bool:
+        return False
+
+
 class StdioMCPClient(AsyncSessionMCPClient):
     """Maintain one long-lived stdio MCP session behind sync methods."""
 
@@ -67,7 +83,12 @@ class StdioMCPClient(AsyncSessionMCPClient):
             env=dict(self._transport.env) if self._transport.env else None,
             cwd=self._transport.cwd,
         )
+        errlog = (
+            _PrefixedErrLog(self.config.name)
+            if self._event_handler is not None
+            else _SilentErrLog()
+        )
         read_stream, write_stream = await stack.enter_async_context(
-            stdio_client(params, errlog=_PrefixedErrLog(self.config.name))
+            stdio_client(params, errlog=errlog)
         )
         return read_stream, write_stream

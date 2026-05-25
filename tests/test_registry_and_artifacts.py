@@ -234,5 +234,18 @@ class ReadArtifactToolTests(unittest.TestCase):
             self.assertTrue(result.data["has_more"])
             self.assertTrue(result.truncated)
 
+    def test_read_artifact_rejects_path_traversal_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = ArtifactStore(Path(tmpdir))
+            tool = ReadArtifactTool(store)
+
+            result = tool.execute(
+                context=ToolExecutionContext(session_id="s_test"),
+                artifact_id="../meta",
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.code, "invalid_args")
+
 if __name__ == "__main__":
     unittest.main()

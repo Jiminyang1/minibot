@@ -68,7 +68,12 @@ def _resolve_api_key(provider: str) -> str:
         "openai": "OPENAI_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
     }.get(provider, "OPENAI_API_KEY")
-    return os.environ.get(env_name, "")
+    provider_key = os.environ.get(env_name, "")
+    if provider_key:
+        return provider_key
+    if env_name != "OPENAI_API_KEY":
+        return os.environ.get("OPENAI_API_KEY", "")
+    return ""
 
 
 def _should_send_reasoning_content(model: str, base_url: str, provider: str) -> bool:

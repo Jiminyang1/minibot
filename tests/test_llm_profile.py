@@ -46,6 +46,16 @@ class LLMProfileTests(unittest.TestCase):
         self.assertEqual(profile.api_key, "ds-test")
         self.assertTrue(profile.compat.include_reasoning_content)
 
+    def test_deepseek_profile_accepts_openai_compatible_api_key_fallback(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "sk-compatible"
+        os.environ["OPENAI_BASE_URL"] = "https://api.deepseek.com"
+
+        profile = build_llm_profile(model="deepseek-v4-pro")
+
+        self.assertEqual(profile.provider, "deepseek")
+        self.assertEqual(profile.api_key, "sk-compatible")
+        self.assertEqual(profile.base_url, "https://api.deepseek.com")
+
     def test_factory_creates_openai_compatible_client(self) -> None:
         client = build_llm_client_from_profile(
             LLMProfile(
