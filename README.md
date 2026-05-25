@@ -14,84 +14,97 @@
 
 ## 架构概览
 
-数据流自上而下：REPL / Web UI / 未来 SDK 都把用户输入交给 `RunController`，由它创建一次 run 的生命周期、事件 emitter、取消信号和会话锁；`TurnEngine` 编排一次用户 turn，`ContextManager` 只负责组装长期记忆 / skill L1 / 工具 schema / 历史上下文；`RuntimeHookManager` 在上下文、模型请求、模型响应、工具执行和 turn 收尾边界运行内部策略；`AgentRunner` 只跑 LLM ↔ tool loop，模型返回 `tool_call` 时通过 `ToolRegistry` 查到对应的 `Tool` 执行；tool 的结果回灌到 history，直到这一轮没有新的 tool call，`TurnRecorder` 把 runtime message 转成会话消息并追加 run log。
+数据流自上而下：CLI / Web UI / 未来 SDK 把用户输入交给 `AgentSession`，由它管理一次 run 的生命周期、事件 emitter、取消信号和会话锁；`SessionManager` 负责启动 / 恢复 / 新建 / 删除和落盘；`ApprovalBroker` 处理 Web 审批请求的同步等待与解析（可被取消信号中断）。`AgentSession` 调用 `TurnEngine` 编排一次 turn——`TurnEngine` **不再一次性预拼上下文**，而是向 `AgentLoop` 注入两个回调：`prepare_next_turn()` 和 `on_message()`。`AgentLoop` 跑 LLM ↔ tool 循环，**每个 iteration** 先调 `prepare_next_turn()` → `ContextWindowManager` 从 session **投影**出模型可见消息、组装 system prompt（长期记忆 + skill L1 + 工具 schema），并在预测请求超预算时做 **turn-aware 就地压缩**（压缩只追加 `compaction` entry，非破坏；重复压缩用 previous summary 更新结构化 checkpoint；最近若是单个超预算的只读工具事务块则整块从投影中省略，非只读块直接失败）。模型返回 `tool_call` 时经 `RuntimeHookManager`（审批等内部策略）后通过 `ToolRegistry` 执行；user / assistant / tool 每条消息定稿即通过 `on_message()` 由 `TurnRecorder` 追加成 append-only entry，run log 从同一批 `MessageEvent` 统计。
+
+**控制流 / 单轮循环**（核心：循环每轮回调 `prepare_next_turn` 重投影上下文 + `on_message` 逐条落盘）：
 
 ```
    ┌──────────────┐
-   │  REPL / UI   │  user input · approvals · printing
+   │ CLI / Web UI │  user input · approvals · rendering
    └──────┬───────┘
-          │
+          │ prompt
    ┌──────▼────────────┐
-   │  RunController    │   run lifecycle · lock · cancel
-   │ 统一入口           │
+   │  AgentSession     │  run 生命周期 · 会话锁 · cancel · run.* 事件
    └──────┬────────────┘
           │
-   ┌──────▼───────┐                           ┌──────────────┐
-   │  TurnEngine  │─── TurnRecorder ───────────►│ Session     │
-   │ 单轮协调器     │                           │  Store       │
-   └──────┬───────┘                           └──────────────┘
-          │ 1. build context
-          │
-   ┌──────▼────────────┐        ┌──────────────────────────────┐
-   │  ContextManager   │◄───────│  UserMemoryStore             │
-   │ · system prompt   │◄───────│  SkillRegistry  (L1 元数据)   │
-   │ · 历史 / compact   │◄───────│  ToolRegistry  (tool schema) │
-   └──────┬────────────┘        └──────────────────────────────┘
-          │ 2. after_context hook
-          │
-   ┌──────▼────────────────┐
-   │ RuntimeHookManager    │   internal policy hooks
-   │ approval / future plan│
-   └──────┬────────────────┘
-          │ 3. prompt + tool schemas
-          │
-   ┌──────▼────────────┐    chat.completion     ┌──────────┐
-   │   AgentRunner     │◄──────────────────────►│   LLM    │
-   │  LLM ↔ tool loop  │                        └──────────┘
+   ┌──────▼────────────┐  向 AgentLoop 注入两个回调:
+   │   TurnEngine      │    prepare_next_turn()  /  on_message()
+   │   单轮协调器        │
    └──────┬────────────┘
-          │ 4. tool_call(name, args) → hooks → 查注册表并执行
-          │
-   ┌──────▼───────────┐
-   │  ToolRegistry    │   对 LLM：本地 / MCP tool 统一接口
-   └──────┬───────────┘
-          │
+          │ run(spec)
+   ┌──────▼─────────────────────────────────────────┐        ┌────────┐
+   │                  AgentLoop                      │◄──────►│  LLM   │
+   │  LLM ↔ tool 循环 · 每个 iteration 依次:           │        └────────┘
+   │   ① prepare_next_turn()  → 组装 / 压缩上下文      │
+   │   ② chat.completion      → 是否有 tool_call      │
+   │   ③ tool_call → hooks → ToolRegistry 执行 (见下)  │
+   │   ④ on_message(每条 user/assistant/tool)         │
+   └──┬───────────────┬──────────────────┬───────────┘
+    ① │             ④ │                ③ │
+   ┌──▼───────────────────┐ │       ┌─────▼─────────────┐
+   │ ContextWindowManager │ │       │ RuntimeHookManager│
+   │ · 从 session 投影消息  │ │       │ approval / 未来策略 │
+   │ · 组 system prompt    │ │       └───────────────────┘
+   │ · 超预算→turn-aware 压缩│ │
+   │   (追加 compaction)   │ │   reads: UserMemoryStore /
+   │ · drop 超大只读工具块   │ │          SkillRegistry(L1) /
+   │ · after_context hook  │ │          ToolRegistry(schema)
+   └──────────────────────┘ │
+                            ▼
+              ┌──────────────────┐      ┌─────────────────────────┐
+              │   TurnRecorder   │─────►│      Session Store      │
+              │ 逐条 append entry │      │ messages.jsonl (append) │
+              │ + run log        │      │ meta.json / runs.jsonl  │
+              └──────────────────┘      └─────────────────────────┘
+```
+
+**工具扇出**（`tool_call` → 注册表 → 本地 / MCP，对模型统一为同一种 `Tool`）：
+
+```
+   ┌───────────────┐
+   │  ToolRegistry │   对 LLM：本地 / MCP tool 统一接口
+   └──────┬────────┘
     ┌─────┴──────────────────────────┐
-    │                                │
-┌───▼─────────┐              ┌───────▼──────────┐
+┌───▼─────────┐              ┌────────▼─────────┐
 │ Local Tools │              │  MCPToolProxy    │
 │ fs/exec/... │              │  (mcp_host)      │
-│ read_skill  │              └───────┬──────────┘
-│ (→ L2 body) │                      │  stdio / streamable_http
-└─────────────┘                      │
-                           ┌─────────┴─────────┐
-                           │                   │
-                     ┌─────▼──────┐     ┌──────▼───────┐
-                     │  bundled   │     │  remote MCP  │
-                     │  servers   │     │  servers     │
-                     │  (sqlite / │     │  (HTTP)      │
-                     │   macOS)   │     │              │
-                     └────────────┘     └──────────────┘
+│ read_skill  │              └────────┬─────────┘
+│ (→ L2 body) │                       │  stdio / streamable_http
+└─────────────┘                       │
+                            ┌─────────┴─────────┐
+                            │                   │
+                      ┌─────▼──────┐     ┌───────▼──────┐
+                      │  bundled   │     │  remote MCP  │
+                      │  servers   │     │  servers     │
+                      │  (sqlite / │     │  (HTTP)      │
+                      │   macOS)   │     │              │
+                      └────────────┘     └──────────────┘
 ```
 
 几个关键约束：
 
 - 主 turn loop 是**同步**的；异步只存在于 MCP client 的后台线程，对上层透明。
+- session log 是 **append-only 的唯一真相源**；压缩只追加 `compaction` 标记、不删历史，模型可见消息每轮由 `SessionContextProjector` 投影得到——压缩天然生效、可重算、崩溃不丢已产出消息。
+- 自动压缩优先从 user turn 边界保留最近上下文，只有单个 turn 本身超过保留预算时才 split turn；摘要输入会截断大型 tool result，并把上一轮 summary、当前被压缩消息、split turn 前缀合成结构化 checkpoint。重复压缩时 projector 生成的 summary message 不会再作为新 conversation 重复摘要。
+- 上下文管理在**循环内每个 iteration** 进行（非一次性预拼）：预算判断优先用上一次 LLM 回传的真实 `input_tokens` + 新增消息估算，仅冷启动 / 压缩时才全量估算。
 - 对模型来说本地 tool 和 MCP tool 没差别，都是 `ToolRegistry` 里同一种 `Tool`；MCP 工具统一命名 `mcp__<server>__<tool>`。
-- hooks 是内部策略层，不是第三方插件 API。hook context 只暴露 `run_id` / `session_id` / `workspace` / `mode` / `emitter` / `cancel_event`，不暴露 `SessionManager`、`TurnEngine`、`AgentRunner`。
+- hooks 是内部策略层，不是第三方插件 API。hook context 只暴露 `run_id` / `session_id` / `workspace` / `mode` / `emitter` / `cancel_event`，不暴露 `SessionManager`、`TurnEngine`、`AgentLoop`。
 - function call / tool / MCP 是三层：function call 是模型层调用格式，tool 是 MiniBot 暴露给模型的能力对象，MCP 是外部能力接入协议。
 
 ## 核心模块
 
 ### Core runtime (`runtime/`)
 
-一次用户输入 → `RunController.run_turn` 进入统一 run 生命周期：
+一次用户输入 → `AgentSession.prompt` 进入统一 run 生命周期：
 
-- `RunController` 是 CLI / Web / 未来 SDK 的统一入口，负责 `run.started` / `run.completed` / `run.failed`、会话并发锁、取消信号和审批 broker 适配。
-- `TurnEngine` 编排一次 turn：调用 context、驱动 runner、协调 hook 和 recorder；手动 `compact_session()` / `delete_session()` / `list_available_skills()` 仍然保留在这里供 slash command 使用。
-- `TurnRecorder` 负责把 `AgentMessage` 转成 session `MessageEvent`，追加会话消息，统计 MCP 用量并写 `RunLogRecord`。
-- `ContextManager` 组装 system prompt（基础 prompt + 长期记忆 + skill L1 元数据 + 工具 schema），管理历史，超过 token 阈值时调用 summarizer 压缩。
+- `AgentSession` 是 CLI / Web / 未来 SDK 的统一运行入口，负责 `run.started` / `run.completed` / `run.failed`、会话并发锁和取消信号。
+- `SessionManager` 负责 startup / resume / new / delete / list 和文件落盘，frontend 和 slash command 直接使用它。
+- `ApprovalBroker` 是 Web 审批请求的同步 rendezvous；CLI 审批通过 `[y/N]` prompt 接到 `ApprovalPolicy.handler`。
+- `TurnEngine` 编排一次 turn：向 `AgentLoop` 注入 `prepare_next_turn()`（→ `ContextWindowManager.build_context`，含 flush 上一轮 compaction）和 `on_message()`（→ `TurnRecorder` 逐条落盘 + 收集 run log），自身不再持有循环内的消息列表；手动 `compact_session()` 和 `list_available_skills()` 仍然保留在这里供 slash command 使用。
+- `TurnRecorder` 负责把本轮 `MessageEvent` 逐条追加到 session，统计 MCP 用量并写 `RunLogRecord`。
+- `ContextWindowManager` 组装 system prompt（基础 prompt + 长期记忆 + skill L1 元数据 + 工具 schema），判断预算并编排压缩；turn-aware 切点、summary request、summary file blocks、read/modified file metadata 提取在 `runtime/compaction.py`，token 估算在 `runtime/token_budget.py`。压缩 entry 追加到 session log；重复压缩显式合并 previous summary，并在 `details` 中累计 read/modified files；如果最新只读工具事务块本身超过预算，会整块从模型投影中省略，非只读工具块直接失败。
 - `RuntimeHookManager` 承载横切运行时策略；内置 `ApprovalHook` 处理非 `trusted` tool 的审批，未来 plan mode 可以作为 hook bundle 接入。当前 `mode` 默认为 `"default"`，只透传给 hook context。
-- `AgentRunner` 只跑 LLM ↔ tool 的循环；一次响应里的多个 tool call 并发执行（受 `max_parallel_tools` 限制），并在模型请求/响应和工具 prepare/execute 前后驱动 hook pipeline。
+- `AgentLoop` 只跑 LLM ↔ tool 的循环；一次响应里的多个 tool call 并发执行（受 `max_parallel_tools` 限制），并在模型请求/响应和工具 prepare/execute 前后驱动 hook pipeline。
 - `ToolOutputMaterializer` 把体积大的 tool 输出落到 `ArtifactStore`，返回给模型的只是引用，避免撑爆上下文。
 
 ### Tools (`tools/`)
@@ -122,9 +135,19 @@ MCP 在 MiniBot 里是统一的外部能力接入层，分两边：
 每个会话对应 `<workspace>/.minibot/sessions/<session_id>/`：
 
 - `meta.json`：标题、创建/更新时间
-- `messages.jsonl`：逐条消息（含 tool call / tool result）append 写入
+- `messages.jsonl`：append-only session entries，包含 `message` 和 `compaction`
 
-`SessionManager` 负责 create / list / resume / delete / rename；compact 结果落回同一份文件。
+`SessionManager` 负责 startup / create / list / resume / delete / rename；compact 只追加 `compaction` entry，读取时由 `SessionContextProjector` 投影出模型可见消息。`compaction` entry 保存 `summary`、`first_kept_entry_id`、`tokens_before`，以及可选 `details`；当前 details 用于累计 `{read_files, modified_files}`，也会以 `<read-files>` / `<modified-files>` block 附在摘要末尾。
+
+### Context compaction
+
+压缩保持 MiniBot 原有 append-only 模型，不引入 session tree 或 branch summary：
+
+- `SessionContextProjector` 只看最新 `compaction` entry，投影出一条 synthetic assistant summary message，再接上 `first_kept_entry_id` 之后的原始 message；旧 message 仍留在 `messages.jsonl`。
+- `runtime/compaction.py` 是纯规则层：选择 turn-aware cut point、构造 `SummaryRequest`、跳过 projector synthetic summary、提取 compaction details、把 `<read-files>` / `<modified-files>` 附回 summary。
+- `runtime/token_budget.py` 只负责 token 估算，`ContextWindowManager` 只负责预算判断、调用 summarizer、写入新的 compaction entry。
+- 文件 metadata 不解析普通 tool result 文本：`read_file` / `write_file` / `edit_file` 从 tool call 参数 `path` 提取；`read_artifact` 只从匹配的 tool result JSON 提取 `data.kind == "file"` 且 `data.name` 非空的文件名。重复压缩会合并上一条 compaction details，去重排序，并让 modified 覆盖 read。
+- 如果最新工具事务块本身超预算且所有工具只读，投影中会整块省略，同时 summary 保留 `[Omitted oversized read-only tool transaction]` note；包含非只读工具时直接失败，避免丢失写操作上下文。
 
 ### Memory (`user_memory.py`)
 
@@ -132,7 +155,7 @@ MCP 在 MiniBot 里是统一的外部能力接入层，分两边：
 
 - 存储：`~/.minibot/user_memory.json`
 - 结构：一组 `{id, content, created_at}`
-- 每轮由 `ContextManager` 塞进 system prompt 头部
+- 每轮由 `ContextWindowManager` 塞进 system prompt 头部
 - 模型通过 `remember` / `forget` 自行维护
 
 适合稳定的用户事实（身份、偏好、常驻路径），不是临时 scratchpad。
@@ -166,7 +189,7 @@ RuntimeEvent(
 )
 ```
 
-`TurnEngine` / `AgentRunner` 通过 `RuntimeEventEmitter` 发事件；CLI 只负责把事件格式化成终端文本，Web server 则把同一批事件写入进程内 `RunEventStore`，再通过标准 SSE 的 `id/event/data` 给订阅者。第一版不做 token 级 streaming，只在最终回答完成后发 `message.completed`。
+`TurnEngine` / `AgentLoop` 通过 `RuntimeEventEmitter` 发事件；CLI 侧默认只渲染工具、审批、错误和 compact，`--verbose` 才展示模型轮次和 context usage；Web server 则把同一批事件写入进程内 `RunEventStore`，再通过标准 SSE 的 `id/event/data` 给订阅者。第一版不做 token 级 streaming，只在最终回答完成后发 `message.completed`。
 
 Web 侧把"创建 run"和"订阅事件"分开：`POST /runs` 立即返回 `run_id`，前端再用 `EventSource` 连接 `GET /runs/{run_id}/events`。SSE 断开只会取消订阅，不会取消后台 run；取消 run 必须显式调用 `POST /runs/{run_id}/cancel`。`/events` 支持浏览器自动发送的 `Last-Event-ID`，可以从已收到的 `seq` 之后 replay。
 
@@ -218,6 +241,13 @@ uv sync
 uv run minibot
 ```
 
+`minibot` 只支持交互模式；不要把 prompt 作为位置参数传入。可选参数：
+
+```bash
+uv run minibot --verbose   # 显示模型轮次、context usage 和完整工具参数摘要
+uv run minibot --no-color  # 关闭 ANSI 样式；也尊重 NO_COLOR
+```
+
 启动本地 SSE server：
 
 ```bash
@@ -249,10 +279,9 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 | `MINIBOT_APPROVAL_MODE` | `ask` | 工具审批模式：`ask` 表示敏感工具需要确认，`always` 表示自动批准 |
 | `MINIBOT_MAX_ITERATIONS` | `20` | 单轮 turn 内 LLM ↔ tool 最大循环次数 |
 | `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | 同一响应多 tool call 并发上限 |
-| `MINIBOT_MAX_HISTORY_TURNS` | `40` | compact 前允许的最大历史 turn |
 | `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | 触发自动 compact 的 token 阈值 |
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 留给 completion 的 token 预算 |
-| `MINIBOT_COMPACT_KEEP_RECENT` | `10` | compact 时保留的最近消息数 |
+| `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | compact 后保留的最近上下文 token 目标 |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | `auto` 时 DeepSeek endpoint/model 会把 `reasoning_content` 回传给模型；OpenAI 默认剥离。可设 `true` / `false` 强制覆盖 |
 
 `MINIBOT_APPROVAL_MODE` 只是启动默认值；CLI 启动后可用 `/permission ask` 或 `/permission always` 切换当前进程的审批模式，不会自动写回 `.env`。
