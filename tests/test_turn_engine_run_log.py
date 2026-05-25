@@ -14,11 +14,11 @@ from minibot.llm import TokenUsage
 from minibot.mcp_host.models import MCPToolSpec
 from minibot.mcp_host.provider import MCPToolProxy
 from minibot.run_log import RunLogStore
-from minibot.runtime.agent_runner import PartialRunError, RunOutcome
-from minibot.runtime.context_manager import PreparedContext
+from minibot.runtime.agent_loop import PartialRunError, RunOutcome
+from minibot.runtime.context_manager import WorkingContext
 from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.hooks import HookContext, RuntimeHook, RuntimeHookManager
-from minibot.runtime.messages import AgentMessage, ModelMessage
+from minibot.runtime.messages import ModelMessage
 from minibot.runtime.turn_engine import TurnEngine
 from minibot.runtime.turn_engine import TurnResult
 from minibot.session import MessageEvent, SessionManager
@@ -39,11 +39,11 @@ class _FakeMCPClient:
         return CallToolResult(content=[TextContent(type="text", text="ok")])
 
 
-class _StubContextManager:
+class _StubContextWindowManager:
     def __init__(
         self,
         *,
-        prepared: PreparedContext | None = None,
+        prepared: WorkingContext | None = None,
         prepare_exc: Exception | None = None,
         visible_tokens: int = 123,
         on_prepare: Callable[[object], None] | None = None,
@@ -53,8 +53,14 @@ class _StubContextManager:
         self._visible_tokens = visible_tokens
         self._on_prepare = on_prepare
 
-    def prepare_for_turn(self, *, session: object, user_input: str | None = None) -> PreparedContext:
-        del user_input
+    def build_context(
+        self,
+        *,
+        session: object,
+        observed_input_tokens: int | None = None,
+        cancel_event: object | None = None,
+    ) -> WorkingContext:
+        del observed_input_tokens, cancel_event
         if self._prepare_exc is not None:
             raise self._prepare_exc
         if self._on_prepare is not None:
@@ -83,7 +89,7 @@ class _StubRunner:
         self,
         *,
         reply: str = "",
-        messages: list[AgentMessage] | None = None,
+        messages: list[MessageEvent] | None = None,
         usage: TokenUsage | None = None,
         exc: Exception | None = None,
         tool_registry: ToolRegistry | None = None,
@@ -97,11 +103,23 @@ class _StubRunner:
 
     def run(self, run_spec: object) -> RunOutcome:
         self.seen_run_spec = run_spec
+        run_spec.on_message(  # type: ignore[attr-defined]
+            MessageEvent.create(
+                role="user",
+                content=run_spec.user_input,  # type: ignore[attr-defined]
+            )
+        )
+        run_spec.prepare_next_turn(None)  # type: ignore[attr-defined]
+        if isinstance(self._exc, PartialRunError):
+            for message in self._messages:
+                run_spec.on_message(message)  # type: ignore[attr-defined]
+            raise self._exc
         if self._exc is not None:
             raise self._exc
+        for message in self._messages:
+            run_spec.on_message(message)  # type: ignore[attr-defined]
         return RunOutcome(
             reply=self._reply,
-            messages=list(self._messages),
             usage=self._usage,
         )
 
@@ -131,7 +149,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
@@ -142,7 +160,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 _StubRunner(reply="ok"),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(
+                context_manager=_StubContextWindowManager(
                     prepared=prepared,
                     visible_tokens=123,
                 ),
@@ -163,14 +181,14 @@ class TurnEngineRunLogTests(unittest.TestCase):
             session = manager.create_session("s_test")
             user_input = ("hello   world " * 20).strip()
             reply = ("final   answer " * 30).strip()
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
-                did_compact=True,
-                compact_message="已压缩: 20 -> 8 条消息",
+                did_compact=False,
+                compact_message=None,
             )
             messages = [
-                AgentMessage.create(
+                MessageEvent.create(
                     role="assistant",
                     content="",
                     tool_calls=[
@@ -184,13 +202,13 @@ class TurnEngineRunLogTests(unittest.TestCase):
                         }
                     ],
                 ),
-                AgentMessage.create(
+                MessageEvent.create(
                     role="tool",
                     content="{\"ok\":true}",
                     tool_call_id="call_1",
                     name="read_file",
                 ),
-                AgentMessage.create(role="assistant", content=reply),
+                MessageEvent.create(role="assistant", content=reply),
             ]
             engine = TurnEngine(
                 _StubRunner(
@@ -204,20 +222,20 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 ),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(prepared=prepared),
+                context_manager=_StubContextWindowManager(prepared=prepared),
                 run_log_store=RunLogStore(workspace),
             )
 
             result = engine.handle_turn(session, user_input)
 
-            self.assertTrue(result.did_compact)
+            self.assertFalse(result.did_compact)
             logs = _read_run_logs(workspace)
             self.assertEqual(len(logs), 1)
             log = logs[0]
             self.assertEqual(log["session_id"], "s_test")
             self.assertEqual(log["turn_index"], 1)
             self.assertEqual(log["status"], "success")
-            self.assertEqual(log["did_compact"], True)
+            self.assertEqual(log["did_compact"], False)
             self.assertEqual(log["tool_call_count"], 1)
             self.assertEqual(log["llm_call_count"], 2)
             self.assertEqual(log["tools_used"], ["read_file"])
@@ -225,7 +243,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             self.assertEqual(log["mcp_servers_used"], [])
             self.assertEqual(log["mcp_transports_used"], [])
             self.assertEqual(log["mcp_error_count"], 0)
-            self.assertEqual(log["compact_message"], "已压缩: 20 -> 8 条消息")
+            self.assertIsNone(log["compact_message"])
             self.assertEqual(log["model"], Config().model)
             self.assertEqual(log["input_tokens"], 111)
             self.assertEqual(log["output_tokens"], 29)
@@ -251,7 +269,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
@@ -261,12 +279,12 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 _StubRunner(
                     reply="original reply",
                     messages=[
-                        AgentMessage.create(role="assistant", content="original reply")
+                        MessageEvent.create(role="assistant", content="original reply")
                     ],
                 ),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(prepared=prepared),
+                context_manager=_StubContextWindowManager(prepared=prepared),
                 hook_manager=RuntimeHookManager([_RewriteTurnHook()]),
                 run_log_store=RunLogStore(workspace),
             )
@@ -282,7 +300,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 "hooked reply",
             )
 
-    def test_auto_compaction_saves_compacted_transcript_before_appending_new_turn(self) -> None:
+    def test_auto_compaction_appends_compaction_entry_before_new_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
@@ -293,7 +311,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
             session.add_message(old_reply)
             manager.save(session)
 
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=True,
@@ -301,22 +319,20 @@ class TurnEngineRunLogTests(unittest.TestCase):
             )
 
             def _compact_in_memory(target_session: object) -> None:
-                assert hasattr(target_session, "messages")
-                target_session.messages = [
-                    MessageEvent.create(
-                        role="assistant",
-                        content="[Summary of earlier conversation]\nold summary",
-                    )
-                ]
+                assert hasattr(target_session, "compact_with_summary")
+                target_session.compact_with_summary(
+                    "old summary",
+                    first_kept_entry_id=target_session.messages[-1].id,
+                )
 
             engine = TurnEngine(
                 _StubRunner(
                     reply="new answer",
-                    messages=[AgentMessage.create(role="assistant", content="new answer")],
+                    messages=[MessageEvent.create(role="assistant", content="new answer")],
                 ),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(
+                context_manager=_StubContextWindowManager(
                     prepared=prepared,
                     on_prepare=_compact_in_memory,
                 ),
@@ -335,13 +351,26 @@ class TurnEngineRunLogTests(unittest.TestCase):
                     "new answer",
                 ],
             )
+            records = [
+                json.loads(line)
+                for line in (
+                    workspace / ".minibot" / "sessions" / "s_test" / "messages.jsonl"
+                )
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                [record["type"] for record in records],
+                ["message", "message", "message", "compaction", "message"],
+            )
 
     def test_run_log_records_mcp_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
@@ -373,19 +402,19 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 _StubRunner(
                     reply="done",
                     messages=[
-                        AgentMessage.create(
+                        MessageEvent.create(
                             role="tool",
                             content=json.dumps(tool_payload, ensure_ascii=False),
                             tool_call_id="call_1",
                             name="mcp__sqlite__query",
                         ),
-                        AgentMessage.create(role="assistant", content="done"),
+                        MessageEvent.create(role="assistant", content="done"),
                     ],
                     tool_registry=registry,
                 ),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(prepared=prepared),
+                context_manager=_StubContextWindowManager(prepared=prepared),
                 run_log_store=RunLogStore(workspace),
             )
 
@@ -406,7 +435,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 _StubRunner(),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(
+                context_manager=_StubContextWindowManager(
                     prepare_exc=RuntimeError("context exploded")
                 ),
                 run_log_store=RunLogStore(workspace),
@@ -431,29 +460,30 @@ class TurnEngineRunLogTests(unittest.TestCase):
 
             reloaded = manager.load("s_test")
             assert reloaded is not None
-            self.assertEqual(reloaded.message_count, 0)
+            self.assertEqual(reloaded.message_count, 1)
+            self.assertEqual(reloaded.messages[0].role, "user")
 
-    def test_failed_turn_from_runner_logs_error_after_user_message_is_persisted(self) -> None:
+    def test_failed_turn_from_loop_logs_error_after_user_message_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
             )
             engine = TurnEngine(
-                _StubRunner(exc=ValueError("runner failed badly")),
+                _StubRunner(exc=ValueError("loop failed badly")),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(prepared=prepared),
+                context_manager=_StubContextWindowManager(prepared=prepared),
                 run_log_store=RunLogStore(workspace),
             )
 
-            with self.assertRaisesRegex(ValueError, "runner failed badly"):
-                engine.handle_turn(session, "trigger runner failure")
+            with self.assertRaisesRegex(ValueError, "loop failed badly"):
+                engine.handle_turn(session, "trigger loop failure")
 
             logs = _read_run_logs(workspace)
             self.assertEqual(len(logs), 1)
@@ -472,19 +502,19 @@ class TurnEngineRunLogTests(unittest.TestCase):
             self.assertEqual(reloaded.message_count, 1)
             self.assertEqual(reloaded.messages[0].role, "user")
 
-    def test_partial_runner_failure_persists_completed_messages_and_logs_usage(self) -> None:
+    def test_partial_loop_failure_persists_completed_messages_and_logs_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
             session = manager.create_session("s_test")
-            prepared = PreparedContext(
+            prepared = WorkingContext(
                 messages=[ModelMessage.create(role="system", content="sys")],
                 tool_definitions=[],
                 did_compact=False,
                 compact_message=None,
             )
             partial_messages = [
-                AgentMessage.create(
+                MessageEvent.create(
                     role="assistant",
                     content="",
                     tool_calls=[
@@ -498,7 +528,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                         }
                     ],
                 ),
-                AgentMessage.create(
+                MessageEvent.create(
                     role="tool",
                     content="{\"ok\":true}",
                     tool_call_id="call_1",
@@ -507,9 +537,9 @@ class TurnEngineRunLogTests(unittest.TestCase):
             ]
             engine = TurnEngine(
                 _StubRunner(
+                    messages=partial_messages,
                     exc=PartialRunError(
                         cause=RuntimeError("llm unavailable"),
-                        messages=partial_messages,
                         usage=TokenUsage(
                             input_tokens=100,
                             output_tokens=10,
@@ -519,7 +549,7 @@ class TurnEngineRunLogTests(unittest.TestCase):
                 ),
                 manager,
                 Config(),
-                context_manager=_StubContextManager(prepared=prepared),
+                context_manager=_StubContextWindowManager(prepared=prepared),
                 run_log_store=RunLogStore(workspace),
             )
 

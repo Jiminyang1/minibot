@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Any, Literal, TypeAlias
 
 from .definitions import ModelToolDefinition
@@ -20,6 +21,8 @@ class ToolExecutionContext:
     """Runtime-only execution context for one tool call."""
 
     session_id: str
+    run_id: str | None = None
+    cancel_event: threading.Event | None = None
 
 
 class Tool(ABC):

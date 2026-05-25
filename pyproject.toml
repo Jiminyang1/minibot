@@ -28,6 +28,7 @@ minibot-server = "minibot.server:main"
 [tool.setuptools]
 packages = [
     "minibot",
+    "minibot.interaction",
     "minibot.llm_providers",
     "minibot.mcp_host",
     "minibot.mcp_host.transport",
@@ -41,6 +42,7 @@ packages = [
 
 [tool.setuptools.package-dir]
 "minibot" = "."
+"minibot.interaction" = "interaction"
 "minibot.llm_providers" = "llm_providers"
 "minibot.mcp_host" = "mcp_host"
 "minibot.mcp_host.transport" = "mcp_host/transport"

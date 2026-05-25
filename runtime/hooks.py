@@ -18,11 +18,12 @@ from ..tools.base import Tool
 from ..tools.definitions import ModelToolDefinition
 from ..tools.registry import PreparedToolCall
 from ..tools.result import ToolOutput
+from .cancel import RunCancelled
 from .events import RuntimeEventEmitter
 from .messages import ModelMessage
 
 if TYPE_CHECKING:
-    from .context_manager import PreparedContext
+    from .context_manager import WorkingContext
     from .turn_engine import TurnResult
 
 
@@ -76,8 +77,8 @@ class RuntimeHook:
     def after_context(
         self,
         context: HookContext,
-        prepared: PreparedContext,
-    ) -> PreparedContext:
+        prepared: WorkingContext,
+    ) -> WorkingContext:
         del context
         return prepared
 
@@ -158,8 +159,8 @@ class RuntimeHookManager:
     def after_context(
         self,
         context: HookContext,
-        prepared: PreparedContext,
-    ) -> PreparedContext:
+        prepared: WorkingContext,
+    ) -> WorkingContext:
         current = prepared
         for hook in self._hooks:
             current = hook.after_context(context, current)
@@ -196,6 +197,8 @@ class RuntimeHookManager:
             try:
                 current = hook.before_tool_prepare(context, current)
             except Exception as exc:
+                if isinstance(exc, RunCancelled):
+                    raise
                 return _hook_failure(
                     "before_tool_prepare",
                     exc,
@@ -212,6 +215,8 @@ class RuntimeHookManager:
             try:
                 decision = hook.before_tool_execute(context, call)
             except Exception as exc:
+                if isinstance(exc, RunCancelled):
+                    raise
                 return ToolExecuteDecision(
                     _hook_failure(
                         "before_tool_execute",
@@ -234,6 +239,8 @@ class RuntimeHookManager:
             try:
                 current = hook.after_tool_execute(context, call, current)
             except Exception as exc:
+                if isinstance(exc, RunCancelled):
+                    raise
                 return _hook_failure(
                     "after_tool_execute",
                     exc,

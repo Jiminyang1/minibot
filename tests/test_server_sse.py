@@ -19,16 +19,15 @@ from minibot.session import MessageEvent, SessionManager
 from minibot.server import create_app
 
 
-class _FakeController:
+class _FakeAgentSession:
     def __init__(self) -> None:
-        self.resolved = None
         self.cancelled = None
 
-    def run_turn(
+    def prompt(
         self,
-        *,
         session_id,
         user_input,
+        *,
         event_handler,
         run_id=None,
         mode="default",
@@ -46,19 +45,30 @@ class _FakeController:
         emitter.emit("run.completed", {"reply": "ok"})
         return TurnResult(reply="ok", did_compact=False)
 
-    def resolve_approval(self, *, run_id, approval_id, approved):
-        self.resolved = (run_id, approval_id, approved)
-        return True
-
-    def cancel_run(self, run_id):
+    def abort(self, run_id):
         self.cancelled = run_id
         return True
 
 
-def _runtime(manager: SessionManager | None = None, controller: _FakeController | None = None):
+class _FakeApprovalBroker:
+    def __init__(self) -> None:
+        self.resolved = None
+
+    def resolve(self, run_id, approval_id, approved):
+        self.resolved = (run_id, approval_id, approved)
+        return True
+
+
+def _runtime(
+    manager: SessionManager | None = None,
+    agent_session: _FakeAgentSession | None = None,
+    approval_broker: _FakeApprovalBroker | None = None,
+):
+    manager = manager or SessionManager(Path(tempfile.mkdtemp()))
     return types.SimpleNamespace(
-        controller=controller or _FakeController(),
-        manager=manager or SessionManager(Path(tempfile.mkdtemp())),
+        agent_session=agent_session or _FakeAgentSession(),
+        approval_broker=approval_broker or _FakeApprovalBroker(),
+        manager=manager,
     )
 
 
@@ -131,20 +141,20 @@ class ServerSSETests(unittest.TestCase):
         self.assertIn("event: tool_call.completed", response.text)
         self.assertIn("event: run.completed", response.text)
 
-    def test_cancel_endpoint_forwards_run_id_to_controller(self) -> None:
-        controller = _FakeController()
-        runtime = _runtime(controller=controller)
+    def test_cancel_endpoint_forwards_run_id_to_agent_session(self) -> None:
+        agent_session = _FakeAgentSession()
+        runtime = _runtime(agent_session=agent_session)
         client = TestClient(create_app(runtime))
 
         response = client.post("/runs/r_test/cancel")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True, "run_id": "r_test"})
-        self.assertEqual(controller.cancelled, "r_test")
+        self.assertEqual(agent_session.cancelled, "r_test")
 
-    def test_approval_endpoint_forwards_decision_to_controller(self) -> None:
-        controller = _FakeController()
-        runtime = _runtime(controller=controller)
+    def test_approval_endpoint_forwards_decision_to_broker(self) -> None:
+        broker = _FakeApprovalBroker()
+        runtime = _runtime(approval_broker=broker)
         client = TestClient(create_app(runtime))
 
         response = client.post(
@@ -154,7 +164,7 @@ class ServerSSETests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True, "matched_pending": True})
-        self.assertEqual(controller.resolved, ("r_test", "ap_test", False))
+        self.assertEqual(broker.resolved, ("r_test", "ap_test", False))
 
 
 if __name__ == "__main__":

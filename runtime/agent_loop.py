@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 from pathlib import Path
 import threading
@@ -12,15 +13,13 @@ from datetime import UTC, datetime
 from typing import Any
 import uuid
 
-
-class RunCancelled(RuntimeError):
-    """Raised when a run is cooperatively cancelled."""
-
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
+from ..session import MessageEvent
 from ..tools.base import Tool, ToolExecutionContext
-from ..tools.definitions import ModelToolDefinition
 from ..tools.registry import PreparedToolCall, ToolRegistry
 from ..tools.result import ToolOutput
+from .cancel import RunCancelled
+from .context_manager import WorkingContext
 from .events import RuntimeEventEmitter, RuntimeEventHandler
 from .hooks import (
     HookContext,
@@ -28,7 +27,6 @@ from .hooks import (
     RuntimeHookManager,
     ToolPrepareRequest,
 )
-from .messages import AgentMessage, ModelMessage, ModelToolCall
 from .tool_output_materializer import ToolOutputMaterializer
 
 
@@ -45,13 +43,6 @@ def _parse_args(raw: str | None) -> dict:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def _latest_user_input(messages: list[ModelMessage]) -> str:
-    for message in reversed(messages):
-        if message.role == "user":
-            return message.content
-    return ""
 
 
 def _normalized_reply(content: Any) -> str:
@@ -75,9 +66,9 @@ def _normalized_reply(content: Any) -> str:
     return ""
 
 
-def _tool_label(tool: Tool | None, fallback: str) -> str:
+def _tool_label(tool: Tool | None, default: str) -> str:
     if tool is None:
-        return fallback
+        return default
     return tool.display_name
 
 
@@ -92,8 +83,9 @@ class RunSpec:
 
     session_id: str
     model: str
-    messages: list[ModelMessage]
-    tool_definitions: list[ModelToolDefinition]
+    user_input: str
+    prepare_next_turn: Callable[[int | None], WorkingContext]
+    on_message: Callable[[MessageEvent], MessageEvent]
     max_iterations: int = 20
     run_id: str | None = None
     event_emitter: RuntimeEventEmitter | None = None
@@ -102,36 +94,19 @@ class RunSpec:
     workspace: Path | None = None
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class RunOutcome:
     """Full outcome of one prepared agent run."""
 
     reply: str
-    messages: list[AgentMessage]
     usage: TokenUsage | None = None
 
-    def __init__(
-        self,
-        *,
-        reply: str,
-        messages: list[AgentMessage] | None = None,
-        usage: TokenUsage | None = None,
-    ) -> None:
-        object.__setattr__(self, "reply", reply)
-        object.__setattr__(
-            self,
-            "messages",
-            _coerce_agent_messages(messages or []),
-        )
-        object.__setattr__(self, "usage", usage)
 
-
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class PartialRunError(Exception):
     """Internal carrier for failures after partial agent progress."""
 
     cause: Exception
-    messages: list[AgentMessage]
     usage: TokenUsage | None = None
     reply: str | None = None
 
@@ -139,17 +114,11 @@ class PartialRunError(Exception):
         self,
         *,
         cause: Exception,
-        messages: list[AgentMessage] | None = None,
         usage: TokenUsage | None = None,
         reply: str | None = None,
     ) -> None:
         super().__init__(str(cause))
         object.__setattr__(self, "cause", cause)
-        object.__setattr__(
-            self,
-            "messages",
-            _coerce_agent_messages(messages or []),
-        )
         object.__setattr__(self, "usage", usage)
         object.__setattr__(self, "reply", reply)
 
@@ -163,28 +132,7 @@ class _PlannedToolCall:
     tool: Tool | None
 
 
-def _coerce_agent_messages(messages: list[Any]) -> list[AgentMessage]:
-    return [_coerce_agent_message(message) for message in messages]
-
-
-def _coerce_agent_message(message: Any) -> AgentMessage:
-    if isinstance(message, AgentMessage):
-        return message
-    if isinstance(message, ModelMessage):
-        return _to_agent_message(message)
-    if isinstance(message, dict):
-        return _to_agent_message(message)
-    return AgentMessage.create(
-        role=str(getattr(message, "role")),
-        content=str(getattr(message, "content", "")),
-        tool_calls=getattr(message, "tool_calls", None),
-        tool_call_id=getattr(message, "tool_call_id", None),
-        name=getattr(message, "name", None),
-        reasoning_content=getattr(message, "reasoning_content", None),
-    )
-
-
-class AgentRunner:
+class AgentLoop:
     """Execute the tool-calling LLM loop for one prepared request."""
 
     def __init__(
@@ -206,41 +154,55 @@ class AgentRunner:
 
     def run(self, run_spec: RunSpec) -> RunOutcome:
         """Run one prepared request until the model returns a final answer."""
-        messages = list(run_spec.messages)
-        tool_context = ToolExecutionContext(session_id=run_spec.session_id)
+        tool_context = ToolExecutionContext(
+            session_id=run_spec.session_id,
+            run_id=run_spec.run_id,
+            cancel_event=run_spec.cancel_event,
+        )
         emitter = self._resolve_emitter(run_spec)
         hook_context = self._hook_context(run_spec, emitter)
 
-        messages_out: list[AgentMessage] = []
         usage: TokenUsage | None = None
+        observed_input_tokens: int | None = None
 
         def _check_cancel() -> None:
-            if (
-                run_spec.cancel_event is not None
-                and run_spec.cancel_event.is_set()
-            ):
-                raise RunCancelled("run cancelled by user")
+            self._check_cancel_event(run_spec.cancel_event)
+
+        _check_cancel()
+        run_spec.on_message(
+            MessageEvent.create(role="user", content=run_spec.user_input)
+        )
 
         for iteration in range(1, run_spec.max_iterations + 1):
             _check_cancel()
             started = time.perf_counter()
-            self._emit(
-                emitter,
-                "model.request.started",
-                {
-                    "iteration": iteration,
-                    "model": run_spec.model,
-                    "input_preview": _preview(_latest_user_input(messages)),
-                },
-            )
 
             try:
+                working_context = run_spec.prepare_next_turn(observed_input_tokens)
+                if working_context.did_compact:
+                    self._emit(
+                        emitter,
+                        "context.compacted",
+                        {
+                            "iteration": iteration,
+                            "message": working_context.compact_message,
+                        },
+                    )
+                self._emit(
+                    emitter,
+                    "model.request.started",
+                    {
+                        "iteration": iteration,
+                        "model": run_spec.model,
+                        "input_preview": _preview(run_spec.user_input),
+                    },
+                )
                 model_request = self.hook_manager.before_model_request(
                     hook_context,
                     ModelRequest(
                         model=run_spec.model,
-                        messages=messages,
-                        tool_definitions=run_spec.tool_definitions,
+                        messages=working_context.messages,
+                        tool_definitions=working_context.tool_definitions,
                     ),
                 )
                 resp = self.llm.chat(
@@ -254,14 +216,11 @@ class AgentRunner:
                     resp,
                 )
             except Exception as exc:
-                if messages_out:
-                    raise PartialRunError(
-                        cause=exc,
-                        messages=list(messages_out),
-                        usage=usage,
-                    ) from exc
+                if usage is not None:
+                    raise PartialRunError(cause=exc, usage=usage) from exc
                 raise
             usage = _merge_usage(usage, resp.usage)
+            observed_input_tokens = None if resp.usage is None else resp.usage.input_tokens
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             model_completed_payload: dict[str, Any] = {
                 "iteration": iteration,
@@ -278,13 +237,14 @@ class AgentRunner:
                         "model.request.completed",
                         model_completed_payload,
                     )
-                    assistant_msg = ModelMessage.create(
-                        role="assistant",
-                        content=reply,
-                        reasoning_content=resp.reasoning_content,
+                    assistant_msg = run_spec.on_message(
+                        MessageEvent.create(
+                            role="assistant",
+                            content=reply,
+                            reasoning_content=resp.reasoning_content,
+                        )
                     )
-                    messages.append(assistant_msg)
-                    messages_out.append(_to_agent_message(assistant_msg))
+                    reply = assistant_msg.content
                     self._emit(
                         emitter,
                         "message.completed",
@@ -292,7 +252,6 @@ class AgentRunner:
                     )
                     return RunOutcome(
                         reply=reply,
-                        messages=messages_out,
                         usage=usage,
                     )
 
@@ -310,7 +269,6 @@ class AgentRunner:
                 )
                 raise PartialRunError(
                     cause=RuntimeError("模型返回空回复，请重试；详见上一条空回答诊断日志。"),
-                    messages=list(messages_out),
                     usage=usage,
                 )
 
@@ -319,9 +277,7 @@ class AgentRunner:
                 "model.request.completed",
                 model_completed_payload,
             )
-            assistant_msg = self._response_to_model_message(resp)
-            messages.append(assistant_msg)
-            messages_out.append(_to_agent_message(assistant_msg))
+            run_spec.on_message(self._response_to_message_event(resp))
 
             planned_tool_calls = self._plan_tool_calls(resp.tool_calls, emitter)
             _check_cancel()
@@ -333,6 +289,7 @@ class AgentRunner:
             )
 
             for planned, output in zip(planned_tool_calls, tool_outputs):
+                _check_cancel()
                 result = self.materializer.materialize(output, context=tool_context)
                 self._emit(
                     emitter,
@@ -352,38 +309,45 @@ class AgentRunner:
                     },
                 )
 
-                tool_msg = ModelMessage.create(
-                    role="tool",
-                    tool_call_id=planned.tool_call.id,
-                    tool_name=planned.tool_call.name,
-                    content=result.to_model_content(),
+                run_spec.on_message(
+                    MessageEvent.create(
+                        role="tool",
+                        tool_call_id=planned.tool_call.id,
+                        name=planned.tool_call.name,
+                        content=result.to_model_content(),
+                    )
                 )
-                messages.append(tool_msg)
-                messages_out.append(_to_agent_message(tool_msg))
 
-        fallback = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
+        max_iterations_reply = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
+        final_message = run_spec.on_message(
+            MessageEvent.create(role="assistant", content=max_iterations_reply)
+        )
         self._emit(
             emitter,
             "message.completed",
             {
-                "content": fallback,
+                "content": final_message.content,
                 "reason": "max_iterations",
                 "max_iterations": run_spec.max_iterations,
             },
         )
-        messages_out.append(
-            AgentMessage.create(role="assistant", content=fallback)
-        )
-        return RunOutcome(reply=fallback, messages=messages_out, usage=usage)
+        return RunOutcome(reply=final_message.content, usage=usage)
 
     @staticmethod
-    def _response_to_model_message(resp: LLMResponse) -> ModelMessage:
-        return ModelMessage.create(
+    def _response_to_message_event(resp: LLMResponse) -> MessageEvent:
+        return MessageEvent.create(
             role="assistant",
             content=resp.content or "",
             reasoning_content=resp.reasoning_content,
             tool_calls=[
-                ModelToolCall(id=tc.id, name=tc.name, arguments=tc.arguments)
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    },
+                }
                 for tc in resp.tool_calls
             ] or None,
         )
@@ -427,6 +391,7 @@ class AgentRunner:
     ) -> list[ToolOutput]:
         outputs: list[ToolOutput] = []
         for batch in self._partition_tool_batches(planned_tool_calls):
+            self._check_cancel_event(hook_context.cancel_event)
             if len(batch) > 1:
                 outputs.extend(
                     self._execute_parallel_batch(batch, context, hook_context, emitter)
@@ -466,9 +431,10 @@ class AgentRunner:
         emitter: RuntimeEventEmitter | None,
     ) -> list[ToolOutput]:
         outputs: list[ToolOutput | None] = [None] * len(batch)
-        submitted: list[tuple[int, _PlannedToolCall, Any]] = []
+        submitted: list[tuple[int, _PlannedToolCall, PreparedToolCall]] = []
 
         for index, planned in enumerate(batch):
+            self._check_cancel_event(hook_context.cancel_event)
             prepared_or_output = self._prepare_tool_call(
                 planned,
                 context,
@@ -481,7 +447,8 @@ class AgentRunner:
 
         if submitted:
             max_workers = min(self.max_parallel_tools, len(submitted))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 futures = [
                     (
                         index,
@@ -493,8 +460,13 @@ class AgentRunner:
                 ]
                 for index, planned, prepared, future in futures:
                     try:
-                        raw_output = future.result()
+                        raw_output = self._wait_for_future(
+                            future,
+                            cancel_event=hook_context.cancel_event,
+                        )
                     except Exception as exc:
+                        if isinstance(exc, RunCancelled):
+                            raise
                         raw_output = ToolOutput.failure(
                             "error",
                             f"工具 {planned.tool_call.name} 执行失败: {exc}",
@@ -506,6 +478,11 @@ class AgentRunner:
                         prepared,
                         raw_output,
                     )
+            except Exception:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
 
         return [
             output
@@ -526,10 +503,13 @@ class AgentRunner:
         emitter: RuntimeEventEmitter | None,
     ) -> ToolOutput:
         del emitter
+        self._check_cancel_event(hook_context.cancel_event)
         prepared_or_output = self._prepare_tool_call(planned, context, hook_context)
         if isinstance(prepared_or_output, ToolOutput):
             return prepared_or_output
+        self._check_cancel_event(hook_context.cancel_event)
         output = self.tool_registry.invoke(prepared_or_output)
+        self._check_cancel_event(hook_context.cancel_event)
         return self.hook_manager.after_tool_execute(
             hook_context,
             prepared_or_output,
@@ -542,6 +522,7 @@ class AgentRunner:
         context: ToolExecutionContext,
         hook_context: HookContext,
     ) -> PreparedToolCall | ToolOutput:
+        self._check_cancel_event(hook_context.cancel_event)
         request_or_output = self.hook_manager.before_tool_prepare(
             hook_context,
             ToolPrepareRequest(
@@ -567,6 +548,7 @@ class AgentRunner:
             context=prepared.context,
             tool_call_id=planned.tool_call.id,
         )
+        self._check_cancel_event(hook_context.cancel_event)
         decision = self.hook_manager.before_tool_execute(hook_context, prepared)
         if decision.blocked:
             assert decision.output is not None
@@ -583,6 +565,23 @@ class AgentRunner:
             session_id=run_spec.session_id,
             handler=self.event_handler,
         )
+
+    def _wait_for_future(
+        self,
+        future: Future[ToolOutput],
+        *,
+        cancel_event: threading.Event | None,
+    ) -> ToolOutput:
+        while True:
+            try:
+                return future.result(timeout=0.05)
+            except FutureTimeoutError:
+                self._check_cancel_event(cancel_event)
+
+    @staticmethod
+    def _check_cancel_event(cancel_event: threading.Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunCancelled("run cancelled by user")
 
     @staticmethod
     def _hook_context(
@@ -606,27 +605,6 @@ class AgentRunner:
     ) -> None:
         if emitter is not None:
             emitter.emit(event_type, payload)
-
-
-def _to_agent_message(message: ModelMessage | dict[str, Any]) -> AgentMessage:
-    """Convert an internal model message to the runner output type."""
-    if isinstance(message, ModelMessage):
-        return AgentMessage.create(
-            role=message.role,
-            content=message.content,
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-            name=message.tool_name,
-            reasoning_content=message.reasoning_content,
-        )
-    return AgentMessage.create(
-        role=str(message["role"]),
-        content=str(message.get("content", "")),
-        tool_calls=message.get("tool_calls"),
-        tool_call_id=message.get("tool_call_id"),
-        name=message.get("name"),
-        reasoning_content=message.get("reasoning_content"),
-    )
 
 
 def _merge_usage(

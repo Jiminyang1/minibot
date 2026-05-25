@@ -271,8 +271,9 @@ class RuntimeHookManagerTests(unittest.TestCase):
     def test_approval_hook_denies_sensitive_tool_without_invoking_tool(self) -> None:
         calls = 0
 
-        def _handler(request) -> bool:
+        def _handler(request, cancel_event) -> bool:
             nonlocal calls
+            del cancel_event
             calls += 1
             self.assertEqual(request.tool_call_id, "call_1")
             return False

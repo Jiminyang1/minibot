@@ -3,25 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Protocol
 
 from ..llm import TokenUsage
 from ..run_log import RunLogRecord, RunLogStore, preview_text, utc_now
-from ..session import MessageEvent, Session, SessionManager
-from .context_manager import PreparedContext
-from .messages import AgentMessage, agent_message_to_session
-
-
-class ToolLookup(Protocol):
-    def get(self, name: str) -> object | None: ...
-
-
-@dataclass(frozen=True)
-class PersistedTurn:
-    """Runtime messages after conversion into persisted session messages."""
-
-    messages: list[MessageEvent]
+from ..session import MessageEvent, Session, SessionEntry, SessionManager
+from ..tools.registry import ToolRegistry
+from .context_manager import WorkingContext
 
 
 class TurnRecorder:
@@ -32,35 +19,32 @@ class TurnRecorder:
         *,
         manager: SessionManager,
         run_log_store: RunLogStore | None = None,
-        tool_registry: ToolLookup | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self.manager = manager
         self.run_log_store = run_log_store
         self.tool_registry = tool_registry
 
-    def persist_user_message(self, session: Session, user_input: str) -> MessageEvent:
-        user_event = MessageEvent.create(role="user", content=user_input)
-        session.add_message(user_event)
-        self.manager.append_messages(session.session_id, [user_event])
+    def on_message(self, session: Session, message: MessageEvent) -> MessageEvent:
+        session.add_message(message)
+        self.manager.append_entries(
+            session.session_id,
+            [SessionEntry.from_message(message)],
+        )
         self.manager.update_metadata(session)
-        return user_event
+        return message
 
-    def save_session(self, session: Session) -> None:
-        self.manager.save(session)
+    def persist_pending_compaction(self, session: Session) -> None:
+        if not self.flush_pending_compaction(session):
+            raise RuntimeError("compaction entry missing")
 
-    def persist_agent_messages(
-        self,
-        session: Session,
-        messages: list[AgentMessage],
-    ) -> PersistedTurn:
-        message_events = [agent_message_to_session(message) for message in messages]
-        if not message_events:
-            return PersistedTurn(messages=[])
-        for event in message_events:
-            session.add_message(event)
-        self.manager.append_messages(session.session_id, message_events)
+    def flush_pending_compaction(self, session: Session) -> bool:
+        entries = session.pop_pending_compaction_entries()
+        if not entries:
+            return False
+        self.manager.append_entries(session.session_id, entries)
         self.manager.update_metadata(session)
-        return PersistedTurn(messages=message_events)
+        return True
 
     def record_run(
         self,
@@ -73,8 +57,8 @@ class TurnRecorder:
         model: str,
         user_input: str,
         duration_ms: int,
-        prepared: PreparedContext | None,
-        messages: list[AgentMessage],
+        prepared: WorkingContext | None,
+        messages: list[MessageEvent],
         usage: TokenUsage | None,
         reply: str | None,
         error: Exception | None = None,
@@ -100,6 +84,8 @@ class TurnRecorder:
                 )
             )
         except Exception:
+            # Run-log persistence is best-effort; never fail a handled turn
+            # because observability bookkeeping could not be written.
             return
 
     def build_run_log(
@@ -113,8 +99,8 @@ class TurnRecorder:
         model: str,
         user_input: str,
         duration_ms: int,
-        prepared: PreparedContext | None,
-        messages: list[AgentMessage],
+        prepared: WorkingContext | None,
+        messages: list[MessageEvent],
         usage: TokenUsage | None,
         reply: str | None,
         error: Exception | None = None,
@@ -156,7 +142,7 @@ class TurnRecorder:
 
     def _summarize_mcp_usage(
         self,
-        messages: list[AgentMessage],
+        messages: list[MessageEvent],
     ) -> tuple[int, list[str], list[str], int]:
         tool_call_count = 0
         servers_used: set[str] = set()
@@ -191,11 +177,12 @@ class TurnRecorder:
             error_count,
         )
 
-def _count_messages(messages: list[AgentMessage], *, role: str) -> int:
+
+def _count_messages(messages: list[MessageEvent], *, role: str) -> int:
     return sum(1 for message in messages if message.role == role)
 
 
-def _tools_used(messages: list[AgentMessage]) -> list[str]:
+def _tools_used(messages: list[MessageEvent]) -> list[str]:
     return [
         message.name
         for message in messages
@@ -203,7 +190,7 @@ def _tools_used(messages: list[AgentMessage]) -> list[str]:
     ]
 
 
-def _tool_message_failed(message: AgentMessage) -> bool:
+def _tool_message_failed(message: MessageEvent) -> bool:
     try:
         payload = json.loads(message.content)
     except (TypeError, json.JSONDecodeError):

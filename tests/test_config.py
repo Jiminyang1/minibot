@@ -21,6 +21,16 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.max_parallel_tools, 6)
 
+    def test_from_env_reads_compact_keep_recent_tokens(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"MINIBOT_COMPACT_KEEP_RECENT_TOKENS": "12000"},
+            clear=True,
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.compact_keep_recent_tokens, 12000)
+
     def test_from_env_reads_approval_mode(self) -> None:
         with patch.dict(
             "os.environ",
@@ -70,6 +80,14 @@ class ConfigTests(unittest.TestCase):
     def test_negative_max_parallel_tools_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             Config(max_parallel_tools=-1)
+
+    def test_compact_keep_recent_tokens_must_fit_input_budget(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(
+                compact_token_threshold=1000,
+                reserved_completion_tokens=200,
+                compact_keep_recent_tokens=800,
+            )
 
 
 if __name__ == "__main__":

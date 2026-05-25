@@ -12,11 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.artifacts import ArtifactStore
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
-from minibot.runtime.agent_runner import AgentRunner, PartialRunError, RunSpec
+from minibot.runtime.agent_loop import AgentLoop, PartialRunError, RunSpec
+from minibot.runtime.context_manager import WorkingContext
 from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.hooks import RuntimeHookManager
 from minibot.runtime.hooks_builtin import ApprovalHook, ApprovalPolicy
-from minibot.runtime.messages import ModelMessage
+from minibot.runtime.messages import ModelMessage, session_message_to_model
+from minibot.session import MessageEvent
 from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
 from minibot.tools.definitions import ModelToolDefinition
 from minibot.tools.registry import ToolRegistry
@@ -64,6 +66,68 @@ class _FailingLLM(LLMClient):
         if self._responses:
             return self._responses.pop(0)
         raise self._failure
+
+
+class _RecordingContext:
+    def __init__(
+        self,
+        *,
+        tool_definitions: list[ModelToolDefinition] | None = None,
+    ) -> None:
+        self.messages: list[MessageEvent] = []
+        self.tool_definitions = list(tool_definitions or [])
+        self.calls: list[list[str]] = []
+        self.observed_input_tokens: list[int | None] = []
+
+    def prepare_next_turn(self, observed_input_tokens: int | None) -> WorkingContext:
+        self.observed_input_tokens.append(observed_input_tokens)
+        messages = [
+            session_message_to_model(message)
+            for message in self.messages
+        ]
+        self.calls.append([message.role for message in messages])
+        return WorkingContext(
+            messages=messages,
+            tool_definitions=self.tool_definitions,
+        )
+
+    def on_message(self, message: MessageEvent) -> MessageEvent:
+        self.messages.append(message)
+        return message
+
+
+_LAST_CONTEXT: _RecordingContext | None = None
+
+
+def _run_spec(**kwargs: object) -> RunSpec:
+    global _LAST_CONTEXT
+    messages = kwargs.pop("messages", [])
+    if "user_input" not in kwargs:
+        kwargs["user_input"] = _latest_user_content(messages)
+    context = kwargs.pop("context", None)
+    tool_definitions = kwargs.pop("tool_definitions", [])
+    if context is None:
+        context = _RecordingContext(
+            tool_definitions=tool_definitions,  # type: ignore[arg-type]
+        )
+    _LAST_CONTEXT = context
+    kwargs.setdefault("prepare_next_turn", context.prepare_next_turn)
+    kwargs.setdefault("on_message", context.on_message)
+    return RunSpec(**kwargs)
+
+
+def _latest_user_content(messages: object) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, ModelMessage) and message.role == "user":
+            return message.content
+    return ""
+
+
+def _last_messages() -> list[MessageEvent]:
+    assert _LAST_CONTEXT is not None
+    return _LAST_CONTEXT.messages
 
 
 class _EchoTool(Tool):
@@ -178,7 +242,7 @@ class _TrackingTool(Tool):
             self._state.end(self._name)
 
 
-class AgentRunnerUsageTests(unittest.TestCase):
+class AgentLoopUsageTests(unittest.TestCase):
     def test_fails_fast_when_model_returns_empty_final_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = ToolRegistry()
@@ -207,7 +271,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 ]
             )
             emitted: list[RuntimeEvent] = []
-            runner = AgentRunner(
+            runner = AgentLoop(
                 llm,
                 registry,
                 materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
@@ -216,7 +280,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
 
             with self.assertRaises(PartialRunError) as ctx:
                 runner.run(
-                    RunSpec(
+                    _run_spec(
                         session_id="s_test",
                         model="gpt-5.4-mini",
                         messages=[ModelMessage.create(role="user", content="say hi")],
@@ -228,7 +292,10 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 str(ctx.exception.cause),
                 "模型返回空回复，请重试；详见上一条空回答诊断日志。",
             )
-            self.assertEqual(len(ctx.exception.messages), 2)
+            self.assertEqual(
+                [message.role for message in _last_messages()],
+                ["user", "assistant", "tool"],
+            )
             self.assertTrue(
                 any(
                     event.type == "model.request.completed"
@@ -269,14 +336,14 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     ),
                 ]
             )
-            runner = AgentRunner(
+            runner = AgentLoop(
                 llm,
                 registry,
                 materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="say hi")],
@@ -300,11 +367,56 @@ class AgentRunnerUsageTests(unittest.TestCase):
             self.assertEqual(second_call_messages[1].tool_calls[0].name, "echo")
             self.assertEqual(second_call_messages[2].tool_name, "echo")
 
+    def test_prepares_context_before_each_llm_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_EchoTool())
+            context = _RecordingContext()
+            llm = _ScriptedLLM(
+                [
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call_1",
+                                name="echo",
+                                arguments='{"value":"hi"}',
+                            )
+                        ],
+                    ),
+                    LLMResponse(content="done"),
+                ]
+            )
+            runner = AgentLoop(
+                llm,
+                registry,
+                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+            )
+
+            outcome = runner.run(
+                _run_spec(
+                    session_id="s_test",
+                    model="gpt-5.4-mini",
+                    messages=[ModelMessage.create(role="user", content="say hi")],
+                    tool_definitions=registry.get_definitions(),
+                    context=context,
+                )
+            )
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(
+                context.calls,
+                [
+                    ["user"],
+                    ["user", "assistant", "tool"],
+                ],
+            )
+
     def test_raises_partial_run_error_with_accumulated_messages_on_later_llm_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = ToolRegistry()
             registry.register(_EchoTool())
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _FailingLLM(
                     [
                         LLMResponse(
@@ -331,7 +443,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
 
             with self.assertRaises(PartialRunError) as ctx:
                 runner.run(
-                    RunSpec(
+                    _run_spec(
                         session_id="s_test",
                         model="gpt-5.4-mini",
                         messages=[ModelMessage.create(role="user", content="say hi")],
@@ -342,7 +454,10 @@ class AgentRunnerUsageTests(unittest.TestCase):
             exc = ctx.exception
             self.assertEqual(type(exc.cause), RuntimeError)
             self.assertEqual(str(exc.cause), "llm unavailable")
-            self.assertEqual([message.role for message in exc.messages], ["assistant", "tool"])
+            self.assertEqual(
+                [message.role for message in _last_messages()],
+                ["user", "assistant", "tool"],
+            )
             self.assertIsNotNone(exc.usage)
             assert exc.usage is not None
             self.assertEqual(exc.usage.total_tokens, 110)
@@ -362,7 +477,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     delay=0.01,
                 )
             )
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -382,7 +497,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tools")],
@@ -401,7 +516,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 state.events.index("end:read_b"),
             )
             self.assertEqual(
-                [message.name for message in outcome.messages if message.role == "tool"],
+                [message.name for message in _last_messages() if message.role == "tool"],
                 ["read_a", "read_b", "exec_like"],
             )
 
@@ -411,7 +526,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             registry = ToolRegistry()
             registry.register(_TrackingTool("slow", state=state, read_only=True, delay=0.05))
             registry.register(_TrackingTool("fast", state=state, read_only=True, delay=0.01))
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -430,7 +545,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tools")],
@@ -440,7 +555,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
 
             self.assertEqual(state.max_running, 2)
             self.assertEqual(
-                [message.name for message in outcome.messages if message.role == "tool"],
+                [message.name for message in _last_messages() if message.role == "tool"],
                 ["slow", "fast"],
             )
 
@@ -450,7 +565,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             registry = ToolRegistry()
             registry.register(_TrackingTool("read_a", state=state, read_only=True))
             registry.register(_TrackingTool("read_b", state=state, read_only=True))
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -469,7 +584,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tools")],
@@ -505,7 +620,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 )
             )
             emitted: list[RuntimeEvent] = []
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -525,7 +640,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                     [
                         ApprovalHook(
                             ApprovalPolicy(
-                                handler=lambda request: request.tool_name != "denied"
+                                handler=lambda request, cancel_event: request.tool_name != "denied"
                             )
                         )
                     ]
@@ -534,7 +649,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tools")],
@@ -547,7 +662,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             self.assertEqual(state.executions.get("approved", 0), 1)
 
             tool_messages = [
-                message for message in outcome.messages if message.role == "tool"
+                message for message in _last_messages() if message.role == "tool"
             ]
             denied_payload = json.loads(tool_messages[0].content)
             approved_payload = json.loads(tool_messages[1].content)
@@ -577,13 +692,13 @@ class AgentRunnerUsageTests(unittest.TestCase):
             emitted: list[RuntimeEvent] = []
             handler_calls = 0
 
-            def _approval_handler(request) -> bool:
+            def _approval_handler(request, cancel_event) -> bool:
                 nonlocal handler_calls
-                del request
+                del request, cancel_event
                 handler_calls += 1
                 return False
 
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -616,7 +731,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tool")],
@@ -668,7 +783,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
                 )
             )
             store = ArtifactStore(workspace)
-            runner = AgentRunner(
+            runner = AgentLoop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -687,7 +802,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
             )
 
             outcome = runner.run(
-                RunSpec(
+                _run_spec(
                     session_id="s_test",
                     model="gpt-5.4-mini",
                     messages=[ModelMessage.create(role="user", content="run tools")],
@@ -697,7 +812,7 @@ class AgentRunnerUsageTests(unittest.TestCase):
 
             self.assertEqual(outcome.reply, "done")
             tool_messages = [
-                message for message in outcome.messages if message.role == "tool"
+                message for message in _last_messages() if message.role == "tool"
             ]
             payload_a = json.loads(tool_messages[0].content)
             payload_b = json.loads(tool_messages[1].content)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import sys
+import threading
 
 from .artifacts import ArtifactStore
 from .config import Config
@@ -15,9 +16,10 @@ from .llm_profile import build_llm_profile
 from .mcp_host.host import MCPHost
 from .prompts import SYSTEM_PROMPT
 from .run_log import RunLogStore
-from .runtime.agent_runner import AgentRunner
-from .runtime.controller import ApprovalBroker, RunController
-from .runtime.context_manager import ContextManager, make_summarizer
+from .runtime.agent_loop import AgentLoop
+from .runtime.agent_session import AgentSession
+from .runtime.approvals import ApprovalBroker
+from .runtime.context_manager import ContextWindowManager, make_summarizer
 from .runtime.events import RuntimeEventHandler
 from .runtime.hooks import RuntimeHookManager
 from .runtime.hooks_builtin import ApprovalHook, ApprovalPolicy
@@ -49,10 +51,10 @@ class MiniBotRuntime:
     skill_registry: SkillRegistry
     tool_registry: ToolRegistry
     mcp_host: MCPHost
-    context_manager: ContextManager
-    runner: AgentRunner
+    context_manager: ContextWindowManager
+    agent_loop: AgentLoop
     turn_engine: TurnEngine
-    controller: RunController
+    agent_session: AgentSession
     hook_manager: RuntimeHookManager
     approval_policy: ApprovalPolicy
     approval_broker: ApprovalBroker | None = None
@@ -67,7 +69,7 @@ def build_runtime(
     workspace: Path | None = None,
     run_event_handler: RuntimeEventHandler | None = None,
     log_handler: Callable[[str], None] | None = None,
-    approval_handler: Callable[[ApprovalRequest], bool] | None = None,
+    approval_handler: Callable[[ApprovalRequest, threading.Event | None], bool] | None = None,
     approval_broker: ApprovalBroker | None = None,
 ) -> MiniBotRuntime:
     package_dir = Path(__file__).resolve().parent
@@ -118,19 +120,18 @@ def build_runtime(
         mode=config.approval_mode,
     )
     hook_manager = RuntimeHookManager([ApprovalHook(approval_policy)])
-    context_manager = ContextManager(
+    context_manager = ContextWindowManager(
         base_system_prompt=SYSTEM_PROMPT,
         memory_store=memory_store,
         skill_registry=skill_registry,
         tool_registry=tool_registry,
-        max_history_turns=config.max_history_turns,
         compact_token_threshold=config.compact_token_threshold,
         reserved_completion_tokens=config.reserved_completion_tokens,
-        compact_keep_recent=config.compact_keep_recent,
+        compact_keep_recent_tokens=config.compact_keep_recent_tokens,
         summarizer=summarizer,
         include_reasoning_content=llm_profile.compat.include_reasoning_content,
     )
-    runner = AgentRunner(
+    agent_loop = AgentLoop(
         llm,
         tool_registry,
         materializer=ToolOutputMaterializer(artifact_store),
@@ -139,7 +140,7 @@ def build_runtime(
         max_parallel_tools=config.max_parallel_tools,
     )
     turn_engine = TurnEngine(
-        runner,
+        agent_loop,
         manager,
         config,
         context_manager=context_manager,
@@ -148,10 +149,9 @@ def build_runtime(
         run_log_store=run_log_store,
         workspace=resolved_workspace,
     )
-    controller = RunController(
+    agent_session = AgentSession(
         turn_engine=turn_engine,
-        manager=manager,
-        approval_broker=approval_broker,
+        session_manager=manager,
     )
     return MiniBotRuntime(
         config=config,
@@ -163,9 +163,9 @@ def build_runtime(
         tool_registry=tool_registry,
         mcp_host=mcp_host,
         context_manager=context_manager,
-        runner=runner,
+        agent_loop=agent_loop,
         turn_engine=turn_engine,
-        controller=controller,
+        agent_session=agent_session,
         hook_manager=hook_manager,
         approval_policy=approval_policy,
         approval_broker=approval_broker,

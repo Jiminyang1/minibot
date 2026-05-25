@@ -11,6 +11,7 @@ import uuid
 from ..config import ApprovalMode
 from ..tools.registry import PreparedToolCall
 from ..tools.result import ToolOutput
+from .cancel import RunCancelled
 from .hooks import HookContext, RuntimeHook, ToolExecuteDecision
 
 
@@ -32,7 +33,7 @@ class ApprovalPolicy:
     def __init__(
         self,
         *,
-        handler: Callable[[ApprovalRequest], bool] | None = None,
+        handler: Callable[[ApprovalRequest, threading.Event | None], bool] | None = None,
         mode: ApprovalMode = "ask",
     ) -> None:
         self.handler = handler
@@ -50,6 +51,18 @@ class ApprovalPolicy:
         with self._lock:
             self._mode = mode
 
+    def request(
+        self,
+        request: ApprovalRequest,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunCancelled("run cancelled while waiting for approval")
+        if self.handler is None:
+            return True
+        return bool(self.handler(request, cancel_event))
+
 
 class ApprovalHook(RuntimeHook):
     """Gate tools that declare ``requires_approval``."""
@@ -66,6 +79,9 @@ class ApprovalHook(RuntimeHook):
     ) -> ToolExecuteDecision:
         if not call.tool.requires_approval:
             return ToolExecuteDecision()
+
+        if context.cancel_event is not None and context.cancel_event.is_set():
+            raise RunCancelled("run cancelled before approval")
 
         if self.policy.mode == "always":
             _emit(
@@ -102,7 +118,7 @@ class ApprovalHook(RuntimeHook):
                 "args": call.args,
             },
         )
-        approved = self.policy.handler(request)
+        approved = self.policy.request(request, cancel_event=context.cancel_event)
         _emit(
             context,
             "approval.resolved",

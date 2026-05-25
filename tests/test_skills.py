@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.artifacts import ArtifactStore
-from minibot.runtime.context_manager import ContextManager
+from minibot.runtime.context_manager import ContextWindowManager
 from minibot.session import Session
 from minibot.skills import SkillRegistry
 from minibot.tools.base import Tool, ToolExecutionContext
@@ -83,17 +83,16 @@ def _make_context_manager(
     registry: SkillRegistry,
     tool_registry: ToolRegistry,
     now_provider=None,
-) -> ContextManager:
-    return ContextManager(
+) -> ContextWindowManager:
+    return ContextWindowManager(
         base_system_prompt="BASE PROMPT",
         memory_store=None,
         skill_registry=registry,
         tool_registry=tool_registry,
-        max_history_turns=10,
         compact_token_threshold=40000,
         reserved_completion_tokens=1000,
-        compact_keep_recent=4,
-        summarizer=lambda messages: "summary",
+        compact_keep_recent_tokens=16000,
+        summarizer=lambda request: "summary",
         now_provider=now_provider,
     )
 
@@ -126,9 +125,8 @@ class SkillCatalogTests(unittest.TestCase):
                 ),
             )
 
-            prompt = manager._build_request(
+            prompt = manager.build_context(
                 session=Session("s_test"),
-                user_input="今天干嘛",
             ).messages[0].content
 
             self.assertIn("## Local Time Context", prompt)
@@ -168,9 +166,8 @@ class SkillCatalogTests(unittest.TestCase):
             tool_registry.register(_DummyTool("calendar_list_events"))
             manager = _make_context_manager(registry=registry, tool_registry=tool_registry)
 
-            prompt = manager._build_request(
+            prompt = manager.build_context(
                 session=Session("s_test"),
-                user_input="any turn",
             ).messages[0].content
 
             self.assertIn("## Available Skills", prompt)
@@ -193,9 +190,8 @@ class SkillCatalogTests(unittest.TestCase):
             tool_registry.register(_DummyTool("calendar_list_events"))
             manager = _make_context_manager(registry=registry, tool_registry=tool_registry)
 
-            prompt = manager._build_request(
+            prompt = manager.build_context(
                 session=Session("s_test"),
-                user_input="用 calendar 帮我安排 3 点的会议",
             ).messages[0].content
 
             self.assertNotIn("CALENDAR-BODY-MARKER", prompt)

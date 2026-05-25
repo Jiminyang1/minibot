@@ -1,298 +1,623 @@
-"""Interactive REPL and slash-command dispatch for MiniBot.
-
-All styling and print helpers live in :mod:`minibot.ui`. This module
-keeps only the command wiring: read a line, route it to a handler,
-hand user messages to the turn engine.
-"""
+"""Lightweight interactive CLI for MiniBot."""
 
 from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
+from contextlib import contextmanager, redirect_stderr
+from dataclasses import dataclass
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
+    fcntl = None  # type: ignore[assignment]
+
+import json
+import logging
+import os
+import select
+import signal
+import sys
+import threading
+import time
+from typing import Any, TextIO
 
 try:
     import readline
 
     readline.parse_and_bind("set enable-bracketed-paste on")
-except ImportError:
-    pass
 except Exception:
-    pass
+    readline = None  # type: ignore[assignment]
 
-from typing import TYPE_CHECKING
-
-from . import ui
-from .mcp_host.host import MCPHost
-from .runtime.controller import RunController
-from .runtime.events import RuntimeEventHandler
-from .runtime.hooks_builtin import ApprovalPolicy
-from .session import Session, SessionManager
-
-if TYPE_CHECKING:
-    from .config import Config
-    from .runtime.turn_engine import TurnEngine
-    from .user_memory import UserMemoryStore
-
-
-def _is_terminal_escape_sequence(text: str) -> bool:
-    return text.startswith("\x1b") or text.startswith("^[[")
+from .bootstrap import MiniBotRuntime, build_runtime
+from .config import Config, load_env
+from .interaction.commands import (
+    CommandContext,
+    CommandNotice,
+    _COMMANDS,
+    dispatch_command,
+)
+from .run_log import make_run_id
+from .runtime.agent_session import RunCancelled
+from .runtime.events import RuntimeEvent
+from .runtime.hooks_builtin import ApprovalRequest
 
 
-def _startup_session(manager: SessionManager) -> tuple[Session, bool]:
-    """Resume current/latest, or create a new one. Returns (session, resumed)."""
-    current = manager.load_current_session()
-    if current is not None:
-        return current, True
-    latest = manager.latest_session(prefer_non_empty=True)
-    if latest is not None:
-        manager.set_current_session(latest.session_id)
-        return latest, True
-    session = manager.create_session()
-    manager.set_current_session(session.session_id)
-    return session, False
+_PASTE_DRAIN_IDLE_SECONDS = 0.05
+_PASTE_DRAIN_MAX_SECONDS = 0.35
+_PASTE_DRAIN_CHUNK_SIZE = 4096
+_PASTE_DRAIN_MAX_BYTES = 64 * 1024
+_COMMAND_NAMES = tuple(dict.fromkeys(command.split()[0] for command, _ in _COMMANDS))
 
 
-# ── slash-command handlers ───────────────────────────────────────
+@dataclass(frozen=True)
+class CliOptions:
+    verbose: bool = False
+    no_color: bool = False
 
 
-def _handle_new(manager: SessionManager) -> Session:
-    session = manager.create_session()
-    manager.set_current_session(session.session_id)
-    ui.success(f"已创建新会话 {session.session_id}")
-    ui.print_session(session)
-    return session
+class CliRenderer:
+    """Small ANSI renderer for the REPL and runtime events."""
 
-
-def _handle_delete(
-    raw: str,
-    manager: SessionManager,
-    turn_engine: TurnEngine,
-    current: Session,
-) -> Session:
-    target = raw[len("/delete"):].strip()
-    if not target:
-        ui.info("用法: /delete <session_id|current>")
-        return current
-
-    resolved = current.session_id if target == "current" else target
-    if not turn_engine.delete_session(resolved):
-        ui.warn(f"未找到会话: {resolved}")
-        return current
-
-    ui.success(f"已删除会话 {resolved}")
-    if resolved != current.session_id:
-        return current
-
-    replacement = manager.create_session()
-    manager.set_current_session(replacement.session_id)
-    ui.success(f"已创建新会话 {replacement.session_id}")
-    ui.print_session(replacement)
-    return replacement
-
-
-def _handle_resume(raw: str, manager: SessionManager) -> Session | None:
-    target = raw[len("/resume"):].strip()
-    if not target:
-        ui.info("用法: /resume <session_id>")
-        return None
-    loaded = manager.load(target)
-    if loaded is None:
-        ui.warn(f"未找到会话: {target}")
-        return None
-    manager.set_current_session(loaded.session_id)
-    ui.success(f"已恢复会话 {loaded.session_id}")
-    ui.print_session(loaded)
-    return loaded
-
-
-def _handle_compact(session: Session, turn_engine: TurnEngine) -> None:
-    try:
-        did_compact, message = turn_engine.compact_session(session)
-    except Exception as exc:
-        ui.warn(f"手动 compact 失败: {exc}")
-        return
-    if did_compact:
-        ui.success(f"已压缩当前会话 · {message}")
-    else:
-        ui.info(message)
-
-
-def _handle_memory(raw: str, memory_store: UserMemoryStore) -> None:
-    parts = raw.strip().split(maxsplit=2)
-    sub = parts[1] if len(parts) >= 2 else ""
-
-    if sub == "":
-        ui.print_memory_list(memory_store.list())
-        return
-    if sub == "clear":
-        count = memory_store.clear()
-        ui.warn(f"已清空长期记忆 · 共删除 {count} 条")
-        return
-    if sub == "forget":
-        if len(parts) < 3 or not parts[2].strip():
-            ui.info("用法: /memory forget <memory_id>")
-            return
-        target = parts[2].strip()
-        if memory_store.delete(target):
-            ui.success(f"已删除记忆 {target}")
-        else:
-            ui.warn(f"未找到记忆 {target}")
-        return
-
-    ui.warn(
-        f"未知子命令: /memory {sub}。用法: /memory | /memory clear | /memory forget <id>"
-    )
-
-
-def _handle_skills(turn_engine: TurnEngine) -> None:
-    ui.print_skills(turn_engine.list_available_skills())
-
-
-def _handle_mcp(raw: str, mcp_host: MCPHost | None) -> None:
-    if mcp_host is None:
-        ui.info("当前未初始化 MCP host。")
-        return
-
-    parts = raw.strip().split()
-    if len(parts) == 1:
-        ui.print_mcp_status(mcp_host.summary(), mcp_host.status_snapshot())
-        return
-    if parts[1] == "tools":
-        server_name = parts[2] if len(parts) >= 3 else None
-        ui.print_mcp_tools(mcp_host.status_snapshot(), server_name=server_name)
-        return
-    ui.info("用法: /mcp | /mcp tools [server]")
-
-
-def _handle_config(config: Config | None) -> None:
-    if config is None:
-        ui.info("当前未传入运行配置。")
-        return
-    ui.print_config(config)
-
-
-def _handle_permission(raw: str, approval_policy: ApprovalPolicy) -> None:
-    parts = raw.strip().split(maxsplit=1)
-    if len(parts) == 1:
-        ui.print_permission_mode(approval_policy.mode)
-        return
-
-    mode = parts[1].strip().lower()
-    aliases = {
-        "ask": "ask",
-        "permission": "ask",
-        "prompt": "ask",
-        "manual": "ask",
-        "always": "always",
-        "auto": "always",
-        "approve": "always",
+    _STYLES = {
+        "reset": "\x1b[0m",
+        "bold": "\x1b[1m",
+        "dim": "\x1b[2m",
+        "cyan": "\x1b[36m",
+        "green": "\x1b[32m",
+        "yellow": "\x1b[33m",
+        "magenta": "\x1b[35m",
+        "red": "\x1b[31m",
+        "gray": "\x1b[90m",
     }
-    resolved = aliases.get(mode)
-    if resolved is None:
-        ui.info("用法: /permission [ask|always]")
-        return
-    approval_policy.set_mode(resolved)
-    ui.success(f"审批模式已切换为 {resolved}")
-    ui.print_permission_mode(approval_policy.mode)
+
+    def __init__(
+        self,
+        *,
+        verbose: bool = False,
+        no_color: bool = False,
+        stdout: TextIO | None = None,
+        stderr: TextIO | None = None,
+    ) -> None:
+        self.verbose = verbose
+        self.stdout = stdout or sys.stdout
+        self.stderr = stderr or sys.stderr
+        self.use_color = (
+            not no_color
+            and os.environ.get("NO_COLOR") is None
+            and self.stdout.isatty()
+        )
+        self._compacted_runs: set[str] = set()
+        self._failed_runs: set[str] = set()
+
+    def c(self, text: str, *styles: str) -> str:
+        if not self.use_color:
+            return text
+        codes = "".join(self._STYLES[s] for s in styles if s in self._STYLES)
+        return f"{codes}{text}{self._STYLES['reset']}"
+
+    def input_prompt(self) -> str:
+        return self.c("\n› ", "bold", "cyan")
+
+    def print_startup(
+        self,
+        runtime: MiniBotRuntime,
+        *,
+        session_id: str,
+        resumed: bool,
+        startup_logs: Sequence[str] = (),
+    ) -> None:
+        session_state = "resumed" if resumed else "new"
+        summary = runtime.mcp_host.summary()
+        mcp = (
+            "mcp off"
+            if summary.enabled_servers == 0
+            else f"mcp {summary.connected_servers}/{summary.enabled_servers}"
+        )
+        print(
+            (
+                f"{self.c('MiniBot', 'bold', 'magenta')} "
+                f"{self.c(runtime.config.model, 'gray')} "
+                f"{self.c(session_id, 'cyan')} "
+                f"{self.c(session_state, 'gray')} "
+                f"{self.c(mcp, 'gray')} "
+                f"{self.c('approval ' + runtime.approval_policy.mode, 'gray')}"
+            ),
+            file=self.stdout,
+        )
+        print(
+            self.c("Tab 补全 slash 命令 · /help 查看命令 · Ctrl+D 退出", "gray"),
+            file=self.stdout,
+        )
+        if self.verbose:
+            for line in startup_logs:
+                self.info(line)
+
+    def info(self, message: str) -> None:
+        print(self.c(f"  {message}", "gray"), file=self.stdout)
+
+    def success(self, message: str) -> None:
+        print(self.c(f"  {message}", "green"), file=self.stdout)
+
+    def warn(self, message: str) -> None:
+        print(self.c(f"  {message}", "yellow"), file=self.stdout)
+
+    def error(self, message: str) -> None:
+        print(self.c(f"  {message}", "red"), file=self.stdout)
+
+    def render_notice(self, notice: CommandNotice) -> None:
+        printer = {
+            "success": self.success,
+            "warning": self.warn,
+            "error": self.error,
+            "info": self.info,
+        }.get(notice.kind, self.info)
+        if notice.body:
+            printer(notice.title)
+            print(_indent(notice.body), file=self.stdout)
+            return
+        printer(notice.title)
+
+    def render_notices(self, notices: Sequence[CommandNotice]) -> None:
+        for notice in notices:
+            self.render_notice(notice)
+
+    def render_event(self, event: RuntimeEvent) -> None:
+        message = self.format_event(event)
+        if message:
+            print(
+                f"  {self.c('›', 'dim')} {self.c(message, 'dim')}",
+                file=self.stdout,
+            )
+
+    def format_event(self, event: RuntimeEvent) -> str | None:
+        payload = event.payload
+        if event.type == "context.compacted":
+            self._compacted_runs.add(event.run_id)
+            return f"已自动压缩: {payload.get('message') or ''}".rstrip()
+        if event.type == "tool_call.started":
+            label = payload.get("display_name") or payload.get("tool")
+            if self.verbose:
+                args = _json_preview(payload.get("args") or {}, limit=1200)
+                return f"工具: {label}({args})"
+            return f"工具: {label}"
+        if event.type in {"tool_call.completed", "tool_call.failed"}:
+            label = payload.get("display_name") or payload.get("tool")
+            status = "失败" if event.type == "tool_call.failed" else "完成"
+            summary = str(payload.get("summary") or "")
+            if not self.verbose:
+                summary = _truncate(summary, 180)
+            bits = [f"工具{status}: {label}"]
+            if summary:
+                bits.append(summary)
+            if self.verbose and payload.get("artifact"):
+                bits.append(f"artifact={payload.get('artifact')}")
+            if self.verbose and payload.get("truncated"):
+                bits.append("truncated")
+            return " · ".join(bits)
+        if event.type == "approval.required":
+            return f"等待批准: {payload.get('tool')}"
+        if event.type == "approval.resolved":
+            state = "已批准" if payload.get("approved") else "已拒绝"
+            auto = " · auto" if payload.get("auto") else ""
+            return f"{state}: {payload.get('tool')}{auto}"
+        if event.type == "run.cancelled":
+            return "运行已取消"
+        if event.type == "run.failed":
+            self._failed_runs.add(event.run_id)
+            return f"运行失败: {payload.get('error_type')}: {payload.get('message')}"
+
+        if not self.verbose:
+            return None
+
+        if event.type == "context.usage":
+            return f"context: {payload.get('current_tokens')}/{payload.get('budget')} tokens"
+        if event.type == "model.request.started":
+            return f"第 {payload.get('iteration')} 轮请求模型: {payload.get('model')}"
+        if event.type == "model.request.completed":
+            if payload.get("empty_reply"):
+                debug = _json_preview(payload.get("response_debug") or {}, limit=1200)
+                return f"第 {payload.get('iteration')} 轮模型返回空回答: {debug}"
+            usage = payload.get("usage") or {}
+            return (
+                f"第 {payload.get('iteration')} 轮模型返回 "
+                f"{payload.get('tool_call_count', 0)} 个工具调用 · "
+                f"{payload.get('elapsed_ms')}ms · usage={usage}"
+            )
+        return None
+
+    def print_compaction_if_needed(
+        self,
+        *,
+        run_id: str,
+        did_compact: bool,
+        compact_message: str | None,
+    ) -> None:
+        if not did_compact or not compact_message or run_id in self._compacted_runs:
+            return
+        self._compacted_runs.add(run_id)
+        self.info(f"已自动压缩: {compact_message}")
+
+    def failed_run_seen(self, run_id: str) -> bool:
+        return run_id in self._failed_runs
+
+    def print_reply(self, reply: str) -> None:
+        visible = reply if reply.strip() else "（模型返回空回复）"
+        print(
+            f"\n{self.c('MiniBot ›', 'bold', 'magenta')} {visible}",
+            file=self.stdout,
+        )
+
+    def prompt_approval(
+        self,
+        request: ApprovalRequest,
+        cancel_event: threading.Event | None,
+    ) -> bool:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunCancelled("run cancelled while waiting for approval")
+
+        preview = ", ".join(f"{key}={value!r}" for key, value in request.args.items())
+        prompt = (
+            f"  {self.c('批准执行', 'yellow', 'bold')} "
+            f"{self.c(request.tool_name, 'cyan')}({preview}) "
+            f"{self.c('[y/N]', 'gray')} "
+        )
+        while True:
+            answer = input(prompt).strip().lower()
+            if cancel_event is not None and cancel_event.is_set():
+                raise RunCancelled("run cancelled while waiting for approval")
+            if answer in {"y", "yes"}:
+                return True
+            if answer in {"", "n", "no"}:
+                return False
+            self.warn("请输入 y 或 n。")
+            prompt = f"  {self.c('[y/N]', 'gray')} "
 
 
-# ── REPL loop ────────────────────────────────────────────────────
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="minibot",
+        description="MiniBot interactive local agent.",
+        epilog=_format_repl_commands(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show model rounds, context usage, and full tool previews",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="disable ANSI colors; NO_COLOR is also respected",
+    )
+    parser.add_argument("prompt", nargs="*", help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.prompt:
+        print(
+            "MiniBot 只支持交互模式。请直接运行 `minibot` 进入 REPL。",
+            file=sys.stderr,
+        )
+        return 2
+
+    options = CliOptions(verbose=args.verbose, no_color=args.no_color)
+    renderer = CliRenderer(verbose=options.verbose, no_color=options.no_color)
+
+    load_env()
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"配置错误: {exc}", file=sys.stderr)
+        return 1
+
+    startup_logs: list[str] = []
+    try:
+        with _quiet_startup(enabled=not options.verbose):
+            runtime = build_runtime(
+                config=config,
+                log_handler=startup_logs.append if options.verbose else None,
+            )
+    except RuntimeError as exc:
+        print(f"配置错误: {exc}", file=sys.stderr)
+        return 1
+
+    runtime.approval_policy.handler = renderer.prompt_approval
+    try:
+        run_repl(runtime, renderer, startup_logs=startup_logs)
+    finally:
+        runtime.close()
+    return 0
 
 
 def run_repl(
-    controller: RunController,
-    turn_engine: TurnEngine,
-    manager: SessionManager,
-    memory_store: UserMemoryStore,
-    approval_policy: ApprovalPolicy,
-    mcp_host: MCPHost | None = None,
-    config: Config | None = None,
-    run_event_handler: RuntimeEventHandler | None = None,
+    runtime: MiniBotRuntime,
+    renderer: CliRenderer,
+    *,
+    startup_logs: Sequence[str] = (),
 ) -> None:
-    current, resumed = _startup_session(manager)
-    skill_count = len(turn_engine.list_available_skills())
+    session, resumed = runtime.manager.startup_session()
+    current_session_id = session.session_id
+    completion_state = install_slash_completion()
+    try:
+        renderer.print_startup(
+            runtime,
+            session_id=current_session_id,
+            resumed=resumed,
+            startup_logs=startup_logs,
+        )
 
-    ui.print_banner()
-    ui.print_status(
-        current,
-        len(memory_store.list()),
-        resumed,
-        skill_count,
-        mcp_summary=None if mcp_host is None else mcp_host.summary(),
-        approval_mode=approval_policy.mode,
-    )
-    ui.print_help()
-    print(ui.RULE)
+        while True:
+            try:
+                raw = read_user_input(renderer)
+            except EOFError:
+                renderer.info("已退出。")
+                return
+            except KeyboardInterrupt:
+                renderer.info("按 Ctrl+D 或输入 exit 退出。")
+                continue
 
-    while True:
-        try:
-            user_msg = ui.read_user_input()
-        except (EOFError, KeyboardInterrupt):
-            ui.info("\n已退出。")
-            break
+            text = raw.strip()
+            if not text or _is_terminal_escape_sequence(text):
+                continue
 
-        if user_msg.lower() in {"exit", "quit"}:
-            ui.info("已退出。")
-            break
-        if not user_msg or _is_terminal_escape_sequence(user_msg):
-            continue
-
-        if user_msg in {"/help", "help"}:
-            ui.print_help()
-            continue
-        if user_msg in {"/sessions", "/list"}:
-            ui.print_sessions(manager.list_sessions())
-            continue
-        if user_msg == "/new":
-            current = _handle_new(manager)
-            continue
-        if user_msg.startswith("/delete"):
-            current = _handle_delete(user_msg, manager, turn_engine, current)
-            continue
-        if user_msg == "/compact":
-            _handle_compact(current, turn_engine)
-            continue
-        if user_msg == "/mcp" or user_msg.startswith("/mcp "):
-            _handle_mcp(user_msg, mcp_host)
-            continue
-        if user_msg == "/skills":
-            _handle_skills(turn_engine)
-            continue
-        if user_msg == "/permission" or user_msg.startswith("/permission "):
-            _handle_permission(user_msg, approval_policy)
-            continue
-        if user_msg in {"/config", "/settings"}:
-            if config is None:
-                _handle_config(config)
-            else:
-                ui.print_config(config, approval_mode=approval_policy.mode)
-            continue
-        if user_msg.startswith("/memory"):
-            _handle_memory(user_msg, memory_store)
-            continue
-        if user_msg.startswith("/resume"):
-            resumed_session = _handle_resume(user_msg, manager)
-            if resumed_session is not None:
-                current = resumed_session
-            continue
-        if user_msg.startswith("/"):
-            ui.warn(f"未知命令: {user_msg}，用 /help 查看帮助。")
-            continue
-
-        try:
-            result = controller.run_turn(
-                session_id=current.session_id,
-                user_input=user_msg,
-                event_handler=run_event_handler,
+            result = dispatch_command(
+                text,
+                current_session_id,
+                _command_context(runtime),
             )
-            reloaded = manager.load(current.session_id)
-            if reloaded is not None:
-                current = reloaded
-        except KeyboardInterrupt:
-            ui.info("\n已中断当前请求。")
-            continue
-        except Exception as exc:
-            ui.warn(f"运行失败: {exc}")
-            continue
+            if result.handled:
+                if result.current_session_id:
+                    current_session_id = result.current_session_id
+                renderer.render_notices(result.notices)
+                if result.should_exit:
+                    return
+                continue
 
-        if result.did_compact and result.compact_message:
-            ui.info(f"已自动压缩 · {result.compact_message}")
+            current_session_id = _run_prompt(
+                runtime,
+                renderer,
+                current_session_id=current_session_id,
+                user_input=text,
+            )
+    finally:
+        completion_state.restore()
 
-        ui.print_agent_reply(result.reply)
+
+def read_user_input(renderer: CliRenderer) -> str:
+    first_line = input(renderer.input_prompt())
+    pending = _drain_pending_stdin()
+    if pending:
+        return _merge_pasted_input(renderer, f"{first_line}\n{pending}")
+    return first_line.strip()
+
+
+@dataclass
+class CompletionState:
+    old_completer: object | None = None
+    old_delims: str | None = None
+
+    def restore(self) -> None:
+        if readline is None:
+            return
+        try:
+            readline.set_completer(self.old_completer)
+            if self.old_delims is not None:
+                readline.set_completer_delims(self.old_delims)
+        except Exception:
+            pass
+
+
+def install_slash_completion() -> CompletionState:
+    if readline is None:
+        return CompletionState()
+
+    try:
+        old_completer = readline.get_completer()
+        old_delims = readline.get_completer_delims()
+        readline.set_completer_delims(" \t\n")
+        readline.set_completer(_slash_completer)
+        readline_doc = (readline.__doc__ or "").lower()
+        if "libedit" in readline_doc or "editline" in readline_doc:
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+        return CompletionState(old_completer=old_completer, old_delims=old_delims)
+    except Exception:
+        return CompletionState()
+
+
+def _slash_completer(text: str, state: int) -> str | None:
+    if readline is None:
+        return None
+    try:
+        buffer = readline.get_line_buffer()
+        begin = readline.get_begidx()
+    except Exception:
+        return None
+
+    if begin != 0 or not buffer.startswith("/"):
+        return None
+    matches = [command + " " for command in _COMMAND_NAMES if command.startswith(text)]
+    try:
+        return matches[state]
+    except IndexError:
+        return None
+
+
+def _run_prompt(
+    runtime: MiniBotRuntime,
+    renderer: CliRenderer,
+    *,
+    current_session_id: str,
+    user_input: str,
+) -> str:
+    run_id = make_run_id()
+    restore_sigint = _install_run_sigint_handler(runtime, renderer, run_id)
+    try:
+        result = runtime.agent_session.prompt(
+            current_session_id,
+            user_input,
+            run_id=run_id,
+            event_handler=renderer.render_event,
+        )
+    except RunCancelled:
+        return current_session_id
+    except KeyboardInterrupt:
+        runtime.agent_session.abort(run_id)
+        renderer.warn("已请求取消当前运行。")
+        return current_session_id
+    except Exception as exc:
+        if not renderer.failed_run_seen(run_id):
+            renderer.error(f"运行失败: {exc}")
+        return current_session_id
+    finally:
+        restore_sigint()
+
+    renderer.print_compaction_if_needed(
+        run_id=run_id,
+        did_compact=result.did_compact,
+        compact_message=result.compact_message,
+    )
+    renderer.print_reply(result.reply)
+    reloaded = runtime.manager.load(current_session_id)
+    return current_session_id if reloaded is None else reloaded.session_id
+
+
+def _install_run_sigint_handler(
+    runtime: MiniBotRuntime,
+    renderer: CliRenderer,
+    run_id: str,
+):
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+
+    previous = signal.getsignal(signal.SIGINT)
+
+    def _handle_sigint(signum, frame):  # type: ignore[no-untyped-def]
+        del signum, frame
+        if runtime.agent_session.abort(run_id):
+            renderer.warn("已请求取消当前运行。")
+        else:
+            renderer.warn("当前没有可取消的运行。")
+
+    try:
+        signal.signal(signal.SIGINT, _handle_sigint)
+    except (ValueError, OSError):
+        return lambda: None
+
+    def _restore() -> None:
+        try:
+            signal.signal(signal.SIGINT, previous)
+        except (ValueError, OSError):
+            pass
+
+    return _restore
+
+
+@contextmanager
+def _quiet_startup(*, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    previous_disabled = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    with open(os.devnull, "w", encoding="utf-8") as devnull, redirect_stderr(devnull):
+        try:
+            yield
+        finally:
+            logging.disable(previous_disabled)
+
+
+def _command_context(runtime: MiniBotRuntime) -> CommandContext:
+    return CommandContext(
+        sessions=runtime.manager,
+        turn_engine=runtime.turn_engine,
+        memory_store=runtime.memory_store,
+        approval_policy=runtime.approval_policy,
+        mcp_host=runtime.mcp_host,
+        config=runtime.config,
+    )
+
+
+def _is_terminal_escape_sequence(text: str) -> bool:
+    return text.startswith("\x1b") or text.startswith("^[")
+
+
+def _drain_pending_stdin() -> str:
+    if fcntl is None:
+        return ""
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        fd = sys.stdin.fileno()
+        original_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + _PASTE_DRAIN_MAX_SECONDS
+    total = 0
+
+    try:
+        fcntl.fcntl(fd, fcntl.F_SETFL, original_flags | os.O_NONBLOCK)
+        while time.monotonic() < deadline and total < _PASTE_DRAIN_MAX_BYTES:
+            timeout = min(
+                _PASTE_DRAIN_IDLE_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                break
+            try:
+                data = os.read(fd, _PASTE_DRAIN_CHUNK_SIZE)
+            except BlockingIOError:
+                continue
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+    finally:
+        fcntl.fcntl(fd, fcntl.F_SETFL, original_flags)
+
+    if not chunks:
+        return ""
+    encoding = sys.stdin.encoding or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
+def _merge_pasted_input(renderer: CliRenderer, text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    line_count = max(1, len(cleaned.splitlines()))
+    renderer.info(f"检测到 {line_count} 行粘贴内容，已合并为一条请求。")
+    return cleaned
+
+
+def _format_repl_commands() -> str:
+    width = max(len(command) for command, _ in _COMMANDS) + 2
+    lines = ["REPL commands:"]
+    lines.extend(f"  {command.ljust(width)}{description}" for command, description in _COMMANDS)
+    return "\n".join(lines)
+
+
+def _json_preview(value: Any, *, limit: int) -> str:
+    return _truncate(json.dumps(value, ensure_ascii=False, default=str), limit)
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _indent(text: str) -> str:
+    return "\n".join(f"    {line}" if line else "" for line in text.splitlines())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

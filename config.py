@@ -33,10 +33,9 @@ class Config:
     approval_mode: ApprovalMode = "ask"
     max_iterations: int = 20
     max_parallel_tools: int = 4
-    max_history_turns: int = 40
     compact_token_threshold: int = 40000
     reserved_completion_tokens: int = 4096
-    compact_keep_recent: int = 10
+    compact_keep_recent_tokens: int = 16000
 
     def __post_init__(self) -> None:
         if self.approval_mode not in {"ask", "always"}:
@@ -52,6 +51,15 @@ class Config:
         if self.reserved_completion_tokens >= self.compact_token_threshold:
             raise ValueError(
                 "reserved_completion_tokens 必须小于 compact_token_threshold。"
+            )
+        effective_input_budget = (
+            self.compact_token_threshold - self.reserved_completion_tokens
+        )
+        if self.compact_keep_recent_tokens <= 0:
+            raise ValueError("compact_keep_recent_tokens 必须大于 0。")
+        if self.compact_keep_recent_tokens >= effective_input_budget:
+            raise ValueError(
+                "compact_keep_recent_tokens 必须小于有效输入预算。"
             )
 
     @classmethod
@@ -75,10 +83,6 @@ class Config:
                 "MINIBOT_MAX_PARALLEL_TOOLS",
                 cls.max_parallel_tools,
             ),
-            max_history_turns=_get_int(
-                "MINIBOT_MAX_HISTORY_TURNS",
-                cls.max_history_turns,
-            ),
             compact_token_threshold=_get_int(
                 "MINIBOT_COMPACT_TOKEN_THRESHOLD",
                 cls.compact_token_threshold,
@@ -87,9 +91,9 @@ class Config:
                 "MINIBOT_RESERVED_COMPLETION_TOKENS",
                 cls.reserved_completion_tokens,
             ),
-            compact_keep_recent=_get_int(
-                "MINIBOT_COMPACT_KEEP_RECENT",
-                cls.compact_keep_recent,
+            compact_keep_recent_tokens=_get_int(
+                "MINIBOT_COMPACT_KEEP_RECENT_TOKENS",
+                cls.compact_keep_recent_tokens,
             ),
         )
 

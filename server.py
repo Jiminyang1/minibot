@@ -14,7 +14,8 @@ from starlette.requests import Request
 
 from .bootstrap import MiniBotRuntime, build_runtime
 from .config import Config, load_env
-from .runtime.controller import ApprovalBroker, RunCancelled
+from .runtime.agent_session import RunCancelled
+from .runtime.approvals import ApprovalBroker
 from .runtime.events import RuntimeEvent
 from .runtime.events import RuntimeEventEmitter
 from .run_log import make_run_id
@@ -184,15 +185,7 @@ def _message_payload(message: MessageEvent) -> dict[str, Any]:
 
 
 def _load_or_create_current_session(runtime: MiniBotRuntime) -> Session:
-    session = runtime.manager.load_current_session()
-    if session is not None:
-        return session
-    latest = runtime.manager.latest_session(prefer_non_empty=True)
-    if latest is not None:
-        runtime.manager.set_current_session(latest.session_id)
-        return latest
-    session = runtime.manager.create_session()
-    runtime.manager.set_current_session(session.session_id)
+    session, _ = runtime.manager.startup_session()
     return session
 
 
@@ -220,12 +213,12 @@ def create_app(runtime: MiniBotRuntime):
 
         def worker() -> None:
             try:
-                runtime.controller.run_turn(
-                    session_id=request.session_id,
-                    user_input=request.input,
-                    event_handler=sink,
+                runtime.agent_session.prompt(
+                    request.session_id,
+                    request.input,
                     run_id=run_id,
                     mode=request.mode,
+                    event_handler=sink,
                 )
             except RunCancelled:
                 pass
@@ -268,13 +261,12 @@ def create_app(runtime: MiniBotRuntime):
         request: SessionCreateRequest = Body(default_factory=SessionCreateRequest),
     ) -> JSONResponse:
         try:
-            session = runtime.manager.create_session(
+            session = runtime.manager.create_current_session(
                 session_id=request.session_id,
                 title=request.title,
             )
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        runtime.manager.set_current_session(session.session_id)
         return JSONResponse(
             {"session": _session_payload(session)}, status_code=201
         )
@@ -305,6 +297,7 @@ def create_app(runtime: MiniBotRuntime):
         removed = runtime.manager.delete_session(session_id)
         if not removed:
             raise HTTPException(status_code=404, detail="session not found")
+        runtime.context_manager.forget_request_message_count(session_id)
         return JSONResponse({"ok": True, "session_id": session_id})
 
     @app.get("/sessions/{session_id}")
@@ -371,7 +364,7 @@ def create_app(runtime: MiniBotRuntime):
 
     @app.post("/runs/{run_id}/cancel")
     def cancel_run_endpoint(run_id: str) -> JSONResponse:
-        cancelled = runtime.controller.cancel_run(run_id)
+        cancelled = runtime.agent_session.abort(run_id)
         if not cancelled:
             raise HTTPException(
                 status_code=404, detail="run not found or already finished"
@@ -384,7 +377,12 @@ def create_app(runtime: MiniBotRuntime):
         approval_id: str,
         request: ApprovalResolution = Body(...),
     ) -> JSONResponse:
-        matched = runtime.controller.resolve_approval(
+        if runtime.approval_broker is None:
+            raise HTTPException(
+                status_code=500,
+                detail="approval broker is not configured",
+            )
+        matched = runtime.approval_broker.resolve(
             run_id=run_id,
             approval_id=approval_id,
             approved=request.approved,

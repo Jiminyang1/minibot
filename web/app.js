@@ -232,6 +232,7 @@ function renderConversation(messages) {
 }
 
 async function loadSessions() {
+  const previousActive = activeSessionId;
   const response = await fetch("/sessions");
   if (!response.ok) throw new Error(`sessions HTTP ${response.status}`);
   const payload = await response.json();
@@ -246,10 +247,15 @@ async function loadSessions() {
     option.textContent = `${item.session_id} · ${item.title}`;
     sessionSelect.append(option);
   }
-  if (payload.current_session_id) {
-    setActiveSession(payload.current_session_id);
-    sessionSelect.value = payload.current_session_id;
-  }
+  const optionValues = new Set(
+    Array.from(sessionSelect.options, (option) => option.value),
+  );
+  const fallbackSessionId = payload.current_session_id || "current";
+  const nextActive = optionValues.has(previousActive)
+    ? previousActive
+    : fallbackSessionId;
+  setActiveSession(nextActive);
+  sessionSelect.value = nextActive;
 }
 
 async function loadHistory(sessionId = activeSessionId) {
