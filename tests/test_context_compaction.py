@@ -7,12 +7,14 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.runtime.context_manager import (
-    ContextWindowManager,
+from minibot.runtime.compaction import (
     SummaryRequest,
-    estimate_messages_tokens,
     find_cut_point,
     prepare_compaction,
+)
+from minibot.runtime.context_manager import (
+    ContextWindowManager,
+    estimate_messages_tokens,
 )
 from minibot.runtime.messages import (
     format_model_messages_for_summary,

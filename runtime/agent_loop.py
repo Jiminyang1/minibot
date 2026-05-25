@@ -9,11 +9,10 @@ from pathlib import Path
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
-import uuid
 
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
+from ..run_log import make_run_id
 from ..session import MessageEvent
 from ..tools.base import Tool, ToolExecutionContext
 from ..tools.registry import PreparedToolCall, ToolRegistry
@@ -70,11 +69,6 @@ def _tool_label(tool: Tool | None, default: str) -> str:
     if tool is None:
         return default
     return tool.display_name
-
-
-def _make_local_run_id() -> str:
-    now = datetime.now(UTC)
-    return f"r_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
 
 
 @dataclass(frozen=True)
@@ -561,7 +555,7 @@ class AgentLoop:
         if self.event_handler is None:
             return None
         return RuntimeEventEmitter(
-            run_id=run_spec.run_id or _make_local_run_id(),
+            run_id=run_spec.run_id or make_run_id(),
             session_id=run_spec.session_id,
             handler=self.event_handler,
         )

@@ -14,13 +14,11 @@ from ..skills import SkillRegistry
 from ..tools.definitions import ModelToolDefinition
 from ..tools.registry import ToolRegistry
 from .compaction import (
-    CompactionPreparation,
     SummaryRequest,
     append_file_details_to_summary,
     build_summary_request,
     drop_projected_summary_message,
     extract_compaction_details,
-    find_cut_point,
     format_summary_request,
     prepare_compaction,
     summary_projection_offset,
@@ -498,6 +496,8 @@ class ContextWindowManager:
     ) -> int:
         if observed_input_tokens is None:
             return self._estimate_request_tokens(built)
+        # This intentionally reads without taking _request_counts_lock. A stale
+        # or missing baseline only falls back to the full estimate path.
         previous_count = self._request_message_counts.get(session_id)
         if previous_count is None or previous_count > len(projected_messages):
             return max(observed_input_tokens, self._estimate_request_tokens(built))
