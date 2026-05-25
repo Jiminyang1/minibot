@@ -7,10 +7,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.runtime.messages import (
-    AgentMessage,
     ModelMessage,
     ModelToolCall,
-    agent_message_to_session,
     format_model_messages_for_summary,
     model_message_to_openai,
     session_message_to_model,
@@ -78,19 +76,25 @@ class RuntimeMessageConversionTests(unittest.TestCase):
             "thinking",
         )
 
-    def test_agent_message_persists_openai_compatible_tool_call_shape(self) -> None:
-        event = agent_message_to_session(
-            AgentMessage.create(
-                role="assistant",
-                content="",
-                tool_calls=[
-                    ModelToolCall(
-                        id="call_1",
-                        name="search_files",
-                        arguments='{"query":"needle"}',
+    def test_message_event_persists_openai_compatible_tool_call_shape(self) -> None:
+        event = MessageEvent.create(
+            role="assistant",
+            content="",
+            tool_calls=[
+                model_message_to_openai(
+                    ModelMessage.create(
+                        role="assistant",
+                        content="",
+                        tool_calls=[
+                            ModelToolCall(
+                                id="call_1",
+                                name="search_files",
+                                arguments='{"query":"needle"}',
+                            )
+                        ],
                     )
-                ],
-            )
+                )["tool_calls"][0]
+            ],
         )
 
         self.assertEqual(event.tool_calls[0]["type"], "function")
@@ -119,7 +123,6 @@ class RuntimeMessageConversionTests(unittest.TestCase):
 
         self.assertIn("USER: hi", formatted)
         self.assertIn('ASSISTANT_TOOL_CALL: echo({"x":1})', formatted)
-        self.assertIn('TOOL: {"ok":true}', formatted)
         self.assertIn('TOOL_RESULT[echo]: {"ok":true}', formatted)
         self.assertIn("ASSISTANT: done", formatted)
 

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..session import MessageEvent
 
+SUMMARY_TOOL_RESULT_MAX_CHARS = 2000
+
 
 @dataclass(frozen=True)
 class ModelToolCall:
@@ -50,64 +52,6 @@ class ModelMessage:
         )
 
 
-@dataclass(frozen=True)
-class AgentMessage:
-    """One model-facing message emitted by the agent loop."""
-
-    role: str
-    content: str
-    tool_calls: list[ModelToolCall] | None = None
-    tool_call_id: str | None = None
-    name: str | None = None
-    reasoning_content: str | None = None
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        role: str,
-        content: str,
-        tool_calls: list[ModelToolCall] | None = None,
-        tool_call_id: str | None = None,
-        name: str | None = None,
-        reasoning_content: str | None = None,
-    ) -> "AgentMessage":
-        return cls(
-            role=role,
-            content=content,
-            tool_calls=_coerce_model_tool_calls(tool_calls),
-            tool_call_id=tool_call_id,
-            name=name,
-            reasoning_content=reasoning_content,
-        )
-
-    def with_content(self, content: str) -> "AgentMessage":
-        return AgentMessage(
-            role=self.role,
-            content=content,
-            tool_calls=self.tool_calls,
-            tool_call_id=self.tool_call_id,
-            name=self.name,
-            reasoning_content=self.reasoning_content,
-        )
-
-
-def replace_final_assistant_reply(
-    messages: list[AgentMessage],
-    reply: str,
-) -> list[AgentMessage]:
-    """Return messages with the final non-tool assistant reply replaced."""
-
-    updated = list(messages)
-    for index in range(len(updated) - 1, -1, -1):
-        message = updated[index]
-        if message.role != "assistant" or message.tool_calls:
-            continue
-        updated[index] = message.with_content(reply)
-        break
-    return updated
-
-
 def session_message_to_model(
     message: "MessageEvent",
     *,
@@ -125,19 +69,6 @@ def session_message_to_model(
         tool_call_id=message.tool_call_id,
         tool_name=message.name,
         reasoning_content=reasoning_content,
-    )
-
-
-def agent_message_to_session(message: AgentMessage) -> "MessageEvent":
-    from ..session import MessageEvent
-
-    return MessageEvent.create(
-        role=message.role,
-        content=message.content,
-        tool_calls=_openai_tool_calls_from_model(message.tool_calls),
-        tool_call_id=message.tool_call_id,
-        name=message.name,
-        reasoning_content=message.reasoning_content,
     )
 
 
@@ -176,14 +107,18 @@ def model_messages_to_openai(
     ]
 
 
-def format_model_messages_for_summary(messages: list[ModelMessage]) -> str:
+def format_model_messages_for_summary(
+    messages: list[ModelMessage],
+    *,
+    max_tool_result_chars: int = SUMMARY_TOOL_RESULT_MAX_CHARS,
+) -> str:
     """Flatten internal model messages into a readable summary transcript."""
 
     lines: list[str] = []
     for message in messages:
         role = message.role.upper()
         content = message.content.strip()
-        if content:
+        if content and message.role != "tool":
             lines.append(f"{role}: {content}")
         for call in message.tool_calls or []:
             lines.append(
@@ -191,8 +126,18 @@ def format_model_messages_for_summary(messages: list[ModelMessage]) -> str:
             )
         if message.role == "tool":
             name = message.tool_name or "tool"
-            lines.append(f"TOOL_RESULT[{name}]: {content}")
+            lines.append(
+                f"TOOL_RESULT[{name}]: "
+                f"{_truncate_tool_result(content, max_tool_result_chars)}"
+            )
     return "\n".join(lines)
+
+
+def _truncate_tool_result(content: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content
+    omitted = len(content) - max_chars
+    return f"{content[:max_chars]}\n\n[... {omitted} characters truncated for summary]"
 
 
 def _model_tool_calls_from_openai(
