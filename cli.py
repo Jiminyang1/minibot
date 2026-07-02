@@ -48,6 +48,7 @@ _PASTE_DRAIN_MAX_SECONDS = 0.35
 _PASTE_DRAIN_CHUNK_SIZE = 4096
 _PASTE_DRAIN_MAX_BYTES = 64 * 1024
 _COMMAND_NAMES = tuple(dict.fromkeys(command.split()[0] for command, _ in _COMMANDS))
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class CliRenderer:
         )
         self._compacted_runs: set[str] = set()
         self._failed_runs: set[str] = set()
+        self._status_line = StatusLine(self, enabled=self.stdout.isatty() and not verbose)
 
     def c(self, text: str, *styles: str) -> str:
         if not self.use_color:
@@ -134,15 +136,19 @@ class CliRenderer:
                 self.info(line)
 
     def info(self, message: str) -> None:
+        self.clear_status()
         print(self.c(f"  {message}", "gray"), file=self.stdout)
 
     def success(self, message: str) -> None:
+        self.clear_status()
         print(self.c(f"  {message}", "green"), file=self.stdout)
 
     def warn(self, message: str) -> None:
+        self.clear_status()
         print(self.c(f"  {message}", "yellow"), file=self.stdout)
 
     def error(self, message: str) -> None:
+        self.clear_status()
         print(self.c(f"  {message}", "red"), file=self.stdout)
 
     def render_notice(self, notice: CommandNotice) -> None:
@@ -165,10 +171,12 @@ class CliRenderer:
     def render_event(self, event: RuntimeEvent) -> None:
         message = self.format_event(event)
         if message:
+            self.clear_status()
             print(
                 f"  {self.c('›', 'dim')} {self.c(message, 'dim')}",
                 file=self.stdout,
             )
+        self.update_status_from_event(event)
 
     def format_event(self, event: RuntimeEvent) -> str | None:
         payload = event.payload
@@ -242,11 +250,50 @@ class CliRenderer:
         return run_id in self._failed_runs
 
     def print_reply(self, reply: str) -> None:
+        self.clear_status()
         visible = reply if reply.strip() else "（模型返回空回复）"
         print(
             f"\n{self.c('MiniBot ›', 'bold', 'magenta')} {visible}",
             file=self.stdout,
         )
+
+    def start_status(self, message: str = "thinking") -> None:
+        self._status_line.start(message)
+
+    def update_status(self, message: str) -> None:
+        self._status_line.update(message)
+
+    def clear_status(self) -> None:
+        self._status_line.clear()
+
+    def stop_status(self) -> None:
+        self._status_line.stop()
+
+    def update_status_from_event(self, event: RuntimeEvent) -> None:
+        payload = event.payload
+        if event.type == "run.started":
+            self.update_status("thinking")
+        elif event.type == "model.request.started":
+            iteration = payload.get("iteration")
+            self.update_status(f"thinking · round {iteration}")
+        elif event.type == "model.request.completed":
+            tool_count = payload.get("tool_call_count", 0)
+            self.update_status("drafting" if tool_count == 0 else f"planning {tool_count} tool(s)")
+        elif event.type == "tool_call.started":
+            label = payload.get("display_name") or payload.get("tool") or "tool"
+            self.update_status(f"running {label}")
+        elif event.type in {"tool_call.completed", "tool_call.failed"}:
+            self.update_status("thinking")
+        elif event.type == "approval.required":
+            self.update_status(f"waiting approval · {payload.get('tool')}")
+        elif event.type == "approval.resolved":
+            self.update_status("thinking")
+        elif event.type == "context.compacted":
+            self.update_status("compacting context")
+        elif event.type == "message.completed":
+            self.update_status("ready")
+        elif event.type in {"run.completed", "run.failed", "run.cancelled"}:
+            self.clear_status()
 
     def prompt_approval(
         self,
@@ -256,6 +303,7 @@ class CliRenderer:
         if cancel_event is not None and cancel_event.is_set():
             raise RunCancelled("run cancelled while waiting for approval")
 
+        self.clear_status()
         preview = ", ".join(f"{key}={value!r}" for key, value in request.args.items())
         prompt = (
             f"  {self.c('批准执行', 'yellow', 'bold')} "
@@ -272,6 +320,76 @@ class CliRenderer:
                 return False
             self.warn("请输入 y 或 n。")
             prompt = f"  {self.c('[y/N]', 'gray')} "
+
+
+class StatusLine:
+    """Single-line spinner that never persists in transcript output."""
+
+    def __init__(self, renderer: CliRenderer, *, enabled: bool) -> None:
+        self.renderer = renderer
+        self.enabled = enabled
+        self._message = ""
+        self._active = False
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def start(self, message: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._message = message
+            self._active = True
+            self._stop_event.clear()
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._loop,
+                    name="minibot-cli-status",
+                    daemon=True,
+                )
+                self._thread.start()
+
+    def update(self, message: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._message = message
+            should_start = not self._active
+        if should_start:
+            self.start(message)
+
+    def clear(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            active = self._active
+            self._active = False
+            if active:
+                self.renderer.stdout.write("\r\x1b[2K")
+                self.renderer.stdout.flush()
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self.clear()
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.5)
+
+    def _loop(self) -> None:
+        frame_index = 0
+        while not self._stop_event.wait(0.12):
+            with self._lock:
+                active = self._active
+                message = self._message
+                if not active:
+                    continue
+                frame = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
+                frame_index += 1
+                text = self.renderer.c(f"{frame} {message}", "gray")
+                self.renderer.stdout.write(f"\r\x1b[2K{text}")
+                self.renderer.stdout.flush()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -385,6 +503,7 @@ def run_repl(
                 user_input=text,
             )
     finally:
+        renderer.stop_status()
         completion_state.restore()
 
 
@@ -458,6 +577,7 @@ def _run_prompt(
 ) -> str:
     run_id = make_run_id()
     restore_sigint = _install_run_sigint_handler(runtime, renderer, run_id)
+    renderer.start_status("thinking")
     try:
         result = runtime.agent_session.prompt(
             current_session_id,
@@ -466,18 +586,22 @@ def _run_prompt(
             event_handler=renderer.render_event,
         )
     except RunCancelled:
+        renderer.clear_status()
         return current_session_id
     except KeyboardInterrupt:
         runtime.agent_session.abort(run_id)
+        renderer.clear_status()
         renderer.warn("已请求取消当前运行。")
         return current_session_id
     except Exception as exc:
+        renderer.clear_status()
         if not renderer.failed_run_seen(run_id):
             renderer.error(f"运行失败: {exc}")
         return current_session_id
     finally:
         restore_sigint()
 
+    renderer.clear_status()
     renderer.print_compaction_if_needed(
         run_id=run_id,
         did_compact=result.did_compact,

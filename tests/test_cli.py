@@ -78,6 +78,11 @@ class _Memory:
         return False
 
 
+class _TtyStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 class CliTests(unittest.TestCase):
     def _runtime(self, manager: SessionManager):
         return types.SimpleNamespace(
@@ -146,6 +151,34 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("请求模型", output)
         self.assertIn("工具: read_file", output)
         self.assertNotIn('"path"', output)
+
+    def test_renderer_status_line_is_disabled_for_non_tty(self) -> None:
+        out = io.StringIO()
+        renderer = CliRenderer(no_color=True, stdout=out)
+
+        renderer.start_status("thinking")
+        renderer.update_status("running tool")
+        renderer.clear_status()
+
+        self.assertEqual(out.getvalue(), "")
+
+    def test_renderer_status_line_updates_from_events_for_tty(self) -> None:
+        out = _TtyStringIO()
+        renderer = CliRenderer(no_color=True, stdout=out)
+        emitter = RuntimeEventEmitter(run_id="r_test", session_id="s_test")
+
+        renderer.start_status("thinking")
+        renderer.render_event(
+            emitter.emit(
+                "tool_call.started",
+                {"tool": "read_file", "display_name": "read_file", "args": {}},
+            )
+        )
+
+        self.assertTrue(renderer._status_line._active)
+        self.assertEqual(renderer._status_line._message, "running read_file")
+        self.assertIn("工具: read_file", out.getvalue())
+        renderer.stop_status()
 
     def test_renderer_verbose_shows_context_model_and_tool_args(self) -> None:
         out = io.StringIO()
