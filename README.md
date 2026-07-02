@@ -22,15 +22,16 @@ flowchart TB
         Web[Web / SSE]
     end
 
-    subgraph lifecycle [生命周期]
+    subgraph core [核心]
         AS[AgentSession]
-        TE[TurnEngine]
+        AL[AgentLoop]
     end
 
-    subgraph core [核心循环]
-        AL[AgentLoop]
-        CWM[ContextWindowManager]
-        TR[TurnRecorder]
+    subgraph services [服务]
+        CB[ContextBuilder]
+        TB[TokenBudget]
+        CP[Compactor]
+        GATE[ToolApprovalGate]
     end
 
     subgraph infra [基础设施]
@@ -40,20 +41,26 @@ flowchart TB
         LLM[LLMClient]
     end
 
+    subgraph subscribers [事件订阅者]
+        EV[事件流]
+        FOLD[RunLogFold → runs.jsonl]
+    end
+
     CLI --> AS
     Web --> AS
-    AS --> TE
-    TE --> AL
-    TE --> CWM
-    TE --> TR
+    AS --> AL
+    AL --> CB
+    AL --> TB
+    AL --> CP
+    AL --> GATE
     AL --> LLM
     AL --> TRG
-    CWM --> SM
-    TR --> SM
-    bootstrap[bootstrap.py] --> entry
-    bootstrap --> lifecycle
-    bootstrap --> core
-    bootstrap --> infra
+    AL --> SM
+    CP --> SM
+    AL -. emit .-> EV
+    EV --> FOLD
+    EV --> CLI
+    EV --> Web
     TRG --> Local[Local Tools]
     TRG --> Proxy[MCPToolProxy]
     Proxy --> MCP
@@ -61,11 +68,14 @@ flowchart TB
 
 **单轮数据流**
 
-1. `AgentSession.prompt` — run 生命周期、会话锁、取消、`run.*` 事件
-2. `TurnEngine` 向 `AgentLoop` 注入两个回调：
-   - `prepare_next_turn()` → `ContextWindowManager` 投影上下文、组装 prompt、必要时 compact
-   - `on_message()` → `TurnRecorder` 逐条 append 到 session
-3. `AgentLoop` 每个 iteration：`prepare_next_turn` → LLM → hooks → `ToolRegistry` → `on_message`
+1. `AgentSession.prompt` — run 生命周期、会话锁、取消、`run.*` 事件、事件扇出
+2. `AgentLoop.run_turn` 是唯一 owner，每个 iteration 顺序执行：
+   - ① 预算检查（`TokenBudget`），超预算则 `Compactor.reduce`（压缩 + 即时落盘 + 发事件）
+   - ② `ContextBuilder.build` 纯函数拼装请求
+   - ③ LLM 调用
+   - ④ 工具执行（审批经注入的 `ToolApprovalGate`，并发批次由工具属性决定）
+   - ⑤ 追加消息（session 落盘 + 事件）
+3. 一切可观测事实只走事件流；`runs.jsonl` 是 `RunLogFold` 对事件流的 fold
 4. 大 tool 输出经 `ToolOutputMaterializer` 落盘为 artifact，模型只收到引用
 
 **工具扇出**
@@ -81,18 +91,28 @@ ToolRegistry
 
 | 原则 | 说明 |
 |---|---|
+| 单一 owner | `AgentLoop.run_turn` 从上到下就是一个 turn 的完整生命周期 |
+| 编排与机制分离 | 循环只做"判断 + 调用具名组件"；机制在各自模块 |
+| 单一输出通道 | RuntimeEvent 是唯一出口，UI / run log 都是订阅者 |
 | 同步 turn loop | 主循环同步；MCP asyncio 隔离在后台线程 |
-| Append-only session | `messages.jsonl` 是唯一真相源；compact 只追加 entry |
+| Append-only session | `messages.jsonl` 是唯一真相源；compact 只追加 entry 且即时落盘 |
 | 投影视图 | `SessionContextProjector` 从 entry 生成模型可见消息 |
 | 循环内上下文 | 每 iteration 重投影，非 turn 开始前一次性拼好 |
-| 窄 hook 接口 | 仅暴露 `run_id` / `session_id` / `workspace` / `mode` / `emitter` / `cancel_event` |
+
+设计取舍的完整论证见 [docs/core-philosophy.md](docs/core-philosophy.md)。
 
 ## 模块
 
 | 路径 | 职责 |
 |---|---|
 | `bootstrap.py` | Composition root，组装 runtime |
-| `runtime/` | `AgentSession` · `TurnEngine` · `AgentLoop` · `ContextWindowManager` · hooks · events |
+| `runtime/agent_session.py` | run 生命周期、锁、取消、事件扇出 |
+| `runtime/agent_loop.py` | 核心循环（唯一 owner） |
+| `runtime/context_builder.py` | 纯函数请求拼装（system prompt / memory / skills） |
+| `runtime/budget.py` | token 预算与增量估算 |
+| `runtime/compactor.py` | 压缩机制 + 即时落盘 |
+| `runtime/approval.py` | 审批策略与注入式审批门 |
+| `runtime/run_log_fold.py` | runs.jsonl = 事件流的 fold |
 | `session/` | Append-only 持久化 + `SessionContextProjector` |
 | `tools/` | 本地 `Tool` 实现与 `ToolRegistry` |
 | `mcp_host/` | MCP 客户端、transport、`MCPToolProxy` |
@@ -101,7 +121,7 @@ ToolRegistry
 | `user_memory.py` | 全局长期记忆 |
 | `cli.py` / `server.py` | CLI 与 Web 入口 |
 
-Compact 规则在 `runtime/compaction.py`，token 估算在 `runtime/token_budget.py`。
+Compact 切点规则在 `runtime/compaction.py`（纯函数），token 估算在 `runtime/token_budget.py`。
 
 ## 快速开始
 

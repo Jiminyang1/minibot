@@ -10,5 +10,7 @@ __pycache__/
 # Local learning/review notes, not part of product commits.
 learn.md
 learn/
-docs/
+docs/*
+# Design rationale for the core runtime is product documentation, not a note.
+!docs/core-philosophy.md
 examples/

@@ -22,15 +22,16 @@ flowchart TB
         Web[Web / SSE]
     end
 
-    subgraph lifecycle [Lifecycle]
+    subgraph core [Core]
         AS[AgentSession]
-        TE[TurnEngine]
+        AL[AgentLoop]
     end
 
-    subgraph core [Core loop]
-        AL[AgentLoop]
-        CWM[ContextWindowManager]
-        TR[TurnRecorder]
+    subgraph services [Services]
+        CB[ContextBuilder]
+        TB[TokenBudget]
+        CP[Compactor]
+        GATE[ToolApprovalGate]
     end
 
     subgraph infra [Infrastructure]
@@ -40,20 +41,26 @@ flowchart TB
         LLM[LLMClient]
     end
 
+    subgraph subscribers [Event subscribers]
+        EV[Event stream]
+        FOLD[RunLogFold → runs.jsonl]
+    end
+
     CLI --> AS
     Web --> AS
-    AS --> TE
-    TE --> AL
-    TE --> CWM
-    TE --> TR
+    AS --> AL
+    AL --> CB
+    AL --> TB
+    AL --> CP
+    AL --> GATE
     AL --> LLM
     AL --> TRG
-    CWM --> SM
-    TR --> SM
-    bootstrap[bootstrap.py] --> entry
-    bootstrap --> lifecycle
-    bootstrap --> core
-    bootstrap --> infra
+    AL --> SM
+    CP --> SM
+    AL -. emit .-> EV
+    EV --> FOLD
+    EV --> CLI
+    EV --> Web
     TRG --> Local[Local Tools]
     TRG --> Proxy[MCPToolProxy]
     Proxy --> MCP
@@ -61,11 +68,14 @@ flowchart TB
 
 **Per-turn flow**
 
-1. `AgentSession.prompt` — run lifecycle, per-session lock, cancellation, `run.*` events
-2. `TurnEngine` injects two callbacks into `AgentLoop`:
-   - `prepare_next_turn()` → `ContextWindowManager` projects context, builds prompt, compacts if needed
-   - `on_message()` → `TurnRecorder` appends each message to the session log
-3. Each `AgentLoop` iteration: `prepare_next_turn` → LLM → hooks → `ToolRegistry` → `on_message`
+1. `AgentSession.prompt` — run lifecycle, per-session lock, cancellation, `run.*` events, event fan-out
+2. `AgentLoop.run_turn` is the single owner; each iteration runs in order:
+   - ① budget check (`TokenBudget`); if over budget, `Compactor.reduce` (compact + persist + emit)
+   - ② `ContextBuilder.build` assembles the request as a pure function
+   - ③ LLM call
+   - ④ tool execution (approval via the injected `ToolApprovalGate`; batching from tool properties)
+   - ⑤ message append (session persistence + event)
+3. Every observable fact leaves through the event stream; `runs.jsonl` is `RunLogFold`'s fold over it
 4. Large tool output is stored as artifacts via `ToolOutputMaterializer`; the model sees references only
 
 **Tool fan-out**
@@ -81,18 +91,28 @@ ToolRegistry
 
 | Principle | Detail |
 |---|---|
+| Single owner | `AgentLoop.run_turn` reads top-to-bottom as one turn's full lifecycle |
+| Orchestration vs mechanics | The loop only decides and delegates; mechanics live in named components |
+| One output channel | RuntimeEvent is the sole exit; UIs and the run log are subscribers |
 | Sync turn loop | Main loop is synchronous; MCP asyncio lives in background threads |
-| Append-only session | `messages.jsonl` is the source of truth; compaction only appends entries |
+| Append-only session | `messages.jsonl` is the source of truth; compaction appends and persists immediately |
 | Projected view | `SessionContextProjector` derives model-visible messages from entries |
 | In-loop context | Context is rebuilt every iteration, not pre-assembled once per turn |
-| Narrow hook API | Hooks see only `run_id`, `session_id`, `workspace`, `mode`, `emitter`, `cancel_event` |
+
+The full design rationale lives in [docs/core-philosophy.md](docs/core-philosophy.md) (Chinese).
 
 ## Modules
 
 | Path | Role |
 |---|---|
 | `bootstrap.py` | Composition root; wires the runtime |
-| `runtime/` | `AgentSession`, `TurnEngine`, `AgentLoop`, `ContextWindowManager`, hooks, events |
+| `runtime/agent_session.py` | Run lifecycle, locks, cancellation, event fan-out |
+| `runtime/agent_loop.py` | The core loop (single owner) |
+| `runtime/context_builder.py` | Pure request assembly (system prompt / memory / skills) |
+| `runtime/budget.py` | Token budget and incremental estimation |
+| `runtime/compactor.py` | Compaction mechanics + immediate persistence |
+| `runtime/approval.py` | Approval policy and the injected approval gate |
+| `runtime/run_log_fold.py` | runs.jsonl as a fold over the event stream |
 | `session/` | Append-only persistence + `SessionContextProjector` |
 | `tools/` | Local `Tool` implementations and `ToolRegistry` |
 | `mcp_host/` | MCP client, transports, `MCPToolProxy` |
@@ -101,7 +121,7 @@ ToolRegistry
 | `user_memory.py` | Global long-term memory |
 | `cli.py` / `server.py` | CLI and Web entry points |
 
-Compaction rules live in `runtime/compaction.py`; token estimation in `runtime/token_budget.py`.
+Cut-point rules live in `runtime/compaction.py` (pure functions); token estimation in `runtime/token_budget.py`.
 
 ## Quick start
 
