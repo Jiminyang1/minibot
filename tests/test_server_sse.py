@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - depends on optional test dependency in
     TestClient = None
 
 from minibot.runtime.events import RuntimeEventEmitter
-from minibot.runtime.turn_engine import TurnResult
+from minibot.runtime.agent_loop import TurnOutcome
 from minibot.session import MessageEvent, SessionManager
 from minibot.server import create_app
 
@@ -30,9 +30,7 @@ class _FakeAgentSession:
         *,
         event_handler,
         run_id=None,
-        mode="default",
     ):
-        del mode
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",
             session_id=session_id or "s_test",
@@ -43,7 +41,7 @@ class _FakeAgentSession:
         emitter.emit("tool_call.completed", {"tool": "read_file", "ok": True})
         emitter.emit("message.completed", {"content": "ok"})
         emitter.emit("run.completed", {"reply": "ok"})
-        return TurnResult(reply="ok", did_compact=False)
+        return TurnOutcome(reply="ok", did_compact=False)
 
     def abort(self, run_id):
         self.cancelled = run_id
@@ -69,6 +67,7 @@ def _runtime(
         agent_session=agent_session or _FakeAgentSession(),
         approval_broker=approval_broker or _FakeApprovalBroker(),
         manager=manager,
+        budget=types.SimpleNamespace(forget=lambda session_id: None),
     )
 
 

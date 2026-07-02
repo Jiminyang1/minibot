@@ -3,24 +3,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from minibot.runtime.budget import TokenBudget
 from minibot.runtime.compaction import (
     SummaryRequest,
     find_cut_point,
     prepare_compaction,
 )
-from minibot.runtime.context_manager import (
-    ContextWindowManager,
-    estimate_messages_tokens,
-)
+from minibot.runtime.compactor import Compactor
+from minibot.runtime.context_builder import ContextBuilder
 from minibot.runtime.messages import (
     format_model_messages_for_summary,
     session_message_to_model,
 )
-from minibot.session import MessageEvent, Session
+from minibot.runtime.token_budget import estimate_messages_tokens
+from minibot.session import MessageEvent, Session, SessionManager
 from minibot.tools.base import Tool, ToolExecutionContext
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.result import ToolOutput
@@ -58,6 +59,61 @@ class _DummyTool(Tool):
     def execute(self, *, context: ToolExecutionContext, **kwargs: object) -> ToolOutput:
         del context, kwargs
         return ToolOutput.success("ok")
+
+
+class _Harness:
+    """A Compactor wired to a real on-disk session for one test."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        tool_registry: ToolRegistry | None = None,
+        compact_token_threshold: int = 5000,
+        reserved_completion_tokens: int = 20,
+        keep_recent_tokens: int = 1,
+        summarizer=None,
+    ) -> None:
+        self.manager = SessionManager(workspace)
+        self.session = self.manager.create_session("s_test")
+        registry = tool_registry or ToolRegistry()
+        self.context_builder = ContextBuilder(
+            base_system_prompt="BASE",
+            memory_store=None,
+            skill_registry=None,
+            tool_registry=registry,
+        )
+        self.budget = TokenBudget(
+            compact_token_threshold=compact_token_threshold,
+            reserved_completion_tokens=reserved_completion_tokens,
+        )
+        self.compactor = Compactor(
+            session_manager=self.manager,
+            context_builder=self.context_builder,
+            budget=self.budget,
+            tool_registry=registry,
+            summarizer=summarizer or (lambda request: "summary"),
+            keep_recent_tokens=keep_recent_tokens,
+        )
+
+    def add(self, *messages: MessageEvent) -> None:
+        from minibot.session import SessionEntry
+
+        for message in messages:
+            self.session.add_message(message)
+            self.manager.append_entries(
+                self.session.session_id, [SessionEntry.from_message(message)]
+            )
+
+    def persisted_entry_types(self) -> list[str]:
+        path = (
+            self.manager.sessions_dir / self.session.session_id / "messages.jsonl"
+        )
+        return [
+            json.loads(line)["type"]
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
 
 class ContextCompactionTests(unittest.TestCase):
@@ -132,251 +188,245 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIn("characters truncated for summary", formatted)
         self.assertLess(len(formatted), 2100)
 
-    def test_build_context_appends_compaction_entry_at_token_cut_point(self) -> None:
-        session = Session("s_test")
-        session.add_message(MessageEvent.create(role="user", content="old " * 2000))
-        session.add_message(MessageEvent.create(role="assistant", content="answer"))
-        current_user = MessageEvent.create(role="user", content="current question")
-        session.add_message(current_user)
-        summarized_roles: list[str] = []
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=ToolRegistry(),
-            compact_token_threshold=5000,
-            reserved_completion_tokens=20,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: summarized_roles.extend(
-                message.role for message in request.messages
+    def test_reduce_appends_and_persists_compaction_entry_at_cut_point(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summarized_roles: list[str] = []
+            harness = _Harness(
+                Path(tmpdir),
+                summarizer=lambda request: summarized_roles.extend(
+                    message.role for message in request.messages
+                )
+                or "summary",
             )
-            or "summary",
-        )
+            harness.add(
+                MessageEvent.create(role="user", content="old " * 2000),
+                MessageEvent.create(role="assistant", content="answer"),
+                MessageEvent.create(role="user", content="current question"),
+            )
 
-        context = manager.build_context(session=session, observed_input_tokens=10000)
+            message = harness.compactor.reduce(harness.session, tokens_before=10000)
 
-        self.assertTrue(context.did_compact)
-        pending_entries = session.pop_pending_compaction_entries()
-        self.assertEqual(len(pending_entries), 1)
-        pending = pending_entries[0]
-        self.assertEqual(pending.type, "compaction")
-        self.assertIsNotNone(pending.first_kept_entry_id)
-        self.assertIn("user", summarized_roles)
-        self.assertEqual(session.entries[-1], pending)
-        self.assertIn(
-            "[Summary of earlier conversation]\nsummary",
-            [message.content for message in session.messages],
-        )
+            self.assertIn("已压缩", message)
+            self.assertIn("user", summarized_roles)
+            self.assertEqual(harness.session.entries[-1].type, "compaction")
+            self.assertIsNotNone(harness.session.entries[-1].first_kept_entry_id)
+            self.assertIn(
+                "[Summary of earlier conversation]\nsummary",
+                [msg.content for msg in harness.session.messages],
+            )
+            # Persistence happens inside reduce — no pending state to flush.
+            self.assertEqual(
+                harness.persisted_entry_types(),
+                ["message", "message", "message", "compaction"],
+            )
 
     def test_oversized_read_only_tool_tail_is_dropped_as_one_block(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_DummyTool(read_only=True))
-        session = Session("s_test")
-        user = MessageEvent.create(role="user", content="run echo")
-        assistant = MessageEvent.create(
-            role="assistant",
-            content="",
-            tool_calls=[_tool_call()],
-        )
-        large_tool_content = "alpha beta gamma delta epsilon " * 2000
-        tool = MessageEvent.create(
-            role="tool",
-            content=large_tool_content,
-            tool_call_id="call_1",
-            name="echo",
-        )
-        for message in (user, assistant, tool):
-            session.add_message(message)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_DummyTool(read_only=True))
+            harness = _Harness(
+                Path(tmpdir),
+                tool_registry=registry,
+                compact_token_threshold=2000,
+                reserved_completion_tokens=100,
+                summarizer=lambda request: "summary before tool block",
+            )
+            large_tool_content = "alpha beta gamma delta epsilon " * 2000
+            harness.add(
+                MessageEvent.create(role="user", content="run echo"),
+                MessageEvent.create(
+                    role="assistant", content="", tool_calls=[_tool_call()]
+                ),
+                MessageEvent.create(
+                    role="tool",
+                    content=large_tool_content,
+                    tool_call_id="call_1",
+                    name="echo",
+                ),
+            )
+            tokens_before = harness.budget.estimate(
+                harness.context_builder.build(harness.session.messages)
+            )
 
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=registry,
-            compact_token_threshold=2000,
-            reserved_completion_tokens=100,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: "summary before tool block",
-        )
+            message = harness.compactor.reduce(
+                harness.session, tokens_before=tokens_before
+            )
 
-        context = manager.build_context(session=session)
-
-        self.assertTrue(context.did_compact)
-        self.assertIn("已丢弃过大的只读工具事务块", context.compact_message or "")
-        self.assertEqual(len(session.entries), 4)
-        self.assertEqual(session.entries[-1].type, "compaction")
-        self.assertNotIn(large_tool_content, [message.content for message in session.messages])
-        self.assertIn("summary before tool block", session.messages[0].content)
-        self.assertIn("Omitted oversized read-only tool transaction", session.messages[0].content)
+            self.assertIn("已丢弃过大的只读工具事务块", message)
+            self.assertEqual(len(harness.session.entries), 4)
+            self.assertEqual(harness.session.entries[-1].type, "compaction")
+            self.assertNotIn(
+                large_tool_content,
+                [msg.content for msg in harness.session.messages],
+            )
+            self.assertIn(
+                "summary before tool block", harness.session.messages[0].content
+            )
+            self.assertIn(
+                "Omitted oversized read-only tool transaction",
+                harness.session.messages[0].content,
+            )
+            self.assertEqual(harness.persisted_entry_types()[-1], "compaction")
 
     def test_oversized_non_read_only_tool_tail_fails_instead_of_dropping(self) -> None:
-        registry = ToolRegistry()
-        registry.register(_DummyTool(read_only=False))
-        session = Session("s_test")
-        session.add_message(MessageEvent.create(role="user", content="run echo"))
-        session.add_message(
-            MessageEvent.create(
-                role="assistant",
-                content="",
-                tool_calls=[_tool_call()],
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = ToolRegistry()
+            registry.register(_DummyTool(read_only=False))
+            harness = _Harness(
+                Path(tmpdir),
+                tool_registry=registry,
+                compact_token_threshold=2000,
+                reserved_completion_tokens=100,
             )
-        )
-        session.add_message(
-            MessageEvent.create(
-                role="tool",
-                content="alpha beta gamma delta epsilon " * 2000,
-                tool_call_id="call_1",
-                name="echo",
+            harness.add(
+                MessageEvent.create(role="user", content="run echo"),
+                MessageEvent.create(
+                    role="assistant", content="", tool_calls=[_tool_call()]
+                ),
+                MessageEvent.create(
+                    role="tool",
+                    content="alpha beta gamma delta epsilon " * 2000,
+                    tool_call_id="call_1",
+                    name="echo",
+                ),
             )
-        )
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=registry,
-            compact_token_threshold=2000,
-            reserved_completion_tokens=100,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: "summary",
-        )
+            tokens_before = harness.budget.estimate(
+                harness.context_builder.build(harness.session.messages)
+            )
 
-        with self.assertRaisesRegex(RuntimeError, "包含非只读工具"):
-            manager.build_context(session=session)
+            with self.assertRaisesRegex(RuntimeError, "包含非只读工具"):
+                harness.compactor.reduce(harness.session, tokens_before=tokens_before)
 
     def test_repeated_compaction_passes_previous_summary_and_merges_file_details(self) -> None:
-        session = Session("s_test")
-        read_call = MessageEvent.create(
-            role="assistant",
-            content="",
-            tool_calls=[_tool_call("read_file", '{"path": "a.py"}')],
-        )
-        user = MessageEvent.create(role="user", content="change file")
-        write_call = MessageEvent.create(
-            role="assistant",
-            content="",
-            tool_calls=[_tool_call("edit_file", '{"path": "b.py"}')],
-        )
-        write_result = MessageEvent.create(
-            role="tool",
-            content="ok",
-            tool_call_id="call_1",
-            name="edit_file",
-        )
-        current_user = MessageEvent.create(role="user", content="current")
-        for message in (read_call, user, write_call, write_result, current_user):
-            session.add_message(message)
-        session.compact_with_summary(
-            "previous summary",
-            first_kept_entry_id=user.id,
-            tokens_before=123,
-            details={"read_files": ["old.py"], "modified_files": ["a.py"]},
-        )
-        session.pop_pending_compaction_entries()
-        seen_requests: list[SummaryRequest] = []
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=ToolRegistry(),
-            compact_token_threshold=5000,
-            reserved_completion_tokens=20,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: seen_requests.append(request) or "updated summary",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seen_requests: list[SummaryRequest] = []
+            harness = _Harness(
+                Path(tmpdir),
+                summarizer=lambda request: seen_requests.append(request)
+                or "updated summary",
+            )
+            read_call = MessageEvent.create(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("read_file", '{"path": "a.py"}')],
+            )
+            user = MessageEvent.create(role="user", content="change file")
+            write_call = MessageEvent.create(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("edit_file", '{"path": "b.py"}')],
+            )
+            write_result = MessageEvent.create(
+                role="tool",
+                content="ok",
+                tool_call_id="call_1",
+                name="edit_file",
+            )
+            current_user = MessageEvent.create(role="user", content="current")
+            harness.add(read_call, user, write_call, write_result, current_user)
+            entry = harness.session.compact_with_summary(
+                "previous summary",
+                first_kept_entry_id=user.id,
+                tokens_before=123,
+                details={"read_files": ["old.py"], "modified_files": ["a.py"]},
+            )
+            harness.manager.append_entries(harness.session.session_id, [entry])
 
-        context = manager.build_context(session=session, observed_input_tokens=10000)
+            harness.compactor.reduce(harness.session, tokens_before=10000)
 
-        self.assertTrue(context.did_compact)
-        self.assertEqual(seen_requests[0].previous_summary, "previous summary")
-        pending = session.pop_pending_compaction_entries()[0]
-        self.assertEqual(
-            pending.details,
-            {"read_files": ["old.py"], "modified_files": ["a.py", "b.py"]},
-        )
-        self.assertIn("<read-files>\nold.py\n</read-files>", pending.summary or "")
-        self.assertIn("<modified-files>\na.py\nb.py\n</modified-files>", pending.summary or "")
+            self.assertEqual(seen_requests[0].previous_summary, "previous summary")
+            latest = harness.session.entries[-1]
+            self.assertEqual(latest.type, "compaction")
+            self.assertEqual(
+                latest.details,
+                {"read_files": ["old.py"], "modified_files": ["a.py", "b.py"]},
+            )
+            self.assertIn("<read-files>\nold.py\n</read-files>", latest.summary or "")
+            self.assertIn(
+                "<modified-files>\na.py\nb.py\n</modified-files>", latest.summary or ""
+            )
 
     def test_read_artifact_file_result_updates_read_file_details(self) -> None:
-        session = Session("s_test")
-        read_call = MessageEvent.create(
-            role="assistant",
-            content="",
-            tool_calls=[_tool_call("read_artifact", '{"artifact_id": "art_1"}')],
-        )
-        read_result = MessageEvent.create(
-            role="tool",
-            content=json.dumps(
-                {
-                    "ok": True,
-                    "code": "success",
-                    "summary": "read artifact",
-                    "data": {"kind": "file", "name": "large.py"},
-                    "artifact": None,
-                    "truncated": False,
-                },
-                separators=(",", ":"),
-            ),
-            tool_call_id="call_1",
-            name="read_artifact",
-        )
-        current_user = MessageEvent.create(role="user", content="current")
-        for message in (read_call, read_result, current_user):
-            session.add_message(message)
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=ToolRegistry(),
-            compact_token_threshold=5000,
-            reserved_completion_tokens=20,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: "summary",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = _Harness(Path(tmpdir))
+            read_call = MessageEvent.create(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("read_artifact", '{"artifact_id": "art_1"}')],
+            )
+            read_result = MessageEvent.create(
+                role="tool",
+                content=json.dumps(
+                    {
+                        "ok": True,
+                        "code": "success",
+                        "summary": "read artifact",
+                        "data": {"kind": "file", "name": "large.py"},
+                        "artifact": None,
+                        "truncated": False,
+                    },
+                    separators=(",", ":"),
+                ),
+                tool_call_id="call_1",
+                name="read_artifact",
+            )
+            current_user = MessageEvent.create(role="user", content="current")
+            harness.add(read_call, read_result, current_user)
 
-        context = manager.build_context(session=session, observed_input_tokens=10000)
+            harness.compactor.reduce(harness.session, tokens_before=10000)
 
-        self.assertTrue(context.did_compact)
-        pending = session.pop_pending_compaction_entries()[0]
-        self.assertEqual(
-            pending.details,
-            {"read_files": ["large.py"], "modified_files": []},
-        )
-        self.assertIn("<read-files>\nlarge.py\n</read-files>", pending.summary or "")
+            latest = harness.session.entries[-1]
+            self.assertEqual(
+                latest.details,
+                {"read_files": ["large.py"], "modified_files": []},
+            )
+            self.assertIn("<read-files>\nlarge.py\n</read-files>", latest.summary or "")
 
     def test_tool_drop_summary_skips_projected_previous_summary_message(self) -> None:
-        session = Session("s_test")
-        session.compact_with_summary(
-            "previous summary",
-            first_kept_entry_id=None,
-            tokens_before=123,
-        )
-        session.pop_pending_compaction_entries()
-        prefix_user = MessageEvent.create(role="user", content="new prefix")
-        prefix = [*session.messages, prefix_user]
-        seen_requests: list[SummaryRequest] = []
-        manager = ContextWindowManager(
-            base_system_prompt="BASE",
-            memory_store=None,
-            skill_registry=None,
-            tool_registry=ToolRegistry(),
-            compact_token_threshold=5000,
-            reserved_completion_tokens=20,
-            compact_keep_recent_tokens=1,
-            summarizer=lambda request: seen_requests.append(request) or "updated summary",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seen_requests: list[SummaryRequest] = []
+            harness = _Harness(
+                Path(tmpdir),
+                summarizer=lambda request: seen_requests.append(request)
+                or "updated summary",
+            )
+            entry = harness.session.compact_with_summary(
+                "previous summary",
+                first_kept_entry_id=None,
+                tokens_before=123,
+            )
+            harness.manager.append_entries(harness.session.session_id, [entry])
+            prefix_user = MessageEvent.create(role="user", content="new prefix")
+            prefix = [*harness.session.messages, prefix_user]
 
-        summary = manager._summarize_prefix_before_tool_drop(
-            session,
-            prefix,
-            tool_names=["read_file"],
-            cancel_event=None,
-        )
+            summary = harness.compactor._summarize_prefix_before_tool_drop(
+                harness.session,
+                prefix,
+                tool_names=["read_file"],
+                cancel_event=None,
+            )
 
-        self.assertEqual(seen_requests[0].previous_summary, "previous summary")
-        self.assertEqual([message.content for message in seen_requests[0].messages], ["new prefix"])
-        self.assertNotIn("Summary of earlier conversation", seen_requests[0].messages[0].content)
-        self.assertIn("updated summary", summary)
-        self.assertIn("Omitted oversized read-only tool transaction", summary)
+            self.assertEqual(seen_requests[0].previous_summary, "previous summary")
+            self.assertEqual(
+                [message.content for message in seen_requests[0].messages],
+                ["new prefix"],
+            )
+            self.assertNotIn(
+                "Summary of earlier conversation",
+                seen_requests[0].messages[0].content,
+            )
+            self.assertIn("updated summary", summary)
+            self.assertIn("Omitted oversized read-only tool transaction", summary)
+
+    def test_manual_compact_reports_noop_when_nothing_to_do(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = _Harness(Path(tmpdir), keep_recent_tokens=100000)
+            harness.add(MessageEvent.create(role="user", content="hi"))
+
+            did_compact, message = harness.compactor.compact_now(harness.session)
+
+            self.assertFalse(did_compact)
+            self.assertIn("没有可在安全切点处压缩", message)
 
 
 if __name__ == "__main__":

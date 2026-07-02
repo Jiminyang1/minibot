@@ -8,7 +8,7 @@ import unittest
 from minibot.config import Config
 from minibot.interaction.commands import CommandContext, dispatch_command
 from minibot.mcp_host.models import MCPHostSummary, MCPServerStatus
-from minibot.runtime.hooks_builtin import ApprovalPolicy
+from minibot.runtime.approval import ApprovalPolicy
 from minibot.session import SessionManager
 
 
@@ -30,15 +30,16 @@ class _Memory:
         return memory_id == "m_1"
 
 
-class _TurnEngine:
-    def __init__(self, manager: SessionManager) -> None:
-        self.manager = manager
+class _Compactor:
+    def __init__(self) -> None:
         self.compacted = False
 
-    def compact_session(self, session):
+    def compact_now(self, session):
         self.compacted = True
         return True, f"compact {session.session_id}"
 
+
+class _ContextBuilder:
     def list_available_skills(self):
         return [("mail", "Mail helper", ("read_mail",))]
 
@@ -72,7 +73,8 @@ class InteractionCommandTests(unittest.TestCase):
     def _context(self, manager):
         return CommandContext(
             sessions=manager,
-            turn_engine=_TurnEngine(manager),  # type: ignore[arg-type]
+            compactor=_Compactor(),  # type: ignore[arg-type]
+            context_builder=_ContextBuilder(),  # type: ignore[arg-type]
             memory_store=_Memory(),  # type: ignore[arg-type]
             approval_policy=ApprovalPolicy(mode="ask"),
             mcp_host=_MCPHost(),  # type: ignore[arg-type]

@@ -217,7 +217,6 @@ def create_app(runtime: MiniBotRuntime):
                     request.session_id,
                     request.input,
                     run_id=run_id,
-                    mode=request.mode,
                     event_handler=sink,
                 )
             except RunCancelled:
@@ -297,7 +296,7 @@ def create_app(runtime: MiniBotRuntime):
         removed = runtime.manager.delete_session(session_id)
         if not removed:
             raise HTTPException(status_code=404, detail="session not found")
-        runtime.context_manager.forget_request_message_count(session_id)
+        runtime.budget.forget(session_id)
         return JSONResponse({"ok": True, "session_id": session_id})
 
     @app.get("/sessions/{session_id}")

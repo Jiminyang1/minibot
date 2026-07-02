@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.artifacts import ArtifactStore
-from minibot.runtime.context_manager import ContextWindowManager
+from minibot.runtime.context_builder import ContextBuilder
 from minibot.session import Session
 from minibot.skills import SkillRegistry
 from minibot.tools.base import Tool, ToolExecutionContext
@@ -78,21 +78,17 @@ def _write_skill(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _make_context_manager(
+def _make_context_builder(
     *,
     registry: SkillRegistry,
     tool_registry: ToolRegistry,
     now_provider=None,
-) -> ContextWindowManager:
-    return ContextWindowManager(
+) -> ContextBuilder:
+    return ContextBuilder(
         base_system_prompt="BASE PROMPT",
         memory_store=None,
         skill_registry=registry,
         tool_registry=tool_registry,
-        compact_token_threshold=40000,
-        reserved_completion_tokens=1000,
-        compact_keep_recent_tokens=16000,
-        summarizer=lambda request: "summary",
         now_provider=now_provider,
     )
 
@@ -111,7 +107,7 @@ class SkillCatalogTests(unittest.TestCase):
             registry = SkillRegistry.from_directory(directory)
             tool_registry = ToolRegistry()
             tool_registry.register(_DummyTool("calendar_list_events"))
-            manager = _make_context_manager(
+            builder = _make_context_builder(
                 registry=registry,
                 tool_registry=tool_registry,
                 now_provider=lambda: datetime(
@@ -125,9 +121,7 @@ class SkillCatalogTests(unittest.TestCase):
                 ),
             )
 
-            prompt = manager.build_context(
-                session=Session("s_test"),
-            ).messages[0].content
+            prompt = builder.build(Session("s_test").messages).messages[0].content
 
             self.assertIn("## Local Time Context", prompt)
             self.assertIn("now_local: 2026-04-23T13:02:05+08:00", prompt)
@@ -164,11 +158,9 @@ class SkillCatalogTests(unittest.TestCase):
             registry = SkillRegistry.from_directory(directory)
             tool_registry = ToolRegistry()
             tool_registry.register(_DummyTool("calendar_list_events"))
-            manager = _make_context_manager(registry=registry, tool_registry=tool_registry)
+            builder = _make_context_builder(registry=registry, tool_registry=tool_registry)
 
-            prompt = manager.build_context(
-                session=Session("s_test"),
-            ).messages[0].content
+            prompt = builder.build(Session("s_test").messages).messages[0].content
 
             self.assertIn("## Available Skills", prompt)
             self.assertIn("- calendar: calendar skill | tools: calendar_list_events", prompt)
@@ -188,11 +180,9 @@ class SkillCatalogTests(unittest.TestCase):
             registry = SkillRegistry.from_directory(directory)
             tool_registry = ToolRegistry()
             tool_registry.register(_DummyTool("calendar_list_events"))
-            manager = _make_context_manager(registry=registry, tool_registry=tool_registry)
+            builder = _make_context_builder(registry=registry, tool_registry=tool_registry)
 
-            prompt = manager.build_context(
-                session=Session("s_test"),
-            ).messages[0].content
+            prompt = builder.build(Session("s_test").messages).messages[0].content
 
             self.assertNotIn("CALENDAR-BODY-MARKER", prompt)
             self.assertNotIn("## Matched Skills", prompt)

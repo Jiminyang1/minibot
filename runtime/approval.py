@@ -1,4 +1,9 @@
-"""Built-in runtime hooks."""
+"""Tool approval as an explicit runtime dependency.
+
+Approval is the one policy that must interrupt the loop and wait for a human
+decision, so it is injected into ``AgentLoop`` as a named collaborator rather
+than hidden inside a hook pipeline.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from ..config import ApprovalMode
 from ..tools.registry import PreparedToolCall
 from ..tools.result import ToolOutput
 from .cancel import RunCancelled
-from .hooks import HookContext, RuntimeHook, ToolExecuteDecision
+from .events import RuntimeEventEmitter
 
 
 @dataclass(frozen=True)
@@ -64,28 +69,31 @@ class ApprovalPolicy:
         return bool(self.handler(request, cancel_event))
 
 
-class ApprovalHook(RuntimeHook):
-    """Gate tools that declare ``requires_approval``."""
-
-    priority = 100
+class ToolApprovalGate:
+    """Gate tools that declare ``requires_approval`` before execution."""
 
     def __init__(self, policy: ApprovalPolicy) -> None:
         self.policy = policy
 
-    def before_tool_execute(
+    def check(
         self,
-        context: HookContext,
         call: PreparedToolCall,
-    ) -> ToolExecuteDecision:
+        *,
+        run_id: str,
+        session_id: str,
+        emitter: RuntimeEventEmitter | None,
+        cancel_event: threading.Event | None,
+    ) -> ToolOutput | None:
+        """Return ``None`` when the call may run, or a denial ``ToolOutput``."""
         if not call.tool.requires_approval:
-            return ToolExecuteDecision()
+            return None
 
-        if context.cancel_event is not None and context.cancel_event.is_set():
+        if cancel_event is not None and cancel_event.is_set():
             raise RunCancelled("run cancelled before approval")
 
         if self.policy.mode == "always":
             _emit(
-                context,
+                emitter,
                 "approval.resolved",
                 {
                     "tool_call_id": call.tool_call_id,
@@ -94,22 +102,22 @@ class ApprovalHook(RuntimeHook):
                     "auto": True,
                 },
             )
-            return ToolExecuteDecision()
+            return None
 
         if self.policy.handler is None:
-            return ToolExecuteDecision()
+            return None
 
         approval_id = "ap_" + uuid.uuid4().hex[:12]
         request = ApprovalRequest(
-            run_id=context.run_id,
-            session_id=context.session_id,
+            run_id=run_id,
+            session_id=session_id,
             approval_id=approval_id,
             tool_call_id=call.tool_call_id or "",
             tool_name=call.tool.name,
             args=call.args,
         )
         _emit(
-            context,
+            emitter,
             "approval.required",
             {
                 "approval_id": approval_id,
@@ -118,9 +126,9 @@ class ApprovalHook(RuntimeHook):
                 "args": call.args,
             },
         )
-        approved = self.policy.request(request, cancel_event=context.cancel_event)
+        approved = self.policy.request(request, cancel_event=cancel_event)
         _emit(
-            context,
+            emitter,
             "approval.resolved",
             {
                 "approval_id": approval_id,
@@ -130,20 +138,18 @@ class ApprovalHook(RuntimeHook):
             },
         )
         if approved:
-            return ToolExecuteDecision()
-        return ToolExecuteDecision(
-            ToolOutput.failure(
-                "denied",
-                f"工具 {call.tool.name} 未获批准执行。",
-                data={"tool": call.tool.name, "args": call.args},
-            )
+            return None
+        return ToolOutput.failure(
+            "denied",
+            f"工具 {call.tool.name} 未获批准执行。",
+            data={"tool": call.tool.name, "args": call.args},
         )
 
 
 def _emit(
-    context: HookContext,
+    emitter: RuntimeEventEmitter | None,
     event_type: str,
     payload: dict[str, Any],
 ) -> None:
-    if context.emitter is not None:
-        context.emitter.emit(event_type, payload)
+    if emitter is not None:
+        emitter.emit(event_type, payload)

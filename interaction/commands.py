@@ -11,8 +11,9 @@ from ..session import Session, SessionManager
 if TYPE_CHECKING:
     from ..config import Config
     from ..mcp_host.host import MCPHost
-    from ..runtime.hooks_builtin import ApprovalPolicy
-    from ..runtime.turn_engine import TurnEngine
+    from ..runtime.approval import ApprovalPolicy
+    from ..runtime.compactor import Compactor
+    from ..runtime.context_builder import ContextBuilder
     from ..user_memory import UserMemoryStore
 
 
@@ -37,7 +38,8 @@ class CommandResult:
 @dataclass(frozen=True)
 class CommandContext:
     sessions: SessionManager
-    turn_engine: "TurnEngine"
+    compactor: "Compactor"
+    context_builder: "ContextBuilder"
     memory_store: "UserMemoryStore"
     approval_policy: "ApprovalPolicy"
     mcp_host: "MCPHost | None" = None
@@ -203,7 +205,7 @@ def _compact(context: CommandContext, current_session_id: str) -> CommandResult:
             notices=(_notice("warning", f"未找到会话: {current_session_id}"),),
         )
     try:
-        did_compact, message = context.turn_engine.compact_session(session)
+        did_compact, message = context.compactor.compact_now(session)
     except Exception as exc:
         return CommandResult(
             handled=True,
@@ -276,7 +278,7 @@ def _memory(
 
 
 def _skills(context: CommandContext, current_session_id: str) -> CommandResult:
-    skills = context.turn_engine.list_available_skills()
+    skills = context.context_builder.list_available_skills()
     if not skills:
         body = "当前没有可用 skills。"
     else:

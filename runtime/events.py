@@ -13,6 +13,21 @@ RuntimeEventType: TypeAlias = str
 RuntimeEventHandler: TypeAlias = Callable[["RuntimeEvent"], None]
 
 
+def fanout(*handlers: RuntimeEventHandler | None) -> RuntimeEventHandler | None:
+    """Compose event handlers so every subscriber sees the same stream."""
+    active = [handler for handler in handlers if handler is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def handle(event: RuntimeEvent) -> None:
+        for handler in active:
+            handler(event)
+
+    return handle
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 

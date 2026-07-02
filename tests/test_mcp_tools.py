@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcp.types import CallToolResult, TextContent
 
@@ -15,14 +16,12 @@ from minibot.llm import LLMClient, LLMResponse, ToolCall
 from minibot.mcp_host.client import MCPClientTimeoutError
 from minibot.mcp_host.models import MCPToolSpec
 from minibot.mcp_host.provider import MCPToolProxy
-from minibot.runtime.agent_loop import AgentLoop, RunSpec
-from minibot.runtime.context_manager import WorkingContext
-from minibot.runtime.messages import ModelMessage, session_message_to_model
-from minibot.runtime.tool_output_materializer import ToolOutputMaterializer
-from minibot.session import MessageEvent
+from minibot.runtime.messages import ModelMessage
 from minibot.tools.base import ToolExecutionContext
 from minibot.tools.definitions import ModelToolDefinition
 from minibot.tools.registry import ToolRegistry
+
+from loop_harness import build_loop, run_turn
 
 
 class _ScriptedLLM(LLMClient):
@@ -37,23 +36,6 @@ class _ScriptedLLM(LLMClient):
     ) -> LLMResponse:
         del messages, tools, model
         return self._responses.pop(0)
-
-
-class _RecordingContext:
-    def __init__(self, tool_definitions: list[ModelToolDefinition]) -> None:
-        self.messages: list[MessageEvent] = []
-        self.tool_definitions = tool_definitions
-
-    def prepare_next_turn(self, observed_input_tokens: int | None) -> WorkingContext:
-        del observed_input_tokens
-        return WorkingContext(
-            messages=[session_message_to_model(message) for message in self.messages],
-            tool_definitions=self.tool_definitions,
-        )
-
-    def on_message(self, message: MessageEvent) -> MessageEvent:
-        self.messages.append(message)
-        return message
 
 
 class _FakeClient:
@@ -200,7 +182,7 @@ class MCPRunnerIntegrationTests(unittest.TestCase):
                     trusted=True,
                 )
             )
-            runner = AgentLoop(
+            loop, manager = build_loop(
                 _ScriptedLLM(
                     [
                         LLMResponse(
@@ -217,23 +199,14 @@ class MCPRunnerIntegrationTests(unittest.TestCase):
                     ]
                 ),
                 registry,
-                materializer=ToolOutputMaterializer(ArtifactStore(Path(tmpdir))),
+                Path(tmpdir),
             )
-            context = _RecordingContext(registry.get_definitions())
 
-            outcome = runner.run(
-                RunSpec(
-                    session_id="s_test",
-                    model="gpt-5.4-mini",
-                    user_input="comment",
-                    prepare_next_turn=context.prepare_next_turn,
-                    on_message=context.on_message,
-                )
-            )
+            outcome, session = run_turn(loop, manager, "comment")
 
             self.assertEqual(outcome.reply, "done")
             tool_messages = [
-                message for message in context.messages if message.role == "tool"
+                message for message in session.messages if message.role == "tool"
             ]
             self.assertEqual(len(tool_messages), 1)
             payload = json.loads(tool_messages[0].content)

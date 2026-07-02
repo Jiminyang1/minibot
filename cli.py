@@ -39,8 +39,8 @@ from .interaction.commands import (
 )
 from .run_log import make_run_id
 from .runtime.agent_session import RunCancelled
+from .runtime.approval import ApprovalRequest
 from .runtime.events import RuntimeEvent
-from .runtime.hooks_builtin import ApprovalRequest
 
 
 _PASTE_DRAIN_IDLE_SECONDS = 0.05
@@ -661,7 +661,8 @@ def _quiet_startup(*, enabled: bool):
 def _command_context(runtime: MiniBotRuntime) -> CommandContext:
     return CommandContext(
         sessions=runtime.manager,
-        turn_engine=runtime.turn_engine,
+        compactor=runtime.compactor,
+        context_builder=runtime.context_builder,
         memory_store=runtime.memory_store,
         approval_policy=runtime.approval_policy,
         mcp_host=runtime.mcp_host,

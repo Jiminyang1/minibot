@@ -6,9 +6,9 @@ import threading
 
 from ..run_log import make_run_id, preview_text
 from ..session import SessionManager
+from .agent_loop import AgentLoop, TurnOutcome
 from .cancel import RunCancelled
-from .events import RuntimeEventEmitter, RuntimeEventHandler
-from .turn_engine import TurnEngine, TurnResult
+from .events import RuntimeEventEmitter, RuntimeEventHandler, fanout
 
 
 class SessionBusyError(RuntimeError):
@@ -28,11 +28,13 @@ class AgentSession:
     def __init__(
         self,
         *,
-        turn_engine: TurnEngine,
+        agent_loop: AgentLoop,
         session_manager: SessionManager,
+        base_event_handler: RuntimeEventHandler | None = None,
     ) -> None:
-        self.turn_engine = turn_engine
+        self.agent_loop = agent_loop
         self.session_manager = session_manager
+        self.base_event_handler = base_event_handler
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
@@ -44,9 +46,8 @@ class AgentSession:
         user_input: str,
         *,
         run_id: str | None = None,
-        mode: str = "default",
         event_handler: RuntimeEventHandler | None = None,
-    ) -> TurnResult:
+    ) -> TurnOutcome:
         session = self.session_manager.resolve_session(session_id)
         session_lock = self._session_lock(session.session_id)
         if not session_lock.acquire(blocking=False):
@@ -60,7 +61,7 @@ class AgentSession:
         emitter = RuntimeEventEmitter(
             run_id=run_id,
             session_id=session.session_id,
-            handler=event_handler,
+            handler=fanout(self.base_event_handler, event_handler),
         )
         try:
             emitter.emit(
@@ -68,26 +69,26 @@ class AgentSession:
                 {
                     "session_id": session.session_id,
                     "input_preview": preview_text(user_input, 120),
+                    "model": self.agent_loop.model,
+                    "turn_index": session.turn_count() + 1,
                 },
             )
-            result = self.turn_engine.handle_turn(
+            outcome = self.agent_loop.run_turn(
                 session,
                 user_input,
-                run_id=run_id,
-                event_emitter=emitter,
+                emitter=emitter,
                 cancel_event=cancel_event,
-                mode=mode,
             )
             emitter.emit(
                 "run.completed",
                 {
                     "session_id": session.session_id,
-                    "reply": result.reply,
-                    "did_compact": result.did_compact,
-                    "compact_message": result.compact_message,
+                    "reply": outcome.reply,
+                    "did_compact": outcome.did_compact,
+                    "compact_message": outcome.compact_message,
                 },
             )
-            return result
+            return outcome
         except RunCancelled:
             emitter.emit("run.cancelled", {"session_id": session.session_id})
             raise

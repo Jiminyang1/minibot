@@ -18,14 +18,14 @@ from .prompts import SYSTEM_PROMPT
 from .run_log import RunLogStore
 from .runtime.agent_loop import AgentLoop
 from .runtime.agent_session import AgentSession
+from .runtime.approval import ApprovalPolicy, ApprovalRequest, ToolApprovalGate
 from .runtime.approvals import ApprovalBroker
-from .runtime.context_manager import ContextWindowManager, make_summarizer
-from .runtime.events import RuntimeEventHandler
-from .runtime.hooks import RuntimeHookManager
-from .runtime.hooks_builtin import ApprovalHook, ApprovalPolicy
-from .runtime.hooks_builtin import ApprovalRequest
+from .runtime.budget import TokenBudget
+from .runtime.compactor import Compactor, make_summarizer
+from .runtime.context_builder import ContextBuilder
+from .runtime.events import RuntimeEventHandler, fanout
+from .runtime.run_log_fold import RunLogFold
 from .runtime.tool_output_materializer import ToolOutputMaterializer
-from .runtime.turn_engine import TurnEngine
 from .session import SessionManager
 from .skills import SkillRegistry
 from .tools import (
@@ -51,11 +51,11 @@ class MiniBotRuntime:
     skill_registry: SkillRegistry
     tool_registry: ToolRegistry
     mcp_host: MCPHost
-    context_manager: ContextWindowManager
+    context_builder: ContextBuilder
+    budget: TokenBudget
+    compactor: Compactor
     agent_loop: AgentLoop
-    turn_engine: TurnEngine
     agent_session: AgentSession
-    hook_manager: RuntimeHookManager
     approval_policy: ApprovalPolicy
     approval_broker: ApprovalBroker | None = None
 
@@ -114,44 +114,53 @@ def build_runtime(
             continue
         tool_registry.register(tool)
 
-    summarizer = make_summarizer(llm)
-    approval_policy = ApprovalPolicy(
-        handler=approval_handler,
-        mode=config.approval_mode,
-    )
-    hook_manager = RuntimeHookManager([ApprovalHook(approval_policy)])
-    context_manager = ContextWindowManager(
+    include_reasoning = llm_profile.compat.include_reasoning_content
+    context_builder = ContextBuilder(
         base_system_prompt=SYSTEM_PROMPT,
         memory_store=memory_store,
         skill_registry=skill_registry,
         tool_registry=tool_registry,
+        include_reasoning_content=include_reasoning,
+    )
+    budget = TokenBudget(
         compact_token_threshold=config.compact_token_threshold,
         reserved_completion_tokens=config.reserved_completion_tokens,
-        compact_keep_recent_tokens=config.compact_keep_recent_tokens,
-        summarizer=summarizer,
-        include_reasoning_content=llm_profile.compat.include_reasoning_content,
+        include_reasoning_content=include_reasoning,
+    )
+    compactor = Compactor(
+        session_manager=manager,
+        context_builder=context_builder,
+        budget=budget,
+        tool_registry=tool_registry,
+        summarizer=make_summarizer(llm),
+        keep_recent_tokens=config.compact_keep_recent_tokens,
+        include_reasoning_content=include_reasoning,
+    )
+    approval_policy = ApprovalPolicy(
+        handler=approval_handler,
+        mode=config.approval_mode,
     )
     agent_loop = AgentLoop(
-        llm,
-        tool_registry,
+        llm=llm,
+        tool_registry=tool_registry,
+        session_manager=manager,
+        context_builder=context_builder,
+        budget=budget,
+        compactor=compactor,
         materializer=ToolOutputMaterializer(artifact_store),
-        hook_manager=hook_manager,
-        event_handler=run_event_handler,
+        model=config.model,
+        approval_gate=ToolApprovalGate(approval_policy),
+        max_iterations=config.max_iterations,
         max_parallel_tools=config.max_parallel_tools,
     )
-    turn_engine = TurnEngine(
-        agent_loop,
-        manager,
-        config,
-        context_manager=context_manager,
-        hook_manager=hook_manager,
-        event_handler=run_event_handler,
-        run_log_store=run_log_store,
-        workspace=resolved_workspace,
-    )
     agent_session = AgentSession(
-        turn_engine=turn_engine,
+        agent_loop=agent_loop,
         session_manager=manager,
+        # runs.jsonl is a fold over the same event stream the UIs subscribe to.
+        base_event_handler=fanout(
+            RunLogFold(run_log_store, tool_registry=tool_registry),
+            run_event_handler,
+        ),
     )
     return MiniBotRuntime(
         config=config,
@@ -162,14 +171,16 @@ def build_runtime(
         skill_registry=skill_registry,
         tool_registry=tool_registry,
         mcp_host=mcp_host,
-        context_manager=context_manager,
+        context_builder=context_builder,
+        budget=budget,
+        compactor=compactor,
         agent_loop=agent_loop,
-        turn_engine=turn_engine,
         agent_session=agent_session,
-        hook_manager=hook_manager,
         approval_policy=approval_policy,
         approval_broker=approval_broker,
     )
+
+
 def _resolve_mcp_config(package_dir: Path) -> tuple[Path, Path | None, str]:
     """Resolve MiniBot-global MCP config.
 

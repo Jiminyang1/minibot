@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 
+from .approval import ApprovalRequest
 from .cancel import RunCancelled
-from .hooks_builtin import ApprovalRequest
 
 
 __all__ = ["ApprovalBroker"]

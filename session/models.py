@@ -319,7 +319,6 @@ class Session:
         "entries",
         "messages",
         "_message_count",
-        "_pending_compaction_entries",
     )
 
     def __init__(
@@ -339,7 +338,6 @@ class Session:
         self.entries = list(entries or [])
         self.messages = SessionContextProjector.project_messages(self.entries)
         self._message_count = message_count
-        self._pending_compaction_entries: list[SessionEntry] = []
 
     @property
     def message_count(self) -> int:
@@ -351,11 +349,6 @@ class Session:
         self.updated_at = message.created_at
         if message.role == "user" and message.content.strip() and self.title == "新会话":
             self.title = preview(message.content)
-
-    def pop_pending_compaction_entries(self) -> list[SessionEntry]:
-        entries = list(self._pending_compaction_entries)
-        self._pending_compaction_entries.clear()
-        return entries
 
     def turn_count(self) -> int:
         """Return the number of user-anchored turns in the session."""
@@ -369,9 +362,8 @@ class Session:
         first_kept_entry_id: str | None,
         tokens_before: int | None = None,
         details: dict[str, Any] | None = None,
-    ) -> tuple[int, int]:
-        """Append a compaction entry and refresh the projected message view."""
-        before = len(self.messages)
+    ) -> SessionEntry:
+        """Append a compaction entry, refresh the projection, return the entry."""
         compaction_entry = SessionEntry.compaction(
             summary=summary_text,
             first_kept_entry_id=first_kept_entry_id,
@@ -379,10 +371,9 @@ class Session:
             details=details,
         )
         self.entries.append(compaction_entry)
-        self._pending_compaction_entries.append(compaction_entry)
         self.messages = SessionContextProjector.project_messages(self.entries)
         self.updated_at = compaction_entry.created_at
-        return before, len(self.messages)
+        return compaction_entry
 
     def _split_preamble_and_turns(
         self,

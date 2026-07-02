@@ -3,7 +3,7 @@
 This module manages a single cross-session memory file under the user's
 home directory. It stores short, stable facts about the user
 (preferences, identity, routines) and exposes only structured data
-operations; prompt rendering lives in :mod:`minibot.runtime.context_manager`.
+operations; prompt rendering lives in :mod:`minibot.runtime.context_builder`.
 """
 
 from __future__ import annotations

@@ -13,36 +13,35 @@ from minibot.runtime.cancel import RunCancelled
 from minibot.runtime.agent_session import AgentSession, SessionBusyError
 from minibot.runtime.approvals import ApprovalBroker
 from minibot.runtime.events import RuntimeEvent, RuntimeEventEmitter
-from minibot.runtime.hooks_builtin import ApprovalRequest
-from minibot.runtime.turn_engine import TurnResult
+from minibot.runtime.agent_loop import TurnOutcome
+from minibot.runtime.approval import ApprovalRequest
 from minibot.session import SessionManager, SessionNotFoundError
 
 
-class _BlockingTurnEngine:
+class _BlockingLoop:
+    model = "gpt-5.4-mini"
+
     def __init__(self) -> None:
         self.started = threading.Event()
         self.release = threading.Event()
         self.cancel_seen = threading.Event()
 
-    def handle_turn(
+    def run_turn(
         self,
         session,
         user_input,
         *,
-        run_id=None,
-        event_emitter=None,
+        emitter,
         cancel_event=None,
-        mode="default",
     ):
-        del session, user_input, run_id, mode
+        del session, user_input
         self.started.set()
         self.release.wait(timeout=2)
         if cancel_event is not None and cancel_event.is_set():
             self.cancel_seen.set()
             raise RunCancelled("run cancelled by test")
-        if event_emitter is not None:
-            event_emitter.emit("message.completed", {"content": "ok"})
-        return TurnResult(reply="ok", did_compact=False)
+        emitter.emit("message.completed", {"content": "ok"})
+        return TurnOutcome(reply="ok", did_compact=False)
 
 
 class RuntimeEventTests(unittest.TestCase):
@@ -116,8 +115,8 @@ class RuntimeEventTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SessionManager(Path(tmpdir))
             manager.create_session("s_test")
-            engine = _BlockingTurnEngine()
-            agent_session = AgentSession(turn_engine=engine, session_manager=manager)
+            engine = _BlockingLoop()
+            agent_session = AgentSession(agent_loop=engine, session_manager=manager)
 
             first_events: list[RuntimeEvent] = []
             first_thread = threading.Thread(
@@ -146,8 +145,8 @@ class RuntimeEventTests(unittest.TestCase):
     def test_agent_session_reports_missing_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SessionManager(Path(tmpdir))
-            engine = _BlockingTurnEngine()
-            agent_session = AgentSession(turn_engine=engine, session_manager=manager)
+            engine = _BlockingLoop()
+            agent_session = AgentSession(agent_loop=engine, session_manager=manager)
 
             with self.assertRaises(SessionNotFoundError):
                 agent_session.prompt(
@@ -160,8 +159,8 @@ class RuntimeEventTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SessionManager(Path(tmpdir))
             manager.create_session("s_test")
-            engine = _BlockingTurnEngine()
-            agent_session = AgentSession(turn_engine=engine, session_manager=manager)
+            engine = _BlockingLoop()
+            agent_session = AgentSession(agent_loop=engine, session_manager=manager)
             events: list[RuntimeEvent] = []
             errors: list[BaseException] = []
 

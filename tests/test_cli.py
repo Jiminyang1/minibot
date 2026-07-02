@@ -12,8 +12,8 @@ from minibot import cli
 from minibot.cli import CliRenderer, install_slash_completion, main, read_user_input, run_repl
 from minibot.config import Config
 from minibot.runtime.events import RuntimeEventEmitter
-from minibot.runtime.hooks_builtin import ApprovalPolicy, ApprovalRequest
-from minibot.runtime.turn_engine import TurnResult
+from minibot.runtime.agent_loop import TurnOutcome
+from minibot.runtime.approval import ApprovalPolicy, ApprovalRequest
 from minibot.session import SessionManager
 
 
@@ -21,8 +21,7 @@ class _AgentSession:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def prompt(self, session_id, user_input, *, run_id=None, mode="default", event_handler=None):
-        del mode
+    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None):
         self.calls.append((session_id, user_input))
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",
@@ -51,17 +50,19 @@ class _AgentSession:
             },
         )
         emitter.emit("message.completed", {"iteration": 1, "content": f"echo: {user_input}"})
-        return TurnResult(reply=f"echo: {user_input}", did_compact=False)
+        return TurnOutcome(reply=f"echo: {user_input}", did_compact=False)
 
     def abort(self, run_id):
         del run_id
         return False
 
 
-class _TurnEngine:
-    def compact_session(self, session):
+class _Compactor:
+    def compact_now(self, session):
         return True, f"compact {session.session_id}"
 
+
+class _ContextBuilder:
     def list_available_skills(self):
         return []
 
@@ -100,7 +101,8 @@ class CliTests(unittest.TestCase):
                 ),
                 status_snapshot=lambda: [],
             ),
-            turn_engine=_TurnEngine(),
+            compactor=_Compactor(),
+            context_builder=_ContextBuilder(),
             agent_session=_AgentSession(),
             approval_policy=ApprovalPolicy(mode="ask"),
         )
