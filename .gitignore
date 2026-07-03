@@ -11,6 +11,7 @@ __pycache__/
 learn.md
 learn/
 docs/*
-# Design rationale for the core runtime is product documentation, not a note.
+# Core runtime design docs are product documentation, not notes.
 !docs/core-philosophy.md
+!docs/architecture.md
 examples/

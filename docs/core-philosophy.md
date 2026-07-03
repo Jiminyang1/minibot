@@ -14,6 +14,26 @@
 2. **五条输出通道。** 同一个 turn 的事实通过 RuntimeEvent、`on_message` 回调、`RunOutcome` 返回值、`PartialRunError` 异常(夹带 usage)、`record_run`(闭包攒的状态)五条路离开循环。每加一个功能要同时改五处。
 3. **副作用藏在名叫 build 的函数里。** `ContextWindowManager.build_context` 会调摘要 LLM、改写 session、抛预算异常。因为变异发生在深层调用栈、落盘归另一个类管,只好发明 `_pending_compaction_entries` 缓冲,在四个类的五个位置手工对账。
 
+画出来是这个形状——注意 TurnEngine 与 AgentLoop 之间那对方向相反的箭头(控制流折返),以及底部五条并行的输出通道:
+
+```mermaid
+flowchart TB
+    AS[AgentSession] --> TE["TurnEngine.handle_turn<br/>闭包 ×2 · nonlocal ×7 · 终止判断②"]
+    TE -- "run() · 只调一次" --> AL["AgentLoop.run<br/>循环体 · 终止判断①"]
+    AL -- "每轮回调 ×2<br/>prepare_next_turn / on_message" --> TE
+    TE --> CWM["ContextWindowManager.build_context<br/>摘要 LLM + 改写 session(副作用)"]
+    CWM --> PB["Session._pending_compaction_entries<br/>四个类 · 五处 flush 对账"]
+    TE --> TR[TurnRecorder]
+
+    AL -.-> O1[["① RuntimeEvent → UI"]]
+    TE -.-> O2[["② RunOutcome/TurnResult 返回值"]]
+    AL -.-> O3[["③ PartialRunError 异常夹带 usage"]]
+    TR -.-> O4[["④ on_message → messages.jsonl"]]
+    TE -.-> O5[["⑤ record_run → runs.jsonl"]]
+```
+
+重构后的形状(一条直线下来、一个出口扇出)见 [architecture.md](architecture.md) 的分层总览图,两张图对照看,形状差异就是这次重构的全部内容。
+
 下面五条原则,每条对应一处刀口。
 
 ---

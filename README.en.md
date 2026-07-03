@@ -99,7 +99,7 @@ ToolRegistry
 | Projected view | `SessionContextProjector` derives model-visible messages from entries |
 | In-loop context | Context is rebuilt every iteration, not pre-assembled once per turn |
 
-The full design rationale lives in [docs/core-philosophy.md](docs/core-philosophy.md) (Chinese).
+The full architecture reference (layering rules, per-turn sequence, event catalog, compaction decision tree, error/cancellation/concurrency semantics) lives in [docs/architecture.md](docs/architecture.md); the design rationale in [docs/core-philosophy.md](docs/core-philosophy.md) (both Chinese).
 
 ## Modules
 

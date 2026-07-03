@@ -99,7 +99,7 @@ ToolRegistry
 | 投影视图 | `SessionContextProjector` 从 entry 生成模型可见消息 |
 | 循环内上下文 | 每 iteration 重投影，非 turn 开始前一次性拼好 |
 
-设计取舍的完整论证见 [docs/core-philosophy.md](docs/core-philosophy.md)。
+完整架构参考(分层与依赖规则、单轮时序图、事件目录、压缩决策树、错误/取消/并发语义)见 [docs/architecture.md](docs/architecture.md);设计取舍的论证见 [docs/core-philosophy.md](docs/core-philosophy.md)。
 
 ## 模块
 
