@@ -7,8 +7,9 @@ never depends on a specific SDK.
 from __future__ import annotations
 
 import abc
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .runtime.messages import ModelMessage
@@ -47,6 +48,33 @@ class LLMResponse:
     debug: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class LLMStreamEvent:
+    """One element of a streamed model response.
+
+    Contract: a stream yields zero or more ``text`` / ``reasoning`` deltas,
+    then exactly one ``response`` event carrying the complete ``LLMResponse``
+    as its final element. Deltas are advisory; the terminal response is the
+    single source of truth (usage and tool calls ride on it).
+    """
+
+    kind: Literal["text", "reasoning", "response"]
+    text: str = ""
+    response: LLMResponse | None = None
+
+    @classmethod
+    def text_delta(cls, text: str) -> "LLMStreamEvent":
+        return cls(kind="text", text=text)
+
+    @classmethod
+    def reasoning_delta(cls, text: str) -> "LLMStreamEvent":
+        return cls(kind="reasoning", text=text)
+
+    @classmethod
+    def completed(cls, response: LLMResponse) -> "LLMStreamEvent":
+        return cls(kind="response", response=response)
+
+
 # ── abstract client ──────────────────────────────────────────────
 
 
@@ -60,3 +88,17 @@ class LLMClient(abc.ABC):
         tools: list[ModelToolDefinition] | None = None,
         model: str | None = None,
     ) -> LLMResponse: ...
+
+    def chat_stream(
+        self,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> Iterator[LLMStreamEvent]:
+        """Stream a model response.
+
+        The default wraps ``chat`` in a single terminal event, so providers
+        (and test fakes) without native streaming keep working unchanged and
+        callers never need a streaming/non-streaming branch.
+        """
+        yield LLMStreamEvent.completed(self.chat(messages, tools, model))

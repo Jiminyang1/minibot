@@ -9,6 +9,7 @@ import os
 @dataclass(frozen=True)
 class OpenAICompatibleCompat:
     include_reasoning_content: bool = False
+    supports_streaming: bool = True
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,8 @@ def build_llm_profile(*, model: str) -> LLMProfile:
             model,
             base_url or "",
             provider,
-        )
+        ),
+        supports_streaming=_should_stream(),
     )
     return LLMProfile(
         provider=provider,
@@ -74,6 +76,12 @@ def _resolve_api_key(provider: str) -> str:
     if env_name != "OPENAI_API_KEY":
         return os.environ.get("OPENAI_API_KEY", "")
     return ""
+
+
+def _should_stream() -> bool:
+    """Escape hatch for endpoints with broken SSE streaming."""
+    raw = os.environ.get("MINIBOT_STREAMING", "auto").strip().lower()
+    return raw not in {"0", "false", "no", "off", "never"}
 
 
 def _should_send_reasoning_content(model: str, base_url: str, provider: str) -> bool:

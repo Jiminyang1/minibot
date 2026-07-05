@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 from typing import Any
 
-from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
+from ..llm import LLMClient, LLMResponse, LLMStreamEvent, TokenUsage, ToolCall
 from ..llm_profile import LLMProfile
 from ..tools.definitions import ModelToolDefinition
 
@@ -33,17 +34,16 @@ class OpenAICompatibleClient(LLMClient):
             kwargs["base_url"] = profile.base_url
         self._client = OpenAI(**kwargs)
 
-    def chat(
+    def _request_kwargs(
         self,
         messages: list[ModelMessage],
-        tools: list[ModelToolDefinition] | None = None,
-        model: str | None = None,
-    ) -> LLMResponse:
+        tools: list[ModelToolDefinition] | None,
+        model: str | None,
+    ) -> dict[str, Any]:
         from ..runtime.messages import model_messages_to_openai
 
-        request_model = model or self.model
         kwargs: dict[str, Any] = {
-            "model": request_model,
+            "model": model or self.model,
             "messages": model_messages_to_openai(
                 messages,
                 include_reasoning_content=self.compat.include_reasoning_content,
@@ -51,7 +51,15 @@ class OpenAICompatibleClient(LLMClient):
         }
         if tools:
             kwargs["tools"] = model_tool_definitions_to_openai(tools)
+        return kwargs
 
+    def chat(
+        self,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        kwargs = self._request_kwargs(messages, tools, model)
         resp = self._client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
 
@@ -78,6 +86,100 @@ class OpenAICompatibleClient(LLMClient):
             ),
         )
 
+    def chat_stream(
+        self,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> Iterator[LLMStreamEvent]:
+        if not self.compat.supports_streaming:
+            yield LLMStreamEvent.completed(self.chat(messages, tools, model))
+            return
+
+        kwargs = self._request_kwargs(messages, tools, model)
+        kwargs["stream"] = True
+        # Final chunk carries usage; endpoints that ignore stream_options
+        # simply leave usage as None, which every consumer tolerates.
+        kwargs["stream_options"] = {"include_usage": True}
+
+        stream = self._client.chat.completions.create(**kwargs)
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_slots: dict[int, dict[str, str]] = {}
+        finish_reason: Any = None
+        usage: TokenUsage | None = None
+        try:
+            for chunk in stream:
+                chunk_usage = _extract_token_usage(getattr(chunk, "usage", None))
+                if chunk_usage is not None:
+                    usage = chunk_usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+
+                text = _extract_message_content(getattr(delta, "content", None))
+                if text:
+                    content_parts.append(text)
+                    yield LLMStreamEvent.text_delta(text)
+
+                reasoning = _extract_reasoning_delta(delta)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield LLMStreamEvent.reasoning_delta(reasoning)
+
+                for fragment in getattr(delta, "tool_calls", None) or []:
+                    index = getattr(fragment, "index", 0) or 0
+                    slot = tool_call_slots.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(fragment, "id", None):
+                        slot["id"] = fragment.id
+                    function = getattr(fragment, "function", None)
+                    if function is None:
+                        continue
+                    # Names arrive whole in the first fragment; arguments
+                    # arrive as incremental JSON pieces to concatenate.
+                    if getattr(function, "name", None) and not slot["name"]:
+                        slot["name"] = function.name
+                    if getattr(function, "arguments", None):
+                        slot["arguments"] += function.arguments
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+        tool_calls = [
+            ToolCall(
+                id=slot["id"],
+                name=slot["name"],
+                arguments=slot["arguments"],
+            )
+            for _, slot in sorted(tool_call_slots.items())
+            if slot["id"] or slot["name"] or slot["arguments"]
+        ]
+        content = "".join(content_parts) or None
+        debug = _build_response_debug(
+            raw_content=content,
+            finish_reason=finish_reason,
+            tool_call_count=len(tool_calls),
+        )
+        debug["streamed"] = True
+        yield LLMStreamEvent.completed(
+            LLMResponse(
+                content=content,
+                reasoning_content="".join(reasoning_parts) or None,
+                tool_calls=tool_calls,
+                usage=usage,
+                debug=debug,
+            )
+        )
+
 
 def model_tool_definition_to_openai(
     tool: ModelToolDefinition,
@@ -100,13 +202,26 @@ def model_tool_definitions_to_openai(
 
 def _extract_reasoning_content(msg: Any) -> str | None:
     """Capture provider-specific reasoning text (DeepSeek thinking mode, etc.)."""
+    raw = _raw_reasoning_value(msg)
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return None
+
+
+def _extract_reasoning_delta(delta: Any) -> str | None:
+    """Like _extract_reasoning_content but keeps whitespace-only fragments."""
+    raw = _raw_reasoning_value(delta)
+    if isinstance(raw, str) and raw:
+        return raw
+    return None
+
+
+def _raw_reasoning_value(msg: Any) -> Any:
     raw = getattr(msg, "reasoning_content", None)
     if raw is None and hasattr(msg, "model_extra"):
         extra = getattr(msg, "model_extra", None) or {}
         raw = extra.get("reasoning_content")
-    if isinstance(raw, str) and raw.strip():
-        return raw
-    return None
+    return raw
 
 
 def _extract_message_content(raw_content: Any) -> str | None:
