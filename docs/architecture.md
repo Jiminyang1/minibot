@@ -2,7 +2,7 @@
 
 本文是 MiniBot core runtime 的完整架构参考:组件分层、一次 turn 的时序、事件目录、预算与压缩、错误与并发语义。README 里的架构章节是它的摘要;设计取舍的论证(为什么长成这样)见 [core-philosophy.md](core-philosophy.md)。
 
-对应代码版本:`refactor/core-loop` 分支。
+对应代码版本:core 单一 owner 重构 + streaming(`message.delta`)之后的形状。
 
 ---
 
