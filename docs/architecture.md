@@ -107,8 +107,11 @@ sequenceDiagram
         end
         AL->>AL: ② context_builder.build(session.messages)
         AL-)S: model.request.started
-        AL->>L: ③ chat(messages, tools)
-        L-->>AL: LLMResponse
+        AL->>L: ③ chat_stream(messages, tools)
+        loop 每个 delta
+            AL-)S: message.delta {channel, text}
+        end
+        L-->>AL: 终局 LLMResponse
         AL-)S: model.request.completed {usage, tool_call_count}
         alt 无 tool_calls 且回复非空
             AL->>AL: _append(assistant 回复)
@@ -145,6 +148,7 @@ sequenceDiagram
 | `context.compacted` | AgentLoop(reduce 之后) | `iteration` `message` | CLI 提示、fold(`did_compact`) |
 | `model.request.started` | AgentLoop | `iteration` `model` `input_preview` | CLI 状态行 |
 | `model.request.completed` | AgentLoop | `iteration` `elapsed_ms` `tool_call_count` `usage`(本次调用);空回复时另有 `empty_reply` `response_debug` | fold(`llm_call_count`、usage 求和)、CLI |
+| `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI 打字机、web 流式气泡;**fold 与重放忽略** |
 | `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval` | CLI |
 | `approval.required` | ToolApprovalGate | `approval_id` `tool_call_id` `tool` `args` | CLI 提问、web 审批端点 |
 | `approval.resolved` | ToolApprovalGate | 同上 + `approved`,自动放行时 `auto: true` | CLI、web |
@@ -155,6 +159,8 @@ sequenceDiagram
 | `run.cancelled` | AgentSession | `session_id` | fold(记为 failed/RunCancelled)、SSE 终止 |
 
 **usage 求和语义**(fold 与循环内 `_merge_usage` 一致):不带 usage 的调用不污染总和;首个带 usage 的调用是基准;之后逐字段相加,任一字段缺失则该字段总和为 `None`。
+
+**delta 的一等规则:delta 是尽力而为的视觉流,`message.completed` 才是权威全文。** 任何消费者必须在只收到 completed 时也能正确工作。由此推出:server 的 `RunEventStore` 把 `message.delta` 标记为 transient——广播给在线订阅者、不进重放 backlog,断线重连的客户端用 completed 的全文对齐;fold 对 delta 天然 no-op;usage 与 tool_calls 只挂在终局 `LLMResponse` 上(`LLMStreamEvent` 契约:零或多个 delta 后,恰好一个终局)。不支持流式的 provider 走 `chat_stream` 的默认实现(单终局事件),循环侧零分支;`MINIBOT_STREAMING=0` 可整体关闭。
 
 ## 4. 预算与压缩
 
@@ -191,7 +197,7 @@ flowchart TD
 
 ## 5. 错误与取消语义
 
-**取消**:`AgentSession.abort(run_id)` 置位 cancel event,循环在这些检查点协作退出——每个 iteration 开头、每个工具批次前、并行 future 的 50ms 轮询间隙、审批等待中、compaction 摘要调用前后。取消抛 `RunCancelled` → `run.cancelled` 事件 → fold 记 `failed / RunCancelled`。
+**取消**:`AgentSession.abort(run_id)` 置位 cancel event,循环在这些检查点协作退出——每个 iteration 开头、模型流的每个 delta 之间、每个工具批次前、并行 future 的 50ms 轮询间隙、审批等待中、compaction 摘要调用前后。取消抛 `RunCancelled` → `run.cancelled` 事件 → fold 记 `failed / RunCancelled`。流中途取消时,循环在 `finally` 里 close 生成器,provider 的 `finally` 随之关闭底层 HTTP 流;半截文本不落盘。
 
 **取消或崩溃留下的悬空 tool_calls**(assistant 带 tool_calls 但 tool 结果未落盘):投影层 `_filter_incomplete_tool_transactions` 在读取时整块过滤,保证下一轮请求永远合法。这是 append-only + 投影架构的直接收益。
 
@@ -241,6 +247,6 @@ flowchart TD
 | 新前端 | 订阅事件流 + 调 `AgentSession.prompt`,参照 `server.py` 的 `RunEventStore` |
 | 新审批 UI | 提供 `ApprovalPolicy.handler`(CLI 是问答,web 是 `ApprovalBroker` 会合) |
 | 新运行观测 | 写一个事件订阅者,`bootstrap.py` 的 `fanout` 里加一行,参照 `RunLogFold` |
-| streaming | `LLMClient` 增加 delta 迭代器变体;循环第③步边 fold 边发增量事件;订阅者各自决定渲染 |
+| 新 LLM provider | 实现 `LLMClient.chat`;可选覆写 `chat_stream` 获得原生流式(不覆写则自动退化为单终局事件) |
 
 刻意**没有**的扩展点:hook 管道。干预类扩展(改写请求/参数)目前只有审批一个真实需求,已作为显式依赖注入;出现第二个再设计通用接口,理由见 [core-philosophy.md](core-philosophy.md) §4。

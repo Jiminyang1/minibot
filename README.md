@@ -6,6 +6,7 @@
 
 ## 能力
 
+- token 级流式输出：CLI 打字机、Web 流式气泡（`message.delta` 事件，权威全文仍以 `message.completed` 为准）
 - 本地工具 + MCP 工具（统一 `Tool` 接口与 schema，声明式并发/审批属性）
 - 会话 append-only 持久化，超预算自动 compact（安全切点摘要 + 只读工具块降级）
 - 结构化 `RuntimeEvent` 单一出口：CLI 渲染、SSE Web UI、runs.jsonl 都是订阅者
@@ -86,7 +87,7 @@ flowchart TB
 
 1. 预算检查（`TokenBudget`），超预算则 `Compactor.reduce`（压缩 + 即时落盘 + 发事件）
 2. `ContextBuilder.build` 纯函数拼装请求（system prompt / memory / 时间 / skills 目录 + 历史投影）
-3. LLM 调用
+3. LLM 流式调用（delta 边到边发 `message.delta` 事件，终局 `LLMResponse` 驱动后续一切）
 4. 工具执行（审批经注入的 `ToolApprovalGate`；连续只读工具并行成批）
 5. 追加消息（session 落盘 + 事件）；大输出经 `ToolOutputMaterializer` 转为 artifact 引用
 
@@ -139,6 +140,7 @@ flowchart TB
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 预留给输出的 token |
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | compact 后保留的近期上下文 |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
+| `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 
 持久化路径（无需配置）：
 

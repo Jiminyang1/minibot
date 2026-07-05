@@ -6,6 +6,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 
 ## Capabilities
 
+- Token-level streaming: CLI typewriter and Web streaming bubbles (`message.delta` events; `message.completed` stays authoritative)
 - Local + MCP tools behind one `Tool` interface (declarative concurrency/approval properties)
 - Append-only session persistence with automatic compaction (safe-cut-point summaries, read-only tool-block fallback)
 - Structured `RuntimeEvent` as the sole output channel: CLI rendering, SSE Web UI, and runs.jsonl are all subscribers
@@ -86,7 +87,7 @@ flowchart TB
 
 1. Budget check (`TokenBudget`); if over budget, `Compactor.reduce` (compact + persist + emit)
 2. `ContextBuilder.build` assembles the request as a pure function (system prompt / memory / time / skills catalog + projected history)
-3. LLM call
+3. Streamed LLM call (deltas publish as `message.delta` events; the terminal `LLMResponse` drives everything downstream)
 4. Tool execution (approval via the injected `ToolApprovalGate`; consecutive read-only tools run as a parallel batch)
 5. Message append (session persistence + event); large outputs become artifact references via `ToolOutputMaterializer`
 
@@ -139,6 +140,7 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | tokens reserved for output |
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | recent context kept after compaction |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
+| `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 
 Persistence paths (no configuration needed):
 
