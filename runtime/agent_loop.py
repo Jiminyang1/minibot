@@ -137,10 +137,11 @@ class AgentLoop:
                         "input_preview": _preview(user_input),
                     },
                 )
-                resp = self.llm.chat(
-                    built.messages,
-                    built.tool_definitions,
-                    model=self.model,
+                resp = self._stream_model_response(
+                    built,
+                    emitter,
+                    iteration=iteration,
+                    cancel_event=cancel_event,
                 )
                 usage = _merge_usage(usage, resp.usage)
                 observed_input_tokens = (
@@ -276,6 +277,53 @@ class AgentLoop:
         built = self.context_builder.build(session.messages)
         self.budget.remember(session)
         return built, message
+
+    def _stream_model_response(
+        self,
+        built: BuiltRequest,
+        emitter: RuntimeEventEmitter,
+        *,
+        iteration: int,
+        cancel_event: threading.Event | None,
+    ) -> LLMResponse:
+        """Step ③: consume the model stream, publish deltas, return the terminal.
+
+        Deltas are advisory observation; everything downstream works off the
+        terminal ``LLMResponse`` alone, so streaming never changes turn state.
+        """
+        response: LLMResponse | None = None
+        stream = self.llm.chat_stream(
+            built.messages,
+            built.tool_definitions,
+            model=self.model,
+        )
+        try:
+            for event in stream:
+                self._check_cancel(cancel_event)
+                if event.kind == "response":
+                    response = event.response
+                    continue
+                if event.text:
+                    emitter.emit(
+                        "message.delta",
+                        {
+                            "iteration": iteration,
+                            "channel": event.kind,
+                            "text": event.text,
+                        },
+                    )
+        finally:
+            # Closing the generator triggers the provider's own cleanup
+            # (GeneratorExit → its finally closes the underlying HTTP stream),
+            # which matters when cancellation aborts mid-stream.
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        if response is None:
+            raise RuntimeError(
+                "LLM 流式响应缺少终局事件（provider 违反 chat_stream 契约）。"
+            )
+        return response
 
     def _append(self, session: Session, message: MessageEvent) -> MessageEvent:
         """Step ⑤: the loop's own state mutation, persisted in the same call."""
