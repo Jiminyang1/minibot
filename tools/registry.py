@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import inspect
 from typing import Any
 
+import jsonschema
+
 from .base import Tool, ToolExecutionContext, ToolLayer
 from .definitions import ModelToolDefinition
 from .result import ToolOutput
@@ -27,9 +29,13 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        # name -> compiled validator, or None when the tool's schema is
+        # malformed/unsupported (validation degrades to signature binding).
+        self._validators: dict[str, Any] = {}
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+        self._validators.pop(tool.name, None)
 
     def register_all(self, tools: Iterable[Tool]) -> None:
         for tool in tools:
@@ -73,6 +79,16 @@ class ToolRegistry:
                 data={"tool": name},
             )
 
+        # Validate against the schema the model was shown — errors surface
+        # before execution with a message the model can self-correct from.
+        schema_error = self._validate_args(tool, args)
+        if schema_error is not None:
+            return ToolOutput.failure(
+                "invalid_args",
+                f"工具 {name} 参数校验失败: {schema_error}",
+                data={"tool": name, "args": args},
+            )
+
         try:
             inspect.signature(tool.execute).bind(context=context, **args)
         except TypeError as exc:
@@ -83,6 +99,32 @@ class ToolRegistry:
             )
 
         return PreparedToolCall(tool=tool, args=args, context=context)
+
+    def _validate_args(self, tool: Tool, args: dict[str, Any]) -> str | None:
+        """Return a readable schema violation, or None when args are valid."""
+        validator = self._validator_for(tool)
+        if validator is None:
+            return None
+        error = jsonschema.exceptions.best_match(validator.iter_errors(args))
+        if error is None:
+            return None
+        return f"{error.json_path}: {error.message}"
+
+    def _validator_for(self, tool: Tool) -> Any:
+        if tool.name in self._validators:
+            return self._validators[tool.name]
+        validator: Any = None
+        try:
+            schema = tool.parameters
+            validator_cls = jsonschema.validators.validator_for(schema)
+            validator_cls.check_schema(schema)
+            validator = validator_cls(schema)
+        except Exception:
+            # Malformed or unsupported schema (some MCP servers ship loose
+            # ones): skip schema validation, signature binding still applies.
+            validator = None
+        self._validators[tool.name] = validator
+        return validator
 
     def invoke(self, prepared: PreparedToolCall) -> ToolOutput:
         try:
