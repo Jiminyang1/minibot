@@ -440,5 +440,82 @@ class CliTypewriterTests(unittest.TestCase):
         self.assertIn("MiniBot › plain answer", out.getvalue())
 
 
+class CliReasoningPreviewTests(unittest.TestCase):
+    def _renderer(self, *, preview_enabled: bool = True) -> tuple[CliRenderer, io.StringIO]:
+        out = io.StringIO()
+        renderer = CliRenderer(no_color=True, stdout=out)
+        renderer._reasoning.enabled = preview_enabled
+        return renderer, out
+
+    def _delta(self, channel: str, text: str, seq: int) -> RuntimeEvent:
+        return RuntimeEvent(
+            id=f"r_test:{seq}",
+            run_id="r_test",
+            session_id="s_test",
+            seq=seq,
+            type="message.delta",
+            created_at="2026-07-05T00:00:00Z",
+            payload={"iteration": 1, "channel": channel, "text": text},
+        )
+
+    def test_reasoning_previews_then_collapses_when_answer_starts(self) -> None:
+        renderer, out = self._renderer()
+
+        renderer.render_event(self._delta("reasoning", "先想想这个问题\n", 1))
+        renderer.render_event(self._delta("reasoning", "应该回答你好\n", 2))
+        renderer.render_event(self._delta("text", "你好", 3))
+
+        output = out.getvalue()
+        self.assertIn("思考中", output)
+        self.assertIn("先想想这个问题", output)
+        self.assertIn("已思考", output)
+        # The erase sequence proves the region was collapsed, not appended.
+        self.assertIn("\x1b[", output)
+        self.assertIn("MiniBot › 你好", output.replace("\n", "").split("已思考")[-1])
+        self.assertFalse(renderer._reasoning.active)
+
+    def test_disabled_preview_prints_summary_but_never_reasoning_text(self) -> None:
+        renderer, out = self._renderer(preview_enabled=False)
+
+        renderer.render_event(self._delta("reasoning", "内部推理内容", 1))
+        renderer.render_event(self._delta("text", "答案", 2))
+
+        output = out.getvalue()
+        self.assertNotIn("内部推理内容", output)
+        self.assertIn("已思考", output)
+        self.assertIn("答案", output)
+
+    def test_tool_event_collapses_reasoning_first(self) -> None:
+        renderer, out = self._renderer()
+
+        renderer.render_event(self._delta("reasoning", "需要查文件", 1))
+        renderer.render_event(
+            RuntimeEvent(
+                id="r_test:2",
+                run_id="r_test",
+                session_id="s_test",
+                seq=2,
+                type="tool_call.started",
+                created_at="2026-07-05T00:00:00Z",
+                payload={
+                    "tool_call_id": "c1",
+                    "tool": "read_file",
+                    "display_name": "read_file",
+                    "args": {},
+                },
+            )
+        )
+
+        output = out.getvalue()
+        self.assertLess(output.index("已思考"), output.index("工具: read_file"))
+        self.assertFalse(renderer._reasoning.active)
+
+    def test_truncate_display_counts_cjk_as_double_width(self) -> None:
+        from minibot.cli import _truncate_display
+
+        self.assertEqual(_truncate_display("中文很宽", 6), "中文…")
+        self.assertEqual(_truncate_display("ascii", 10), "ascii")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,7 +32,7 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 # open http://127.0.0.1:8765/
 ```
 
-CLI options: `--verbose` (model rounds, context usage, full tool args), `--no-color`. A single-line spinner status bar shows the current phase (thinking / running tool / waiting approval…).
+CLI options: `--verbose` (model rounds, context usage, full tool args), `--no-color`. A single-line spinner status bar shows the current phase (thinking / running tool / waiting approval…); reasoning models (DeepSeek etc.) get a live gray tail preview of the thinking process that collapses to a single `⋯ thought for Ns` line when the answer starts.
 
 ## Architecture
 

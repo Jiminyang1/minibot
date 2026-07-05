@@ -148,7 +148,7 @@ sequenceDiagram
 | `context.compacted` | AgentLoop(reduce 之后) | `iteration` `message` | CLI 提示、fold(`did_compact`) |
 | `model.request.started` | AgentLoop | `iteration` `model` `input_preview` | CLI 状态行 |
 | `model.request.completed` | AgentLoop | `iteration` `elapsed_ms` `tool_call_count` `usage`(本次调用);空回复时另有 `empty_reply` `response_debug` | fold(`llm_call_count`、usage 求和)、CLI |
-| `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI 打字机、web 流式气泡;**fold 与重放忽略** |
+| `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI(text → 打字机;reasoning → 折叠式灰字预览)、web 流式气泡;**fold 与重放忽略** |
 | `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval` | CLI |
 | `approval.required` | ToolApprovalGate | `approval_id` `tool_call_id` `tool` `args` | CLI 提问、web 审批端点 |
 | `approval.resolved` | ToolApprovalGate | 同上 + `approved`,自动放行时 `auto: true` | CLI、web |

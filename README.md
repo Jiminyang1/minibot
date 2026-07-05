@@ -32,7 +32,7 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 # 打开 http://127.0.0.1:8765/
 ```
 
-CLI 选项：`--verbose`（模型轮次、context usage、完整工具参数）、`--no-color`。运行中有单行 spinner 状态栏展示当前阶段（thinking / running tool / waiting approval…）。
+CLI 选项：`--verbose`（模型轮次、context usage、完整工具参数）、`--no-color`。运行中有单行 spinner 状态栏展示当前阶段（thinking / running tool / waiting approval…）；推理模型（DeepSeek 等）的思考过程以灰字尾部预览实时滚动，回答开始时自动折叠为一行 `⋯ 已思考 · Ns`。
 
 ## 架构
 

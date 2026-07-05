@@ -16,10 +16,12 @@ import json
 import logging
 import os
 import select
+import shutil
 import signal
 import sys
 import threading
 import time
+import unicodedata
 from typing import Any, TextIO
 
 try:
@@ -95,6 +97,10 @@ class CliRenderer:
         # While open, the spinner stays off and block output breaks the line first.
         self._stream_open = False
         self._streamed_replies: set[str] = set()
+        self._reasoning = ReasoningPreview(
+            self,
+            enabled=self.stdout.isatty() and not verbose,
+        )
 
     def c(self, text: str, *styles: str) -> str:
         if not self.use_color:
@@ -140,24 +146,30 @@ class CliRenderer:
                 self.info(line)
 
     def info(self, message: str) -> None:
-        self._end_stream_line()
-        self.clear_status()
+        self._flush_live_regions()
         print(self.c(f"  {message}", "gray"), file=self.stdout)
 
     def success(self, message: str) -> None:
-        self._end_stream_line()
-        self.clear_status()
+        self._flush_live_regions()
         print(self.c(f"  {message}", "green"), file=self.stdout)
 
     def warn(self, message: str) -> None:
-        self._end_stream_line()
-        self.clear_status()
+        self._flush_live_regions()
         print(self.c(f"  {message}", "yellow"), file=self.stdout)
 
     def error(self, message: str) -> None:
+        self._flush_live_regions()
+        print(self.c(f"  {message}", "red"), file=self.stdout)
+
+    def _flush_live_regions(self) -> None:
+        """Collapse the reasoning preview and close the typewriter line.
+
+        Called before any block output so live regions never interleave
+        with printed lines.
+        """
+        self._reasoning.collapse()
         self._end_stream_line()
         self.clear_status()
-        print(self.c(f"  {message}", "red"), file=self.stdout)
 
     def render_notice(self, notice: CommandNotice) -> None:
         printer = {
@@ -183,12 +195,11 @@ class CliRenderer:
         if event.type == "message.completed" and self._stream_open:
             # The reply just finished streaming; close the line and remember
             # the run so print_reply does not repeat the text.
-            self._end_stream_line()
+            self._flush_live_regions()
             self._streamed_replies.add(event.run_id)
         message = self.format_event(event)
         if message:
-            self._end_stream_line()
-            self.clear_status()
+            self._flush_live_regions()
             print(
                 f"  {self.c('›', 'dim')} {self.c(message, 'dim')}",
                 file=self.stdout,
@@ -197,11 +208,20 @@ class CliRenderer:
 
     def _render_stream_delta(self, event: RuntimeEvent) -> None:
         payload = event.payload
-        if payload.get("channel") != "text":
-            return
         text = str(payload.get("text") or "")
         if not text:
             return
+        channel = payload.get("channel")
+        if channel == "reasoning":
+            # The preview needs whole lines to itself; close any open
+            # typewriter line from a previous iteration first.
+            self._end_stream_line()
+            self.clear_status()
+            self._reasoning.feed(text)
+            return
+        if channel != "text":
+            return
+        self._reasoning.collapse()
         self.clear_status()
         if not self._stream_open:
             self._stream_open = True
@@ -288,8 +308,7 @@ class CliRenderer:
         return run_id in self._failed_runs
 
     def print_reply(self, reply: str, *, run_id: str | None = None) -> None:
-        self._end_stream_line()
-        self.clear_status()
+        self._flush_live_regions()
         if run_id is not None and run_id in self._streamed_replies:
             # Already on screen via the typewriter; printing again would dupe.
             self._streamed_replies.discard(run_id)
@@ -313,9 +332,9 @@ class CliRenderer:
         self._status_line.stop()
 
     def update_status_from_event(self, event: RuntimeEvent) -> None:
-        if self._stream_open:
-            # The typewriter owns the terminal line; a spinner redraw would
-            # erase streamed text. Status resumes once the line closes.
+        if self._stream_open or self._reasoning.active:
+            # The typewriter or the reasoning preview owns the terminal;
+            # a spinner redraw would corrupt it. Status resumes after close.
             return
         payload = event.payload
         if event.type == "run.started":
@@ -350,8 +369,7 @@ class CliRenderer:
         if cancel_event is not None and cancel_event.is_set():
             raise RunCancelled("run cancelled while waiting for approval")
 
-        self._end_stream_line()
-        self.clear_status()
+        self._flush_live_regions()
         preview = ", ".join(f"{key}={value!r}" for key, value in request.args.items())
         prompt = (
             f"  {self.c('批准执行', 'yellow', 'bold')} "
@@ -438,6 +456,100 @@ class StatusLine:
                 text = self.renderer.c(f"{frame} {message}", "gray")
                 self.renderer.stdout.write(f"\r\x1b[2K{text}")
                 self.renderer.stdout.flush()
+
+
+class ReasoningPreview:
+    """Live tail view of streamed reasoning that collapses to one dim line.
+
+    The preview owns a small self-drawn region: a header plus the last few
+    reasoning lines, each truncated to the terminal width. Because it always
+    knows exactly how many physical lines it drew, erasing the region with
+    cursor-up + clear-to-end is reliable — that is what makes the "collapse"
+    possible on a plain terminal.
+    """
+
+    _MAX_TAIL_LINES = 3
+    _REDRAW_INTERVAL = 0.08
+
+    def __init__(self, renderer: CliRenderer, *, enabled: bool) -> None:
+        self.renderer = renderer
+        self.enabled = enabled
+        self._buffer: list[str] = []
+        self._drawn_lines = 0
+        self._started_at: float | None = None
+        self._last_draw = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self._started_at is not None
+
+    def feed(self, text: str) -> None:
+        """Accept one reasoning delta; redraw the tail view (throttled)."""
+        if self._started_at is None:
+            self._started_at = time.monotonic()
+        self._buffer.append(text)
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if self._drawn_lines and now - self._last_draw < self._REDRAW_INTERVAL:
+            return
+        self._draw(now)
+
+    def collapse(self) -> None:
+        """Erase the live region, leave a single summary line, reset."""
+        if self._started_at is None:
+            return
+        elapsed = time.monotonic() - self._started_at
+        self._erase()
+        self.renderer.stdout.write(
+            self.renderer.c(f"  ⋯ 已思考 · {elapsed:.1f}s", "dim") + "\n"
+        )
+        self.renderer.stdout.flush()
+        self._buffer.clear()
+        self._drawn_lines = 0
+        self._started_at = None
+        self._last_draw = 0.0
+
+    def _erase(self) -> None:
+        if not self._drawn_lines:
+            return
+        self.renderer.stdout.write(f"\x1b[{self._drawn_lines}A\r\x1b[J")
+        self._drawn_lines = 0
+
+    def _draw(self, now: float) -> None:
+        width = max(20, shutil.get_terminal_size().columns - 4)
+        lines = ["⋯ 思考中"]
+        lines.extend(self._tail_lines(width))
+        self._erase()
+        for line in lines:
+            self.renderer.stdout.write(
+                self.renderer.c(f"  {line}", "dim", "gray") + "\n"
+            )
+        self.renderer.stdout.flush()
+        self._drawn_lines = len(lines)
+        self._last_draw = now
+
+    def _tail_lines(self, width: int) -> list[str]:
+        text = "".join(self._buffer).replace("\t", "  ")
+        logical = [line.strip() for line in text.splitlines() if line.strip()]
+        return [
+            _truncate_display(line, width)
+            for line in logical[-self._MAX_TAIL_LINES :]
+        ]
+
+
+def _truncate_display(text: str, max_cols: int) -> str:
+    """Truncate to a display width, counting East Asian wide chars as two."""
+    used = 0
+    kept: list[str] = []
+    for ch in text:
+        char_width = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if used + char_width > max_cols - 1:
+            kept.append("…")
+            break
+        kept.append(ch)
+        used += char_width
+    return "".join(kept)
 
 
 def build_parser() -> argparse.ArgumentParser:
