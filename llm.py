@@ -78,6 +78,27 @@ class LLMStreamEvent:
 # ── abstract client ──────────────────────────────────────────────
 
 
+def is_retryable_llm_error(exc: Exception) -> bool:
+    """Classify a provider exception as transient (worth retrying) or not.
+
+    Provider-agnostic: HTTP-style errors expose ``status_code`` (429 and 5xx
+    are transient, other 4xx are caller mistakes); connection/timeout errors
+    carry no status and are transient by nature.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    transient_names = {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ConnectionError",
+        "TimeoutError",
+    }
+    return any(
+        klass.__name__ in transient_names for klass in type(exc).__mro__
+    )
+
+
 class LLMClient(abc.ABC):
     """Interface that every LLM provider must implement."""
 

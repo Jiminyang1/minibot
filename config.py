@@ -36,6 +36,7 @@ class Config:
     compact_token_threshold: int = 40000
     reserved_completion_tokens: int = 4096
     compact_keep_recent_tokens: int = 16000
+    llm_max_retries: int = 3
 
     def __post_init__(self) -> None:
         if self.approval_mode not in {"ask", "always"}:
@@ -61,6 +62,8 @@ class Config:
             raise ValueError(
                 "compact_keep_recent_tokens 必须小于有效输入预算。"
             )
+        if self.llm_max_retries < 0:
+            raise ValueError("llm_max_retries 不能小于 0。")
 
     @classmethod
     def from_env(cls) -> Config:
@@ -95,6 +98,7 @@ class Config:
                 "MINIBOT_COMPACT_KEEP_RECENT_TOKENS",
                 cls.compact_keep_recent_tokens,
             ),
+            llm_max_retries=_get_int("MINIBOT_LLM_MAX_RETRIES", cls.llm_max_retries),
         )
 
 

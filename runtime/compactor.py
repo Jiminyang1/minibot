@@ -26,7 +26,11 @@ from .compaction import (
     summary_projection_offset,
 )
 from .context_builder import ContextBuilder
-from .messages import ModelMessage
+from .messages import (
+    ModelMessage,
+    format_model_messages_for_summary,
+    session_message_to_model,
+)
 
 if TYPE_CHECKING:
     from ..session import MessageEvent, Session, SessionEntry, SessionManager
@@ -153,18 +157,31 @@ class Compactor:
             )
 
         self._check_cancel_event(cancel_event)
-        summary = self.summarizer(
-            build_summary_request(
-                preparation.messages_to_summarize,
-                previous_summary=preparation.previous_summary,
-                turn_prefix_messages=preparation.turn_prefix_messages,
-                include_reasoning_content=self.include_reasoning_content,
-            )
-        )
         compacted_messages = [
             *preparation.messages_to_summarize,
             *preparation.turn_prefix_messages,
         ]
+        degraded_reason: str | None = None
+        try:
+            summary = self.summarizer(
+                build_summary_request(
+                    preparation.messages_to_summarize,
+                    previous_summary=preparation.previous_summary,
+                    turn_prefix_messages=preparation.turn_prefix_messages,
+                    include_reasoning_content=self.include_reasoning_content,
+                )
+            )
+        except RunCancelled:
+            raise
+        except Exception as exc:
+            # A failing summariser must not fail the turn: degrade to a
+            # truncated raw digest so compaction still frees the budget.
+            summary = self._fallback_summary(
+                compacted_messages,
+                previous_summary=preparation.previous_summary,
+                error=exc,
+            )
+            degraded_reason = type(exc).__name__
         details = extract_compaction_details(
             previous_details=previous_details,
             messages=compacted_messages,
@@ -182,10 +199,13 @@ class Compactor:
             details=details,
         )
         after_tokens = self._current_tokens(session)
-        return True, (
+        message = (
             f"已压缩: {before} -> {len(session.messages)} 条消息, "
             f"请求预算 {tokens_before} -> {after_tokens} tokens"
         )
+        if degraded_reason is not None:
+            message += f"（摘要降级为截断: {degraded_reason}）"
+        return True, message
 
     def _drop_read_only_tool_tail(
         self,
@@ -278,15 +298,53 @@ class Compactor:
             return note
 
         self._check_cancel_event(cancel_event)
-        summary = self.summarizer(
-            build_summary_request(
+        try:
+            summary = self.summarizer(
+                build_summary_request(
+                    prefix,
+                    previous_summary=previous_summary,
+                    include_reasoning_content=self.include_reasoning_content,
+                )
+            )
+        except RunCancelled:
+            raise
+        except Exception as exc:
+            summary = self._fallback_summary(
                 prefix,
                 previous_summary=previous_summary,
-                include_reasoning_content=self.include_reasoning_content,
+                error=exc,
             )
-        )
         self._check_cancel_event(cancel_event)
         return summary.strip() + "\n\n" + note
+
+    _FALLBACK_TAIL_CHARS = 2000
+
+    def _fallback_summary(
+        self,
+        messages: list[MessageEvent],
+        *,
+        previous_summary: str | None,
+        error: Exception,
+    ) -> str:
+        """Truncated raw digest used when the summariser LLM call fails."""
+        formatted = format_model_messages_for_summary(
+            [
+                session_message_to_model(
+                    message,
+                    include_reasoning_content=self.include_reasoning_content,
+                )
+                for message in messages
+            ]
+        )
+        note = (
+            f"[自动摘要失败（{type(error).__name__}），以下为被压缩上下文的截断原文]"
+        )
+        parts: list[str] = []
+        if previous_summary:
+            parts.append(previous_summary.strip())
+        parts.append(note)
+        parts.append(formatted[-self._FALLBACK_TAIL_CHARS :])
+        return "\n\n".join(parts)
 
     def _latest_tool_transaction_block(
         self,

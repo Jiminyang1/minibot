@@ -261,6 +261,11 @@ class CliRenderer:
             if self.verbose and payload.get("truncated"):
                 bits.append("truncated")
             return " · ".join(bits)
+        if event.type == "model.request.retrying":
+            return (
+                f"模型请求重试 {payload.get('attempt')}/{payload.get('max_retries')}: "
+                f"{payload.get('error_type')} · 等待 {payload.get('delay_seconds')}s"
+            )
         if event.type == "approval.required":
             return f"等待批准: {payload.get('tool')}"
         if event.type == "approval.resolved":
@@ -345,6 +350,10 @@ class CliRenderer:
         elif event.type == "model.request.completed":
             tool_count = payload.get("tool_call_count", 0)
             self.update_status("drafting" if tool_count == 0 else f"planning {tool_count} tool(s)")
+        elif event.type == "model.request.retrying":
+            self.update_status(
+                f"retrying {payload.get('attempt')}/{payload.get('max_retries')}"
+            )
         elif event.type == "tool_call.started":
             label = payload.get("display_name") or payload.get("tool") or "tool"
             self.update_status(f"running {label}")

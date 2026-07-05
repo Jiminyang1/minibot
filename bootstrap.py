@@ -152,6 +152,7 @@ def build_runtime(
         approval_gate=ToolApprovalGate(approval_policy),
         max_iterations=config.max_iterations,
         max_parallel_tools=config.max_parallel_tools,
+        llm_max_retries=config.llm_max_retries,
     )
     agent_session = AgentSession(
         agent_loop=agent_loop,

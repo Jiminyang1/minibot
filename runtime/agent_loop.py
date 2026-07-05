@@ -23,7 +23,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall
+from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall, is_retryable_llm_error
 from ..session import MessageEvent, SessionEntry
 from ..tools.base import Tool, ToolExecutionContext
 from ..tools.registry import PreparedToolCall, ToolRegistry
@@ -76,6 +76,8 @@ class AgentLoop:
         approval_gate: ToolApprovalGate | None = None,
         max_iterations: int = 20,
         max_parallel_tools: int = 4,
+        llm_max_retries: int = 3,
+        retry_base_delay: float = 1.0,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
@@ -88,6 +90,8 @@ class AgentLoop:
         self.approval_gate = approval_gate
         self.max_iterations = max_iterations
         self.max_parallel_tools = max_parallel_tools
+        self.llm_max_retries = llm_max_retries
+        self.retry_base_delay = retry_base_delay
 
     def run_turn(
         self,
@@ -290,40 +294,83 @@ class AgentLoop:
 
         Deltas are advisory observation; everything downstream works off the
         terminal ``LLMResponse`` alone, so streaming never changes turn state.
+
+        Transient failures (429/5xx/connection) are retried with exponential
+        backoff — but only while no delta has been published yet: once text
+        reached the user, a silent restart would show it twice.
         """
-        response: LLMResponse | None = None
-        stream = self.llm.chat_stream(
-            built.messages,
-            built.tool_definitions,
-            model=self.model,
-        )
-        try:
-            for event in stream:
-                self._check_cancel(cancel_event)
-                if event.kind == "response":
-                    response = event.response
-                    continue
-                if event.text:
-                    emitter.emit(
-                        "message.delta",
-                        {
-                            "iteration": iteration,
-                            "channel": event.kind,
-                            "text": event.text,
-                        },
+        attempt = 0
+        while True:
+            emitted_delta = False
+            try:
+                response: LLMResponse | None = None
+                stream = self.llm.chat_stream(
+                    built.messages,
+                    built.tool_definitions,
+                    model=self.model,
+                )
+                try:
+                    for event in stream:
+                        self._check_cancel(cancel_event)
+                        if event.kind == "response":
+                            response = event.response
+                            continue
+                        if event.text:
+                            emitted_delta = True
+                            emitter.emit(
+                                "message.delta",
+                                {
+                                    "iteration": iteration,
+                                    "channel": event.kind,
+                                    "text": event.text,
+                                },
+                            )
+                finally:
+                    # Closing the generator triggers the provider's own cleanup
+                    # (GeneratorExit → its finally closes the underlying HTTP
+                    # stream), which matters when aborting mid-stream.
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        close()
+                if response is None:
+                    raise RuntimeError(
+                        "LLM 流式响应缺少终局事件（provider 违反 chat_stream 契约）。"
                     )
-        finally:
-            # Closing the generator triggers the provider's own cleanup
-            # (GeneratorExit → its finally closes the underlying HTTP stream),
-            # which matters when cancellation aborts mid-stream.
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
-        if response is None:
-            raise RuntimeError(
-                "LLM 流式响应缺少终局事件（provider 违反 chat_stream 契约）。"
-            )
-        return response
+                return response
+            except RunCancelled:
+                raise
+            except Exception as exc:
+                if (
+                    emitted_delta
+                    or attempt >= self.llm_max_retries
+                    or not is_retryable_llm_error(exc)
+                ):
+                    raise
+                attempt += 1
+                delay = self.retry_base_delay * (2 ** (attempt - 1))
+                emitter.emit(
+                    "model.request.retrying",
+                    {
+                        "iteration": iteration,
+                        "attempt": attempt,
+                        "max_retries": self.llm_max_retries,
+                        "delay_seconds": delay,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+                self._wait_before_retry(delay, cancel_event)
+
+    @staticmethod
+    def _wait_before_retry(
+        delay: float,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        if cancel_event is None:
+            time.sleep(delay)
+            return
+        if cancel_event.wait(delay):
+            raise RunCancelled("run cancelled by user")
 
     def _append(self, session: Session, message: MessageEvent) -> MessageEvent:
         """Step ⑤: the loop's own state mutation, persisted in the same call."""
