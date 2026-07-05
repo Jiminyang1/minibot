@@ -797,3 +797,19 @@ button:not(:disabled):active {
     grid-template-rows: minmax(120px, 0.7fr) minmax(150px, 1fr);
   }
 }
+
+.message.streaming .message-content {
+  white-space: pre-wrap;
+}
+
+.message.streaming .message-content::after {
+  content: "▍";
+  opacity: 0.6;
+  animation: minibot-caret 1s steps(1) infinite;
+}
+
+@keyframes minibot-caret {
+  50% {
+    opacity: 0;
+  }
+}

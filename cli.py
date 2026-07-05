@@ -91,6 +91,10 @@ class CliRenderer:
         self._compacted_runs: set[str] = set()
         self._failed_runs: set[str] = set()
         self._status_line = StatusLine(self, enabled=self.stdout.isatty() and not verbose)
+        # Typewriter state: True while a streamed line is open on the terminal.
+        # While open, the spinner stays off and block output breaks the line first.
+        self._stream_open = False
+        self._streamed_replies: set[str] = set()
 
     def c(self, text: str, *styles: str) -> str:
         if not self.use_color:
@@ -136,18 +140,22 @@ class CliRenderer:
                 self.info(line)
 
     def info(self, message: str) -> None:
+        self._end_stream_line()
         self.clear_status()
         print(self.c(f"  {message}", "gray"), file=self.stdout)
 
     def success(self, message: str) -> None:
+        self._end_stream_line()
         self.clear_status()
         print(self.c(f"  {message}", "green"), file=self.stdout)
 
     def warn(self, message: str) -> None:
+        self._end_stream_line()
         self.clear_status()
         print(self.c(f"  {message}", "yellow"), file=self.stdout)
 
     def error(self, message: str) -> None:
+        self._end_stream_line()
         self.clear_status()
         print(self.c(f"  {message}", "red"), file=self.stdout)
 
@@ -169,14 +177,44 @@ class CliRenderer:
             self.render_notice(notice)
 
     def render_event(self, event: RuntimeEvent) -> None:
+        if event.type == "message.delta":
+            self._render_stream_delta(event)
+            return
+        if event.type == "message.completed" and self._stream_open:
+            # The reply just finished streaming; close the line and remember
+            # the run so print_reply does not repeat the text.
+            self._end_stream_line()
+            self._streamed_replies.add(event.run_id)
         message = self.format_event(event)
         if message:
+            self._end_stream_line()
             self.clear_status()
             print(
                 f"  {self.c('›', 'dim')} {self.c(message, 'dim')}",
                 file=self.stdout,
             )
         self.update_status_from_event(event)
+
+    def _render_stream_delta(self, event: RuntimeEvent) -> None:
+        payload = event.payload
+        if payload.get("channel") != "text":
+            return
+        text = str(payload.get("text") or "")
+        if not text:
+            return
+        self.clear_status()
+        if not self._stream_open:
+            self._stream_open = True
+            self.stdout.write(f"\n{self.c('MiniBot ›', 'bold', 'magenta')} ")
+        self.stdout.write(text)
+        self.stdout.flush()
+
+    def _end_stream_line(self) -> None:
+        if not self._stream_open:
+            return
+        self._stream_open = False
+        self.stdout.write("\n")
+        self.stdout.flush()
 
     def format_event(self, event: RuntimeEvent) -> str | None:
         payload = event.payload
@@ -249,8 +287,13 @@ class CliRenderer:
     def failed_run_seen(self, run_id: str) -> bool:
         return run_id in self._failed_runs
 
-    def print_reply(self, reply: str) -> None:
+    def print_reply(self, reply: str, *, run_id: str | None = None) -> None:
+        self._end_stream_line()
         self.clear_status()
+        if run_id is not None and run_id in self._streamed_replies:
+            # Already on screen via the typewriter; printing again would dupe.
+            self._streamed_replies.discard(run_id)
+            return
         visible = reply if reply.strip() else "（模型返回空回复）"
         print(
             f"\n{self.c('MiniBot ›', 'bold', 'magenta')} {visible}",
@@ -270,6 +313,10 @@ class CliRenderer:
         self._status_line.stop()
 
     def update_status_from_event(self, event: RuntimeEvent) -> None:
+        if self._stream_open:
+            # The typewriter owns the terminal line; a spinner redraw would
+            # erase streamed text. Status resumes once the line closes.
+            return
         payload = event.payload
         if event.type == "run.started":
             self.update_status("thinking")
@@ -303,6 +350,7 @@ class CliRenderer:
         if cancel_event is not None and cancel_event.is_set():
             raise RunCancelled("run cancelled while waiting for approval")
 
+        self._end_stream_line()
         self.clear_status()
         preview = ", ".join(f"{key}={value!r}" for key, value in request.args.items())
         prompt = (
@@ -607,7 +655,7 @@ def _run_prompt(
         did_compact=result.did_compact,
         compact_message=result.compact_message,
     )
-    renderer.print_reply(result.reply)
+    renderer.print_reply(result.reply, run_id=run_id)
     reloaded = runtime.manager.load(current_session_id)
     return current_session_id if reloaded is None else reloaded.session_id
 

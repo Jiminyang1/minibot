@@ -26,6 +26,10 @@ from .session.models import utc_now
 _SENTINEL = object()
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
+# Advisory events: broadcast to live subscribers, never stored for replay.
+# Reconnecting clients recover the authoritative text from message.completed.
+_TRANSIENT_EVENT_TYPES = {"message.delta"}
+
 
 class RunRequest(BaseModel):
     input: str = Field(min_length=1)
@@ -108,6 +112,15 @@ class RunEventStore:
             }
 
     def append(self, event: RuntimeEvent) -> None:
+        if event.type in _TRANSIENT_EVENT_TYPES:
+            with self._lock:
+                if event.run_id not in self._events:
+                    return
+                subscribers = list(self._subscribers.get(event.run_id, []))
+            for queue in subscribers:
+                queue.put(event)
+            return
+
         terminal_status = _terminal_status(event.type)
         with self._lock:
             self._events.setdefault(event.run_id, []).append(event)

@@ -58,6 +58,7 @@ const RUNTIME_EVENT_TYPES = [
   "approval.resolved",
   "tool_call.completed",
   "tool_call.failed",
+  "message.delta",
   "message.completed",
   "run.completed",
   "run.cancelled",
@@ -67,6 +68,7 @@ const RUNTIME_EVENT_TYPES = [
 let activeSessionId = "current";
 let currentRunId = null;
 let currentEventSource = null;
+let streamingBubble = null;
 
 function setSendState(state) {
   const next = state === "stop" ? "stop" : "send";
@@ -295,6 +297,7 @@ function summarize(event) {
 }
 
 function finishRun(status, state) {
+  clearStreamingBubble();
   setStatus(status, state);
   setSendState("send");
   currentRunId = null;
@@ -302,7 +305,41 @@ function finishRun(status, state) {
   loadSessions().catch((error) => console.error("load sessions failed", error));
 }
 
+function appendStreamDelta(event) {
+  const p = event.payload || {};
+  if (p.channel !== "text" || !p.text) return;
+  if (conversation.querySelector(".empty")) conversation.innerHTML = "";
+  if (!streamingBubble) {
+    const row = document.createElement("div");
+    row.className = "message assistant streaming";
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+    const role = document.createElement("span");
+    role.className = "message-role";
+    role.textContent = "assistant";
+    meta.append(role);
+    const content = document.createElement("div");
+    content.className = "message-content";
+    row.append(meta, content);
+    conversation.append(row);
+    streamingBubble = { row, content, buffer: "" };
+  }
+  streamingBubble.buffer += p.text;
+  streamingBubble.content.textContent = streamingBubble.buffer;
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
+function clearStreamingBubble() {
+  if (!streamingBubble) return;
+  streamingBubble.row.remove();
+  streamingBubble = null;
+}
+
 function appendEvent(event) {
+  if (event.type === "message.delta") {
+    appendStreamDelta(event);
+    return;
+  }
   if (feed.querySelector(".empty")) feed.innerHTML = "";
   runTag.textContent = event.run_id || "run";
   if (event.type === "run.started" && event.run_id) {
@@ -361,7 +398,20 @@ function appendEvent(event) {
   feed.append(row);
   feed.scrollTop = feed.scrollHeight;
 
+  if (
+    event.type === "model.request.completed" &&
+    streamingBubble &&
+    (event.payload?.tool_call_count || 0) > 0
+  ) {
+    // Intermediate narration before tool calls: freeze the bubble so the
+    // next iteration streams into a fresh one.
+    streamingBubble.row.classList.remove("streaming");
+    streamingBubble = null;
+  }
   if (event.type === "message.completed" && event.payload && event.payload.content) {
+    // The completed event carries the authoritative text; the streamed
+    // bubble is advisory and gets replaced wholesale.
+    clearStreamingBubble();
     appendMessage({
       role: "assistant",
       content: event.payload.content,
