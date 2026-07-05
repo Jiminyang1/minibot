@@ -13,6 +13,7 @@
 - Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
 - 跨会话用户长期记忆（`remember` / `forget`）
 - 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）
+- 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
 
 ## 快速开始
@@ -141,6 +142,7 @@ flowchart TB
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | compact 后保留的近期上下文 |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
+| `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
 
 持久化路径（无需配置）：
 

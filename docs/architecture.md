@@ -149,6 +149,7 @@ sequenceDiagram
 | `model.request.started` | AgentLoop | `iteration` `model` `input_preview` | CLI 状态行 |
 | `model.request.completed` | AgentLoop | `iteration` `elapsed_ms` `tool_call_count` `usage`(本次调用);空回复时另有 `empty_reply` `response_debug` | fold(`llm_call_count`、usage 求和)、CLI |
 | `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI(text → 打字机;reasoning → 折叠式灰字预览)、web 流式气泡;**fold 与重放忽略** |
+| `model.request.retrying` | AgentLoop(瞬时错误退避时) | `iteration` `attempt` `max_retries` `delay_seconds` `error_type` `message` | CLI 提示与状态行;fold 忽略 |
 | `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval` | CLI |
 | `approval.required` | ToolApprovalGate | `approval_id` `tool_call_id` `tool` `args` | CLI 提问、web 审批端点 |
 | `approval.resolved` | ToolApprovalGate | 同上 + `approved`,自动放行时 `auto: true` | CLI、web |
@@ -201,13 +202,17 @@ flowchart TD
 
 **取消或崩溃留下的悬空 tool_calls**(assistant 带 tool_calls 但 tool 结果未落盘):投影层 `_filter_incomplete_tool_transactions` 在读取时整块过滤,保证下一轮请求永远合法。这是 append-only + 投影架构的直接收益。
 
-**LLM 中途失败**:异常直接向上抛,无包装。已消耗的 usage 不丢——它随每次 `model.request.completed` 事件即时离开循环,fold 手里已有累计值(这就是旧 `PartialRunError` 被删掉的原因)。
+**LLM 瞬时失败**:429/5xx/连接类错误按指数退避重试(默认 ≤3 次,`MINIBOT_LLM_MAX_RETRIES` 可调),每次重试发 `model.request.retrying` 事件;退避等待用 `cancel_event.wait` 实现,取消随时打断。**首个 delta 发出后不再重试**——文本已到达用户,静默重来会显示两遍。分类逻辑在 `llm.py` 的 `is_retryable_llm_error`(有 `status_code` 按码判断,连接/超时类天然瞬时)。重试耗尽或不可重试的异常直接向上抛,无包装;已消耗的 usage 不丢——它随每次 `model.request.completed` 事件即时离开循环,fold 手里已有累计值(这就是旧 `PartialRunError` 被删掉的原因)。
+
+**摘要降级**:compaction 的摘要 LLM 调用失败时,`Compactor` 降级为"上一份摘要 + 失败注记 + 被压缩内容的截断原文"(尾部 2000 字符),压缩照常完成并落盘,`context.compacted` 消息附注"摘要降级为截断"。压缩失败永远不炸 turn。
 
 **空回复**:发一条带 `empty_reply: true` + `response_debug` 的诊断事件,然后抛 `RuntimeError`。
 
 **轮次上限**:追加一条道歉 assistant 消息、`message.completed(reason=max_iterations)`,正常返回(不是异常)。
 
 **工具异常**:永远不炸循环——registry 层捕获为 `ToolOutput.failure`,审批 handler 崩溃降级为错误输出,并行批次中单个工具失败不影响同批其他工具。
+
+**工具参数校验**:`registry.prepare` 先对照工具声明给模型的 JSON Schema 校验参数(`jsonschema`),违规返回带 `$.path` 定位的 `invalid_args`,让模型在执行前自我纠正;schema 本身畸形(部分 MCP server 会给宽松 schema)则跳过校验、退回签名绑定兜底。校验器按工具缓存编译。
 
 **fold 的容错**:`RunLogFold` 整体 try/except,观测记账失败绝不反噬 run 本身。
 

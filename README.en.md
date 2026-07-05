@@ -13,6 +13,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
 - Cross-session user memory (`remember` / `forget`)
 - Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint)
+- Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
 
 ## Quick start
@@ -141,6 +142,7 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | recent context kept after compaction |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
+| `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
 
 Persistence paths (no configuration needed):
 
