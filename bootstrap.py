@@ -26,6 +26,7 @@ from .runtime.context_builder import ContextBuilder
 from .runtime.events import RuntimeEventHandler, fanout
 from .runtime.run_log_fold import RunLogFold
 from .runtime.tool_output_materializer import ToolOutputMaterializer
+from .schedule_store import ScheduleStore
 from .session import SessionManager
 from .skills import SkillRegistry
 from .tools import (
@@ -34,6 +35,7 @@ from .tools import (
     history_toolset,
     memory_toolset,
     network_toolset,
+    schedule_toolset,
     shell_toolset,
     skill_toolset,
 )
@@ -49,6 +51,7 @@ class MiniBotRuntime:
     memory_store: UserMemoryStore
     artifact_store: ArtifactStore
     run_log_store: RunLogStore
+    schedule_store: ScheduleStore
     skill_registry: SkillRegistry
     tool_registry: ToolRegistry
     mcp_host: MCPHost
@@ -85,6 +88,7 @@ def build_runtime(
     artifact_store = ArtifactStore(state_home)
     memory_store = UserMemoryStore(state_home)
     run_log_store = RunLogStore(state_home)
+    schedule_store = ScheduleStore(state_home)
     llm_profile = build_llm_profile(model=config.model)
     llm = build_llm_client_from_profile(llm_profile)
     skill_registry = SkillRegistry.from_directory(package_dir / "skills")
@@ -96,6 +100,9 @@ def build_runtime(
     tool_registry.register_all(memory_toolset(memory_store))
     tool_registry.register_all(skill_toolset(skill_registry))
     tool_registry.register_all(history_toolset(manager))
+    tool_registry.register_all(
+        schedule_toolset(schedule_store, workspace=resolved_workspace)
+    )
 
     mcp_config_root, mcp_config_path, mcp_config_source = _resolve_mcp_config(
         package_dir,
@@ -175,6 +182,7 @@ def build_runtime(
         memory_store=memory_store,
         artifact_store=artifact_store,
         run_log_store=run_log_store,
+        schedule_store=schedule_store,
         skill_registry=skill_registry,
         tool_registry=tool_registry,
         mcp_host=mcp_host,

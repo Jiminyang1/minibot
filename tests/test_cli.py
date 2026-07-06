@@ -105,6 +105,7 @@ class CliTests(unittest.TestCase):
             context_builder=_ContextBuilder(),
             agent_session=_AgentSession(),
             approval_policy=ApprovalPolicy(mode="ask"),
+            schedule_store=None,
         )
 
     def test_main_rejects_positional_prompt(self) -> None:

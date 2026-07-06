@@ -25,6 +25,7 @@ dependencies = [
 [project.scripts]
 minibot = "minibot.__main__:main"
 minibot-server = "minibot.server:main"
+minibot-daemon = "minibot.scheduler:main"
 
 [tool.setuptools]
 packages = [

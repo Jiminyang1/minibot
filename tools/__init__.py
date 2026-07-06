@@ -22,12 +22,18 @@ from .read_artifact import ReadArtifactTool
 from .read_file import ReadFileTool
 from .read_skill import ReadSkillTool
 from .registry import ToolRegistry
+from .schedule_tools import (
+    CancelScheduledTaskTool,
+    ListScheduledTasksTool,
+    ScheduleTaskTool,
+)
 from .search_files import SearchFilesTool
 from .search_history import SearchHistoryTool
 from .web_search import WebSearchTool
 from .write_file import WriteFileTool
 
 if TYPE_CHECKING:
+    from ..schedule_store import ScheduleStore
     from ..session import SessionManager
     from ..skills import SkillRegistry
 
@@ -72,6 +78,19 @@ def history_toolset(session_manager: "SessionManager") -> list[Tool]:
     return [SearchHistoryTool(session_manager)]
 
 
+def schedule_toolset(
+    store: "ScheduleStore",
+    *,
+    workspace: Path | None = None,
+) -> list[Tool]:
+    """Create, list, and cancel scheduled tasks."""
+    return [
+        ScheduleTaskTool(store, workspace=None if workspace is None else str(workspace)),
+        ListScheduledTasksTool(store),
+        CancelScheduledTaskTool(store),
+    ]
+
+
 __all__ = [
     "Tool",
     "ToolRegistry",
@@ -81,4 +100,5 @@ __all__ = [
     "memory_toolset",
     "skill_toolset",
     "history_toolset",
+    "schedule_toolset",
 ]
