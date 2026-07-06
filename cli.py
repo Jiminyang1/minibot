@@ -858,6 +858,7 @@ def _command_context(runtime: MiniBotRuntime) -> CommandContext:
         approval_policy=runtime.approval_policy,
         mcp_host=runtime.mcp_host,
         config=runtime.config,
+        schedule_store=runtime.schedule_store,
     )
 
 

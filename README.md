@@ -12,6 +12,7 @@
 - 结构化 `RuntimeEvent` 单一出口：CLI 渲染、SSE Web UI、runs.jsonl 都是订阅者
 - Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
 - 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
+- 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
 - 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
@@ -167,9 +168,23 @@ uv run minibot --migrate <目录1> <目录2> ...
 - transport 支持 `${ENV_VAR}`、`${MINIBOT_PYTHON}`、`${MINIBOT_PACKAGE_DIR}`
 - 包内默认配置包含 `sqlite`、`macos_system`，以及通过 `npx -y @drawio/mcp` 启动的外部 draw.io MCP server
 
+## 定时任务
+
+对话里直接说「每天早上 8 点给我生成今日简报」或「明天 9 点提醒我交周报」，MiniBot 会调用 `schedule_task`（需审批确认）写入 `~/.minibot/schedule.json`。到点执行靠常驻 daemon：
+
+```bash
+uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
+```
+
+- 周期任务用 5 字段 cron（本地时间），一次性提醒用 ISO 时间
+- 每次触发新建一个 `[定时]` 会话（可被 `search_history` 检索），结果弹 macOS 通知
+- 错过的触发在 1 小时宽限期内补跑（如合盖睡眠后），更久的记为 missed 顺延下一次
+- 无人值守运行中敏感工具**默认拒绝**；需要完整权限可给 daemon 设 `MINIBOT_APPROVAL_MODE=always`（自担风险）
+- `/tasks` 查看、`/tasks cancel <id>` 取消，或直接用自然语言管理
+
 ## CLI 命令
 
-`/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/permission [ask|always]` · `/config` · `/help`
+`/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/tasks [cancel <id>]` · `/permission [ask|always]` · `/config` · `/help`
 
 ## Web API
 

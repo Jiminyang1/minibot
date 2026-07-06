@@ -12,6 +12,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Structured `RuntimeEvent` as the sole output channel: CLI rendering, SSE Web UI, and runs.jsonl are all subscribers
 - Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
 - Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
+- Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
 - Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint)
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
@@ -167,9 +168,23 @@ Lookup order: `MINIBOT_MCP_CONFIG_PATH` → `~/.minibot/mcp.json` → bundled `m
 - Transports support `${ENV_VAR}`, `${MINIBOT_PYTHON}`, `${MINIBOT_PACKAGE_DIR}`
 - The bundled config includes `sqlite`, `macos_system`, and an external draw.io MCP server launched via `npx -y @drawio/mcp`
 
+## Scheduled tasks
+
+Say "generate my daily brief at 8 every morning" or "remind me to submit the report tomorrow at 9" in conversation — MiniBot calls `schedule_task` (approval-gated) and writes `~/.minibot/schedule.json`. Firing needs the resident daemon:
+
+```bash
+uv run minibot-daemon    # resident process; single-instance lock
+```
+
+- Routines use five-field cron (local time); one-shot reminders use ISO timestamps
+- Each firing creates a fresh `[定时]` session (searchable via `search_history`) and posts a macOS notification
+- Missed firings catch up within a one-hour grace window (laptop lid, daemon downtime); older misses are recorded and skipped
+- Unattended runs deny sensitive tools by default; set `MINIBOT_APPROVAL_MODE=always` for the daemon at your own risk
+- Manage with `/tasks`, `/tasks cancel <id>`, or plain natural language
+
 ## CLI commands
 
-`/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/permission [ask|always]` · `/config` · `/help`
+`/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/tasks [cancel <id>]` · `/permission [ask|always]` · `/config` · `/help`
 
 ## Web API
 

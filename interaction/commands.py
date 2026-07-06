@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..runtime.approval import ApprovalPolicy
     from ..runtime.compactor import Compactor
     from ..runtime.context_builder import ContextBuilder
+    from ..schedule_store import ScheduleStore
     from ..user_memory import UserMemoryStore
 
 
@@ -44,6 +45,7 @@ class CommandContext:
     approval_policy: "ApprovalPolicy"
     mcp_host: "MCPHost | None" = None
     config: "Config | None" = None
+    schedule_store: "ScheduleStore | None" = None
 
 
 _COMMANDS: tuple[tuple[str, str], ...] = (
@@ -55,6 +57,7 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
     ("/mcp", "查看 MCP server 状态"),
     ("/mcp tools [server]", "查看 MCP 工具列表"),
     ("/skills", "查看当前可用 skills"),
+    ("/tasks [cancel <id>]", "查看或取消定时任务"),
     ("/permission [ask|always]", "查看或切换审批模式"),
     ("/config", "查看当前运行配置"),
     ("/memory", "查看长期记忆 (clear / forget <id>)"),
@@ -103,6 +106,8 @@ def dispatch_command(
         return _mcp(text, context, current_session_id)
     if text == "/skills":
         return _skills(context, current_session_id)
+    if text == "/tasks" or text.startswith("/tasks "):
+        return _tasks(text, context, current_session_id)
     if text == "/permission" or text.startswith("/permission "):
         return _permission(text, context, current_session_id)
     if text in {"/config", "/settings"}:
@@ -274,6 +279,56 @@ def _memory(
                 "用法: /memory | /memory clear | /memory forget <id>",
             ),
         ),
+    )
+
+
+def _tasks(
+    raw: str,
+    context: CommandContext,
+    current_session_id: str,
+) -> CommandResult:
+    if context.schedule_store is None:
+        return CommandResult(
+            handled=True,
+            current_session_id=current_session_id,
+            notices=(_notice("info", "当前未初始化定时任务存储。"),),
+        )
+
+    parts = raw.strip().split()
+    if len(parts) >= 2:
+        if parts[1] != "cancel" or len(parts) < 3:
+            return _usage("用法: /tasks | /tasks cancel <task_id>", current_session_id)
+        task_id = parts[2]
+        if context.schedule_store.remove(task_id):
+            return CommandResult(
+                handled=True,
+                current_session_id=current_session_id,
+                notices=(_notice("success", f"已取消定时任务 {task_id}"),),
+            )
+        return CommandResult(
+            handled=True,
+            current_session_id=current_session_id,
+            notices=(_notice("warning", f"未找到定时任务 {task_id}"),),
+        )
+
+    tasks = context.schedule_store.list()
+    if not tasks:
+        body = "当前没有定时任务。用自然语言让 MiniBot 创建,例如“每天早上 8 点给我生成今日简报”。"
+    else:
+        lines = []
+        for task in tasks:
+            next_run = task.next_run()
+            when = "不再触发" if next_run is None else f"{next_run:%m-%d %H:%M}"
+            status = task.last_status or "-"
+            lines.append(
+                f"{task.id}  {task.title} · {task.kind}: {task.expr} · "
+                f"下次 {when} · 上次 {status}"
+            )
+        body = "\n".join(lines)
+    return CommandResult(
+        handled=True,
+        current_session_id=current_session_id,
+        notices=(_notice("info", f"定时任务 · {len(tasks)} 个", body),),
     )
 
 

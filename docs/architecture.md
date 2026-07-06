@@ -13,6 +13,7 @@ flowchart TB
     subgraph entry [入口层]
         CLI[cli.py · REPL]
         SRV[server.py · HTTP/SSE]
+        SCHED[scheduler.py · daemon]
     end
 
     subgraph lifecycle [生命周期层]
@@ -46,6 +47,7 @@ flowchart TB
 
     CLI --> AS
     SRV --> AS
+    SCHED --> AS
     AS --> AL
     AL --> CB & TB & CP & GATE & MAT
     AL --> LLM
@@ -257,3 +259,14 @@ flowchart TD
 | 新 LLM provider | 实现 `LLMClient.chat`;可选覆写 `chat_stream` 获得原生流式(不覆写则自动退化为单终局事件) |
 
 刻意**没有**的扩展点:hook 管道。干预类扩展(改写请求/参数)目前只有审批一个真实需求,已作为显式依赖注入;出现第二个再设计通用接口,理由见 [core-philosophy.md](core-philosophy.md) §4。
+
+## 9. 定时任务(主动性)
+
+`scheduler.py` 是第三个入口层调用方——对 `AgentSession.prompt` 而言,daemon 和 CLI/server 没有区别,这是"headless run 本来就存在"的直接兑现。
+
+- **存储**:`~/.minibot/schedule.json`(原子重写,线程锁 + fcntl,CLI 工具进程和 daemon 可并发读写)。任务两种:`cron`(手写的 5 字段子集:`*`、数字、逗号、区间、`/step`,dom/dow 双限定时按 vixie OR;本地时间求值)与 `once`(ISO 时间,naive 视为本地)。
+- **触发**:`Scheduler.tick(now)` 是可测试单元——对每个任务算 `next_run`(锚点 = last_run 或 created),到期即触发;错过在 **1 小时宽限**内补跑,更久标记 `missed` 并顺延(避免长时间停机后的补跑风暴)。daemon 每 30s tick 一次,单实例由 `scheduler.pid.lock` 的 fcntl 非阻塞锁保证。
+- **执行**:每次触发新建 `[定时] <标题> · <时间>` 会话(独立、可被 `search_history` 检索、不无限增长),prompt 前置"无人值守"声明。**审批默认全拒**——无人在场,`schedule_task` 工具本身则标记 `requires_approval`(创建未来的自主运行是敏感操作)。
+- **投递**:成功/失败都发 macOS 通知(osascript,非 mac 静默跳过);完整结果在会话里。
+- **agent 自排程**:`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 三个工具,自然语言即可管理;CLI 侧 `/tasks` 查看与取消。
+- 刻意不做:秒级精度(tick 30s,分钟粒度足够)、任务间依赖、失败重试(下个周期天然覆盖;LLM 层瞬时重试已存在)。
