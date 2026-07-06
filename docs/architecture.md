@@ -221,27 +221,29 @@ flowchart TD
 - **run 级**:`AgentSession` 对每个 session 持一把非阻塞锁,同会话并发 prompt 直接抛 `SessionBusyError`;不同会话可并行(server 场景)。
 - **工具级**:同一响应内,连续的 `concurrency_safe`(= `read_only` 且非 `exclusive`)工具组成并行批次,其余单个串行;批次内结果按模型请求顺序回填。executor 每个 run 惰性创建一个(上限 `max_parallel_tools`),`finally` 中 `shutdown(cancel_futures=True)`。
 - **MCP**:asyncio 隔离在 `mcp_host` 的后台线程,对循环暴露同步接口;MCP 工具默认 `exclusive`,不进并行批次。
-- **持久化**:`SessionManager` 用线程锁 + `fcntl` 文件锁保护读写,meta 原子写(临时文件 + `os.replace`)。
+- **持久化**:`SessionManager` 用线程锁 + `fcntl` 文件锁保护读写,meta 原子写(临时文件 + `os.replace`)。状态全局化后,不同目录启动的 CLI/server 进程共享会话池与 `current_session` 指针;文件锁保证追加原子性,但 `AgentSession` 的会话锁是进程内的——同一会话被两个进程同时跑 turn 的防护目前只有文件层,单用户场景风险可接受,出现症状再加跨进程锁。
 - **事件**:emitter 的 seq 分配持锁;`fanout` 同步顺序调用各订阅者,因此单个 run 内订阅者看到的事件顺序一致。
 
 ## 7. 持久化布局
 
+**状态是全局的**(默认 `~/.minibot`,`MINIBOT_HOME` 覆盖)。设计原则:会话属于用户,不属于启动目录——**工作目录是"手"的范围(fs/exec 工具的根),不是"记忆"的地址**;它作为 provenance 元数据记录在会话 meta 里,供检索时过滤。
+
 ```
-<workspace>/.minibot/
+~/.minibot/                 # MINIBOT_HOME
 ├── sessions/<session_id>/
 │   ├── messages.jsonl      # append-only entries: {type: message|compaction, ...}
-│   ├── meta.json           # 标题、时间戳、message_count(原子重写)
+│   ├── meta.json           # 标题、时间戳、workspace 来源、message_count(原子重写)
 │   └── artifacts/          # 大工具输出,模型只持引用
 ├── runs.jsonl              # RunLogFold 产物,一行一个 run 摘要
 ├── locks/                  # per-session fcntl 锁文件
-└── current_session         # 当前会话指针
-
-~/.minibot/
+├── current_session         # 当前会话指针(全局:换目录接着聊)
 ├── user_memory.json        # 跨会话长期记忆
 └── mcp.json                # 全局 MCP 配置(可选,优先于包内默认)
 ```
 
-真相源只有 `messages.jsonl`;`session.messages`、`meta.json`、`runs.jsonl` 都是它或事件流的派生物。
+真相源只有 `messages.jsonl`;`session.messages`、`meta.json`、`runs.jsonl` 都是它或事件流的派生物。旧版散落的 `<workspace>/.minibot` 由 `minibot --migrate <dir>...` 一次性收编(id 冲突重命名并改写 meta、runs.jsonl 合并、回填 workspace 字段)。
+
+**情景记忆**:`search_history` 工具对这份全局存储做 agentic search——关键词 AND 匹配消息原文与 compaction 摘要,支持 days / session / workspace 过滤,自动排除当前会话("现在"不是"历史")。不引入向量库:单用户规模下,对真相源的直接检索在透明度和新鲜度上优于预蒸馏管线;召回不足时再考虑本地嵌入(先用失败案例证明需求)。
 
 ## 8. 扩展点
 

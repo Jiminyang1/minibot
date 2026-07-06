@@ -11,7 +11,7 @@
 - 会话 append-only 持久化，超预算自动 compact（安全切点摘要 + 只读工具块降级）
 - 结构化 `RuntimeEvent` 单一出口：CLI 渲染、SSE Web UI、runs.jsonl 都是订阅者
 - Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
-- 跨会话用户长期记忆（`remember` / `forget`）
+- 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
 - 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
@@ -143,13 +143,20 @@ flowchart TB
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
+| `MINIBOT_HOME` | `~/.minibot` | 全局状态目录（会话 / 运行日志 / 记忆 / mcp.json） |
 
-持久化路径（无需配置）：
+持久化路径——**状态全局集中**（默认 `~/.minibot`，`MINIBOT_HOME` 可改）。会话属于用户而不属于启动目录；工作目录只决定 fs/exec 工具的根，并作为元数据记在会话上：
 
-- `<workspace>/.minibot/sessions/<id>/messages.jsonl` — 会话（append-only）
-- `<workspace>/.minibot/runs.jsonl` — 运行摘要（事件流的 fold）
-- `<workspace>/.minibot/sessions/<id>/artifacts/` — 大 tool 输出
+- `~/.minibot/sessions/<id>/messages.jsonl` — 所有会话（append-only，meta 含 workspace 来源）
+- `~/.minibot/runs.jsonl` — 运行摘要（事件流的 fold）
+- `~/.minibot/sessions/<id>/artifacts/` — 大 tool 输出
 - `~/.minibot/user_memory.json` — 长期记忆
+
+旧版本散落在各目录的 `<workspace>/.minibot` 用一条命令收编（id 冲突自动重命名、run 日志合并）：
+
+```bash
+uv run minibot --migrate <目录1> <目录2> ...
+```
 
 ### MCP（`mcp.json`，全局）
 

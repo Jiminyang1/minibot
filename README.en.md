@@ -11,7 +11,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Append-only session persistence with automatic compaction (safe-cut-point summaries, read-only tool-block fallback)
 - Structured `RuntimeEvent` as the sole output channel: CLI rendering, SSE Web UI, and runs.jsonl are all subscribers
 - Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
-- Cross-session user memory (`remember` / `forget`)
+- Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
 - Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint)
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
@@ -143,13 +143,20 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
+| `MINIBOT_HOME` | `~/.minibot` | global state home (sessions / run log / memory / mcp.json) |
 
-Persistence paths (no configuration needed):
+Persistence — **state is centralized globally** (default `~/.minibot`, override with `MINIBOT_HOME`). Conversations belong to the user, not to the launch directory; the workspace only roots the fs/exec tools and is recorded as session metadata:
 
-- `<workspace>/.minibot/sessions/<id>/messages.jsonl` — sessions (append-only)
-- `<workspace>/.minibot/runs.jsonl` — run summaries (fold of the event stream)
-- `<workspace>/.minibot/sessions/<id>/artifacts/` — large tool outputs
+- `~/.minibot/sessions/<id>/messages.jsonl` — all sessions (append-only; meta records workspace provenance)
+- `~/.minibot/runs.jsonl` — run summaries (fold of the event stream)
+- `~/.minibot/sessions/<id>/artifacts/` — large tool outputs
 - `~/.minibot/user_memory.json` — long-term memory
+
+Legacy per-workspace `.minibot` directories migrate with one command (id collisions renamed, run logs merged):
+
+```bash
+uv run minibot --migrate <dir1> <dir2> ...
+```
 
 ### MCP (`mcp.json`, global)
 
