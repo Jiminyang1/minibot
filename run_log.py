@@ -69,10 +69,14 @@ class RunLogRecord:
 
 
 class RunLogStore:
-    """Persist run summaries to ``.minibot/runs.jsonl``."""
+    """Persist run summaries to ``<state_home>/runs.jsonl``."""
 
-    def __init__(self, workspace: Path | None = None) -> None:
-        self.state_dir = (workspace or Path.cwd()).resolve() / ".minibot"
+    def __init__(self, state_home: Path | None = None) -> None:
+        if state_home is None:
+            from .config import resolve_state_home
+
+            state_home = resolve_state_home()
+        self.state_dir = state_home.resolve()
         self.runs_path = self.state_dir / "runs.jsonl"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 

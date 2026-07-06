@@ -316,6 +316,7 @@ class Session:
         "title",
         "created_at",
         "updated_at",
+        "workspace",
         "entries",
         "messages",
         "_message_count",
@@ -329,12 +330,16 @@ class Session:
         updated_at: str | None = None,
         entries: list[SessionEntry] | None = None,
         message_count: int | None = None,
+        workspace: str | None = None,
     ) -> None:
         now = utc_now()
         self.session_id = session_id
         self.title = title
         self.created_at = created_at or now
         self.updated_at = updated_at or self.created_at
+        # Provenance: the working directory this conversation started in.
+        # State is global; the workspace is an attribute, not an address.
+        self.workspace = workspace
         self.entries = list(entries or [])
         self.messages = SessionContextProjector.project_messages(self.entries)
         self._message_count = message_count

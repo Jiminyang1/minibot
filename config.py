@@ -11,6 +11,19 @@ from typing import Literal, TypeAlias
 ApprovalMode: TypeAlias = Literal["ask", "always"]
 
 
+def resolve_state_home() -> Path:
+    """Return the global state home (sessions, runs, memory, MCP config).
+
+    Assistant memory is centralized: conversations belong to the user, not
+    to whichever directory the CLI happened to start in. The workspace only
+    scopes the *tools* (fs/exec); it is recorded as session metadata.
+    """
+    raw = os.environ.get("MINIBOT_HOME", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (Path.home() / ".minibot").resolve()
+
+
 def load_env(package_dir: Path | None = None) -> None:
     """Load .env from *package_dir* (default: this file's directory).
 

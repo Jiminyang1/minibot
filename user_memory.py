@@ -36,7 +36,11 @@ class UserMemoryStore:
     """Load / save / mutate global user memory backed by a JSON file."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.state_dir = (root or (Path.home() / ".minibot")).resolve()
+        if root is None:
+            from .config import resolve_state_home
+
+            root = resolve_state_home()
+        self.state_dir = root.resolve()
         self.memory_path = self.state_dir / "user_memory.json"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 

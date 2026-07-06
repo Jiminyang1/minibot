@@ -67,7 +67,7 @@ def _agent_session(loop, manager, workspace: Path, registry: ToolRegistry) -> Ag
 
 
 def _read_run_logs(workspace: Path) -> list[dict[str, object]]:
-    path = workspace / ".minibot" / "runs.jsonl"
+    path = workspace / "runs.jsonl"
     return [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
@@ -156,7 +156,7 @@ class RunLogFoldTests(unittest.TestCase):
             self.assertNotEqual(log["final_reply_preview"], reply)
             self.assertGreaterEqual(int(log["duration_ms"]), 0)
 
-            session_dir = workspace / ".minibot" / "sessions" / "s_test"
+            session_dir = workspace / "sessions" / "s_test"
             self.assertTrue((session_dir / "messages.jsonl").exists())
             reloaded = manager.load("s_test")
             assert reloaded is not None

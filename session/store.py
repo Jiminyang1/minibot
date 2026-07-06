@@ -37,10 +37,22 @@ def validate_session_id(session_id: str) -> str:
 
 
 class SessionManager:
-    """Persist sessions under ``.minibot/sessions/<session_id>/``."""
+    """Persist sessions under ``<state_home>/sessions/<session_id>/``."""
 
-    def __init__(self, workspace: Path | None = None) -> None:
-        self.state_dir = (workspace or Path.cwd()).resolve() / ".minibot"
+    def __init__(
+        self,
+        state_home: Path | None = None,
+        *,
+        default_workspace: Path | None = None,
+    ) -> None:
+        if state_home is None:
+            from ..config import resolve_state_home
+
+            state_home = resolve_state_home()
+        self.state_dir = state_home.resolve()
+        self.default_workspace = (
+            None if default_workspace is None else str(default_workspace.resolve())
+        )
         self.sessions_dir = self.state_dir / "sessions"
         self.locks_dir = self.state_dir / "locks"
         self.current_session_path = self.state_dir / "current_session"
@@ -70,7 +82,11 @@ class SessionManager:
             while True:
                 with self._locked_session(resolved_id):
                     if not self._exists(resolved_id):
-                        session = Session(resolved_id, title=title or "新会话")
+                        session = Session(
+                            resolved_id,
+                            title=title or "新会话",
+                            workspace=self.default_workspace,
+                        )
                         self._ensure_session_dir(resolved_id)
                         self._write_meta(session)
                         self._write_entries(
@@ -86,7 +102,11 @@ class SessionManager:
         with self._locked_session(resolved_id):
             if self._exists(resolved_id):
                 raise FileExistsError(f"会话 {resolved_id} 已存在")
-            session = Session(resolved_id, title=title or "新会话")
+            session = Session(
+                resolved_id,
+                title=title or "新会话",
+                workspace=self.default_workspace,
+            )
             self._ensure_session_dir(resolved_id)
             self._write_meta(session)
             self._write_entries(
@@ -248,6 +268,7 @@ class SessionManager:
                 created_at=str(m["created_at"]) if m.get("created_at") else None,
                 updated_at=str(m["updated_at"]) if m.get("updated_at") else None,
                 message_count=int(m.get("message_count", 0)),
+                workspace=str(m["workspace"]) if m.get("workspace") else None,
             )
             for m in self._list_metas()
         ]
@@ -279,6 +300,7 @@ class SessionManager:
             updated_at=str(meta["updated_at"]) if meta.get("updated_at") else None,
             entries=entries,
             message_count=int(meta.get("message_count", len(entries))),
+            workspace=str(meta["workspace"]) if meta.get("workspace") else None,
         )
 
     def _write_meta(self, session: Session) -> None:
@@ -291,6 +313,7 @@ class SessionManager:
                     "title": session.title,
                     "created_at": session.created_at,
                     "updated_at": session.updated_at,
+                    "workspace": session.workspace,
                     "message_count": len(session.messages),
                 },
                 ensure_ascii=False,

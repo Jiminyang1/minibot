@@ -10,7 +10,7 @@ import sys
 import threading
 
 from .artifacts import ArtifactStore
-from .config import Config
+from .config import Config, resolve_state_home
 from .llm_factory import build_llm_client_from_profile
 from .llm_profile import build_llm_profile
 from .mcp_host.host import MCPHost
@@ -31,6 +31,7 @@ from .skills import SkillRegistry
 from .tools import (
     ToolRegistry,
     filesystem_toolset,
+    history_toolset,
     memory_toolset,
     network_toolset,
     shell_toolset,
@@ -77,10 +78,13 @@ def build_runtime(
     os.environ.setdefault("MINIBOT_PYTHON", sys.executable)
     os.environ.setdefault("MINIBOT_PACKAGE_DIR", str(package_dir))
 
-    manager = SessionManager(resolved_workspace)
-    artifact_store = ArtifactStore(resolved_workspace)
-    memory_store = UserMemoryStore()
-    run_log_store = RunLogStore(resolved_workspace)
+    # State is global (assistant memory belongs to the user); the workspace
+    # only scopes tools and is stamped onto sessions as provenance metadata.
+    state_home = resolve_state_home()
+    manager = SessionManager(state_home, default_workspace=resolved_workspace)
+    artifact_store = ArtifactStore(state_home)
+    memory_store = UserMemoryStore(state_home)
+    run_log_store = RunLogStore(state_home)
     llm_profile = build_llm_profile(model=config.model)
     llm = build_llm_client_from_profile(llm_profile)
     skill_registry = SkillRegistry.from_directory(package_dir / "skills")
@@ -91,6 +95,7 @@ def build_runtime(
     tool_registry.register_all(network_toolset())
     tool_registry.register_all(memory_toolset(memory_store))
     tool_registry.register_all(skill_toolset(skill_registry))
+    tool_registry.register_all(history_toolset(manager))
 
     mcp_config_root, mcp_config_path, mcp_config_source = _resolve_mcp_config(
         package_dir,
@@ -121,6 +126,7 @@ def build_runtime(
         skill_registry=skill_registry,
         tool_registry=tool_registry,
         include_reasoning_content=include_reasoning,
+        workspace=resolved_workspace,
     )
     budget = TokenBudget(
         compact_token_threshold=config.compact_token_threshold,
@@ -200,7 +206,7 @@ def _resolve_mcp_config(package_dir: Path) -> tuple[Path, Path | None, str]:
         )
         return config_path.parent, config_path if config_path.exists() else None, "env"
 
-    user_config_path = (Path.home() / ".minibot" / "mcp.json").resolve()
+    user_config_path = (resolve_state_home() / "mcp.json").resolve()
     if user_config_path.exists():
         return user_config_path.parent, user_config_path, "user"
 

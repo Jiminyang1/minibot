@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..prompts import MEMORY_INSTRUCTIONS
@@ -50,6 +51,7 @@ class ContextBuilder:
         max_inline_memory_tokens: int = _DEFAULT_MAX_INLINE_MEMORY_TOKENS,
         now_provider: Callable[[], datetime] | None = None,
         include_reasoning_content: bool = False,
+        workspace: Path | None = None,
     ) -> None:
         self.base_system_prompt = base_system_prompt
         self.memory_store = memory_store
@@ -58,6 +60,7 @@ class ContextBuilder:
         self.max_inline_memory_tokens = max_inline_memory_tokens
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
         self.include_reasoning_content = include_reasoning_content
+        self.workspace = workspace
 
     def build(self, history_messages: list[MessageEvent]) -> BuiltRequest:
         history = [
@@ -71,6 +74,7 @@ class ContextBuilder:
         system_prompt = self._build_system_prompt(
             memory_block,
             self._render_time_context_block(),
+            self._render_workspace_block(),
             self._render_skill_catalog_block(),
         )
         return BuiltRequest(
@@ -95,6 +99,7 @@ class ContextBuilder:
         self,
         memory_block: str,
         time_context_block: str,
+        workspace_block: str,
         skill_catalog_block: str,
     ) -> str:
         parts = [self.base_system_prompt, MEMORY_INSTRUCTIONS]
@@ -102,9 +107,20 @@ class ContextBuilder:
             parts.append(memory_block)
         if time_context_block:
             parts.append(time_context_block)
+        if workspace_block:
+            parts.append(workspace_block)
         if skill_catalog_block:
             parts.append(skill_catalog_block)
         return "\n\n".join(parts)
+
+    def _render_workspace_block(self) -> str:
+        if self.workspace is None:
+            return ""
+        return (
+            "## Workspace\n"
+            f"当前工作目录: {self.workspace}\n"
+            "文件与命令类工具以此目录为根;会话记录是全局的,不随目录变化。"
+        )
 
     def _render_time_context_block(self) -> str:
         current = self.now_provider()

@@ -82,10 +82,14 @@ def _validate_artifact_id(artifact_id: str) -> str:
 
 
 class ArtifactStore:
-    """Persist large tool outputs under ``.minibot/sessions/<session_id>/artifacts``."""
+    """Persist large tool outputs under ``<state_home>/sessions/<session_id>/artifacts``."""
 
-    def __init__(self, workspace: Path | None = None) -> None:
-        self.state_dir = (workspace or Path.cwd()).resolve() / ".minibot"
+    def __init__(self, state_home: Path | None = None) -> None:
+        if state_home is None:
+            from .config import resolve_state_home
+
+            state_home = resolve_state_home()
+        self.state_dir = state_home.resolve()
         self.sessions_dir = self.state_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 

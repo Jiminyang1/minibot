@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
 import json
 import logging
 import os
+from pathlib import Path
 import select
 import shutil
 import signal
@@ -578,6 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable ANSI colors; NO_COLOR is also respected",
     )
+    parser.add_argument(
+        "--migrate",
+        nargs="+",
+        metavar="DIR",
+        help="move per-workspace .minibot state from DIR(s) into the global home, then exit",
+    )
     parser.add_argument("prompt", nargs="*", help=argparse.SUPPRESS)
     return parser
 
@@ -585,6 +592,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.migrate:
+        return _run_migration(args.migrate)
     if args.prompt:
         print(
             "MiniBot 只支持交互模式。请直接运行 `minibot` 进入 REPL。",
@@ -618,6 +627,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_repl(runtime, renderer, startup_logs=startup_logs)
     finally:
         runtime.close()
+    return 0
+
+
+def _run_migration(directories: Sequence[str]) -> int:
+    from .config import resolve_state_home
+    from .migrate import migrate_workspace_state
+
+    state_home = resolve_state_home()
+    print(f"全局状态目录: {state_home}")
+    for raw in directories:
+        report = migrate_workspace_state(Path(raw).expanduser(), state_home)
+        for line in report.lines():
+            print(line)
     return 0
 
 

@@ -45,7 +45,7 @@ class SessionStoreTests(unittest.TestCase):
                 session.session_id, [SessionEntry.from_message(user_event)]
             )
 
-            session_dir = workspace / ".minibot" / "sessions" / "s_test"
+            session_dir = workspace / "sessions" / "s_test"
             self.assertTrue((session_dir / "meta.json").exists())
             self.assertTrue((session_dir / "messages.jsonl").exists())
 
@@ -104,7 +104,7 @@ class SessionStoreTests(unittest.TestCase):
                 ["[Summary of earlier conversation]\nold summary"],
             )
             raw_lines = (
-                workspace / ".minibot" / "sessions" / "s_test" / "messages.jsonl"
+                workspace / "sessions" / "s_test" / "messages.jsonl"
             ).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(raw_lines), 3)
             reloaded_compaction = reloaded.entries[-1]
