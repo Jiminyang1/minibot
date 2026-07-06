@@ -23,10 +23,12 @@ from .read_file import ReadFileTool
 from .read_skill import ReadSkillTool
 from .registry import ToolRegistry
 from .search_files import SearchFilesTool
+from .search_history import SearchHistoryTool
 from .web_search import WebSearchTool
 from .write_file import WriteFileTool
 
 if TYPE_CHECKING:
+    from ..session import SessionManager
     from ..skills import SkillRegistry
 
 
@@ -65,6 +67,11 @@ def skill_toolset(skill_registry: SkillRegistry) -> list[Tool]:
     return [ReadSkillTool(skill_registry)]
 
 
+def history_toolset(session_manager: "SessionManager") -> list[Tool]:
+    """Search past conversations across all sessions."""
+    return [SearchHistoryTool(session_manager)]
+
+
 __all__ = [
     "Tool",
     "ToolRegistry",
@@ -73,4 +80,5 @@ __all__ = [
     "network_toolset",
     "memory_toolset",
     "skill_toolset",
+    "history_toolset",
 ]
