@@ -580,6 +580,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable ANSI colors; NO_COLOR is also respected",
     )
     parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="use the line-based REPL instead of the full-screen TUI",
+    )
+    parser.add_argument(
         "--migrate",
         nargs="+",
         metavar="DIR",
@@ -600,6 +605,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # The full-screen TUI is the default; fall back to the line REPL when
+    # piped (no tty) or explicitly requested.
+    use_tui = (
+        not args.plain
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
 
     options = CliOptions(verbose=args.verbose, no_color=args.no_color)
     renderer = CliRenderer(verbose=options.verbose, no_color=options.no_color)
@@ -622,8 +635,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"配置错误: {exc}", file=sys.stderr)
         return 1
 
-    runtime.approval_policy.handler = renderer.prompt_approval
     try:
+        if use_tui:
+            from .tui import run_tui
+
+            run_tui(runtime)
+            return 0
+        runtime.approval_policy.handler = renderer.prompt_approval
         run_repl(runtime, renderer, startup_logs=startup_logs)
     finally:
         runtime.close()

@@ -34,7 +34,9 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 # open http://127.0.0.1:8765/
 ```
 
-CLI options: `--verbose` (model rounds, context usage, full tool args), `--no-color`. A single-line spinner status bar shows the current phase (thinking / running tool / waiting approval…); reasoning models (DeepSeek etc.) get a live gray tail preview of the thinking process that collapses to a single `⋯ thought for Ns` line when the answer starts.
+`minibot` opens a **full-screen TUI** (Textual) by default: scrollable conversation, Markdown-rendered replies, streaming, reasoning and tool calls collapsed into clickable one-liners, a bottom-pinned input, and an approval modal (y/n); `Esc` cancels the run, `Ctrl+N` starts a session. Slash commands work as usual.
+
+The line REPL remains as `minibot --plain` (auto-fallback when piped): `--verbose`, `--no-color`, spinner status bar, typewriter streaming, and the collapsing reasoning preview all behave as before.
 
 ## Architecture
 

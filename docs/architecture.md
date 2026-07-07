@@ -11,7 +11,8 @@
 ```mermaid
 flowchart TB
     subgraph entry [入口层]
-        CLI[cli.py · REPL]
+        TUI[tui/ · 全屏 TUI]
+        CLI[cli.py · --plain REPL]
         SRV[server.py · HTTP/SSE]
         SCHED[scheduler.py · daemon]
     end
@@ -45,6 +46,7 @@ flowchart TB
         FOLD["RunLogFold<br/>→ runs.jsonl"]
     end
 
+    TUI --> AS
     CLI --> AS
     SRV --> AS
     SCHED --> AS
@@ -253,7 +255,7 @@ flowchart TD
 |---|---|
 | 新本地工具 | 实现 `Tool` ABC,注册进 `ToolRegistry`(声明 `read_only`/`exclusive`/`requires_approval`) |
 | 新外部能力 | `mcp.json` 加一个 server,工具自动以 `mcp__<server>__<tool>` 挂载 |
-| 新前端 | 订阅事件流 + 调 `AgentSession.prompt`,参照 `server.py` 的 `RunEventStore` |
+| 新前端 | 订阅事件流 + 调 `AgentSession.prompt`;同步核心对接异步 UI 参照 `tui/app.py`(worker 线程跑 turn,`call_from_thread` 编组事件,10Hz 缓冲刷流式 Markdown,审批用 threading.Event 会合模态框),纯 HTTP 参照 `server.py` 的 `RunEventStore` |
 | 新审批 UI | 提供 `ApprovalPolicy.handler`(CLI 是问答,web 是 `ApprovalBroker` 会合) |
 | 新运行观测 | 写一个事件订阅者,`bootstrap.py` 的 `fanout` 里加一行,参照 `RunLogFold` |
 | 新 LLM provider | 实现 `LLMClient.chat`;可选覆写 `chat_stream` 获得原生流式(不覆写则自动退化为单终局事件) |

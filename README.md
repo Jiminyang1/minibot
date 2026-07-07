@@ -34,7 +34,9 @@ uv run minibot-server --host 127.0.0.1 --port 8765
 # 打开 http://127.0.0.1:8765/
 ```
 
-CLI 选项：`--verbose`（模型轮次、context usage、完整工具参数）、`--no-color`。运行中有单行 spinner 状态栏展示当前阶段（thinking / running tool / waiting approval…）；推理模型（DeepSeek 等）的思考过程以灰字尾部预览实时滚动，回答开始时自动折叠为一行 `⋯ 已思考 · Ns`。
+`minibot` 默认进入**全屏 TUI**（Textual）：可滚动对话区、Markdown 渲染回复、流式打字、思考过程与工具调用折叠成单行（点击展开）、底部固定输入框、审批弹模态框（y/n），`Esc` 取消运行、`Ctrl+N` 新会话。斜杠命令照常可用。
+
+行式 REPL 保留为 `minibot --plain`（管道/非 tty 自动降级）：`--verbose`（模型轮次、context usage、完整工具参数）、`--no-color`；spinner 状态栏、打字机流式、推理灰字尾部预览折叠为 `⋯ 已思考 · Ns` 等行为不变。
 
 ## 架构
 
