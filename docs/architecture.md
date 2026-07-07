@@ -269,4 +269,5 @@ flowchart TD
 - **执行**:每次触发新建 `[定时] <标题> · <时间>` 会话(独立、可被 `search_history` 检索、不无限增长),prompt 前置"无人值守"声明。**审批默认全拒**——无人在场,`schedule_task` 工具本身则标记 `requires_approval`(创建未来的自主运行是敏感操作)。
 - **投递**:成功/失败都发 macOS 通知(osascript,非 mac 静默跳过);完整结果在会话里。
 - **agent 自排程**:`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 三个工具,自然语言即可管理;CLI 侧 `/tasks` 查看与取消。
+- **Heartbeat(`kind: "heartbeat"`)**:与 cron 的本质区别在"该做什么"的决定时机——cron 执行预写指令,heartbeat 把判断推迟到醒来那一刻。实现为特殊任务类型:cron 表达式定节奏;**复用一个持久会话**(`session_id` 回写到任务上,上下文连续,增长交给自动 compaction);每次醒来把 `~/.minibot/HEARTBEAT.md` 清单**内联**进 prompt(`#` 行过滤,文件缺失时生成模板;内联是因为 fs 工具以 workspace 为根,够不到 state home);**静默协议**——回复含 `HEARTBEAT_OK` 则不发通知(`last_status: ok-quiet`),否则视为需要注意(`attention`)并通知。heartbeat 永不自我禁用,错过宽限窗口的心跳直接顺延(巡逻没有补跳的意义)。
 - 刻意不做:秒级精度(tick 30s,分钟粒度足够)、任务间依赖、失败重试(下个周期天然覆盖;LLM 层瞬时重试已存在)。

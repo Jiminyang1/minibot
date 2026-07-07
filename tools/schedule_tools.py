@@ -31,6 +31,8 @@ class ScheduleTaskTool(Tool):
             "如每天 8 点 = '0 8 * * *');一次性提醒用 at(ISO 时间,如 "
             "'2026-07-07T09:00')。cron 与 at 恰好提供一个。"
             "prompt 要写成自包含指令——运行时没有当前对话的上下文。"
+            "heartbeat=true 时创建心跳巡逻:按 cron 周期在同一个持久会话里"
+            "读 HEARTBEAT.md 清单自主检查,没事保持静默,prompt 变为可选的常设指令。"
         )
 
     @property
@@ -51,6 +53,10 @@ class ScheduleTaskTool(Tool):
                     "type": "string",
                     "description": "一次性触发时间,ISO 格式(无时区视为本地时间)",
                 },
+                "heartbeat": {
+                    "type": "boolean",
+                    "description": "创建心跳巡逻任务(需配 cron;通常整个系统一个即可)",
+                },
             },
             "required": ["title", "prompt"],
             "additionalProperties": False,
@@ -69,6 +75,7 @@ class ScheduleTaskTool(Tool):
         prompt: str,
         cron: str | None = None,
         at: str | None = None,
+        heartbeat: bool = False,
     ) -> ToolOutput:
         del context
         if (cron is None) == (at is None):
@@ -77,15 +84,27 @@ class ScheduleTaskTool(Tool):
                 "cron 与 at 必须恰好提供一个。",
                 data={"tool": self.name},
             )
-        if not prompt.strip():
+        if heartbeat and cron is None:
+            return ToolOutput.failure(
+                "invalid_args",
+                "heartbeat 任务必须用 cron 提供巡逻周期。",
+                data={"tool": self.name},
+            )
+        if not heartbeat and not prompt.strip():
             return ToolOutput.failure(
                 "invalid_args", "prompt 不能为空。", data={"tool": self.name}
             )
+        if heartbeat:
+            kind = "heartbeat"
+        elif cron is not None:
+            kind = "cron"
+        else:
+            kind = "once"
         try:
             task = self._store.add(
                 title=title,
                 prompt=prompt,
-                kind="cron" if cron is not None else "once",
+                kind=kind,
                 expr=cron if cron is not None else str(at),
                 workspace=self._workspace_label,
             )

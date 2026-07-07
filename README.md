@@ -182,6 +182,8 @@ uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
 - 无人值守运行中敏感工具**默认拒绝**；需要完整权限可给 daemon 设 `MINIBOT_APPROVAL_MODE=always`（自担风险）
 - `/tasks` 查看、`/tasks cancel <id>` 取消，或直接用自然语言管理
 
+**Heartbeat（心跳巡逻）**：cron 是"到点执行写死的指令"，heartbeat 是"到点醒来自己判断"。对话里说「每 30 分钟帮我巡逻一次」即可创建（`schedule_task` 的 `heartbeat` 模式）：按周期在**同一个持久会话**里读 `~/.minibot/HEARTBEAT.md` 巡逻清单（内容内联进 prompt），逐项检查、该做的做；没有需要注意的事就回 `HEARTBEAT_OK` **保持静默**，只有真有情况才弹通知。清单是纯 Markdown，`#` 行为注释，直接编辑即可；会话上下文连续增长由自动 compaction 兜底。
+
 ## CLI 命令
 
 `/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/tasks [cancel <id>]` · `/permission [ask|always]` · `/config` · `/help`

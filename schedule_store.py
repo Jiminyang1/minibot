@@ -21,7 +21,7 @@ from typing import Any, Literal
 import uuid
 
 
-ScheduleKind = Literal["cron", "once"]
+ScheduleKind = Literal["cron", "once", "heartbeat"]
 
 _FIELD_BOUNDS = (
     (0, 59),  # minute
@@ -120,7 +120,12 @@ def parse_local_time(raw: str) -> datetime:
 
 @dataclass(frozen=True)
 class ScheduledTask:
-    """One scheduled prompt: a cron routine or a one-shot reminder."""
+    """One scheduled prompt: a cron routine, one-shot reminder, or heartbeat.
+
+    A heartbeat is a cron-timed patrol that reuses one persistent session
+    (``session_id``) and reviews the HEARTBEAT.md checklist instead of
+    executing a fixed instruction.
+    """
 
     id: str
     title: str
@@ -132,6 +137,7 @@ class ScheduledTask:
     last_run_at: str | None = None
     last_status: str | None = None
     workspace: str | None = None
+    session_id: str | None = None  # heartbeat only: the reused session
 
     def next_run(self, *, now: datetime | None = None) -> datetime | None:
         """Next due moment, or None when the task will not fire again."""
@@ -157,21 +163,27 @@ class ScheduledTask:
             "last_run_at": self.last_run_at,
             "last_status": self.last_status,
             "workspace": self.workspace,
+            "session_id": self.session_id,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScheduledTask":
+        raw_kind = data.get("kind")
+        kind: ScheduleKind = (
+            raw_kind if raw_kind in ("cron", "once", "heartbeat") else "cron"
+        )
         return cls(
             id=str(data["id"]),
             title=str(data.get("title", "")),
             prompt=str(data.get("prompt", "")),
-            kind="once" if data.get("kind") == "once" else "cron",
+            kind=kind,
             expr=str(data.get("expr", "")),
             enabled=bool(data.get("enabled", True)),
             created_at=str(data.get("created_at", "")),
             last_run_at=data.get("last_run_at"),
             last_status=data.get("last_status"),
             workspace=data.get("workspace"),
+            session_id=data.get("session_id"),
         )
 
 
@@ -198,10 +210,10 @@ class ScheduleStore:
         expr: str,
         workspace: str | None = None,
     ) -> ScheduledTask:
-        if kind == "cron":
-            parse_cron(expr)
-        else:
+        if kind == "once":
             parse_local_time(expr)
+        else:
+            parse_cron(expr)  # cron and heartbeat both run on cron time
         task = ScheduledTask(
             id="t_" + uuid.uuid4().hex[:10],
             title=title.strip() or prompt[:30],

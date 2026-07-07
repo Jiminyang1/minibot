@@ -23,11 +23,27 @@ import threading
 from .run_log import preview_text
 from .runtime.agent_session import AgentSession, RunCancelled
 from .schedule_store import ScheduledTask, ScheduleStore, local_now
-from .session import SessionManager
+from .session import Session, SessionManager
 
 Notifier = Callable[[str, str], None]
 
 _GRACE = timedelta(hours=1)
+
+HEARTBEAT_OK = "HEARTBEAT_OK"
+
+_HEARTBEAT_TEMPLATE = """\
+# Heartbeat 巡逻清单
+#
+# 每次心跳时 agent 会读这份清单逐项检查。井号开头的行是注释。
+# 用祈使句写检查项,例如:
+#
+# - 检查未读邮件,有重要的立即通知我
+# - 如果 30 分钟内有日程开始,提醒我
+# - 看看 ~/Downloads 里有没有超过一周没整理的文件
+#
+# 清单为空时心跳会安静地跳过。
+"""
+
 
 
 def macos_notify(title: str, body: str) -> None:
@@ -96,6 +112,9 @@ class Scheduler:
         return fired
 
     def _fire(self, task: ScheduledTask, now: datetime) -> None:
+        if task.kind == "heartbeat":
+            self._fire_heartbeat(task, now)
+            return
         self.log(f"触发定时任务: {task.title}")
         session = self.session_manager.create_session(
             title=f"[定时] {task.title} · {now:%m-%d %H:%M}"
@@ -118,6 +137,82 @@ class Scheduler:
             f"MiniBot: {task.title}",
             preview_text(outcome.reply, 160) or "（完成，无文字输出）",
         )
+
+    def _fire_heartbeat(self, task: ScheduledTask, now: datetime) -> None:
+        """One patrol turn: reused session, inlined checklist, quiet-by-default."""
+        self.log(f"心跳巡逻: {task.title}")
+        session = self._heartbeat_session(task)
+        checklist = self._read_checklist()
+        prompt = self._heartbeat_prompt(task, checklist, now)
+        try:
+            outcome = self.agent_session.prompt(session.session_id, prompt)
+        except RunCancelled:
+            self._mark(task, status="cancelled", now=now)
+            return
+        except Exception as exc:
+            self._mark(task, status=f"failed: {type(exc).__name__}", now=now)
+            self._notify(f"MiniBot 心跳失败: {task.title}", preview_text(str(exc), 120))
+            return
+        if HEARTBEAT_OK in outcome.reply:
+            # Nothing needed attention: no notification, quiet status.
+            self._mark(task, status="ok-quiet", now=now)
+            return
+        self._mark(task, status="attention", now=now)
+        self._notify(
+            f"MiniBot 心跳: {task.title}",
+            preview_text(outcome.reply, 160) or "（有情况，详见会话）",
+        )
+
+    def _heartbeat_session(self, task: ScheduledTask) -> Session:
+        """Load the heartbeat's persistent session, creating it once."""
+        if task.session_id is not None:
+            existing = self.session_manager.load(task.session_id)
+            if existing is not None:
+                return existing
+        session = self.session_manager.create_session(
+            title=f"[心跳] {task.title}"
+        )
+        current = self.store.get(task.id)
+        if current is not None:
+            self.store.update(current, session_id=session.session_id)
+        return session
+
+    def _read_checklist(self) -> str:
+        path = self.store.state_dir / "HEARTBEAT.md"
+        if not path.exists():
+            path.write_text(_HEARTBEAT_TEMPLATE, encoding="utf-8")
+        lines = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        return "\n".join(lines)
+
+    def _heartbeat_prompt(
+        self,
+        task: ScheduledTask,
+        checklist: str,
+        now: datetime,
+    ) -> str:
+        parts = [
+            f"[心跳巡逻 · {now:%m-%d %H:%M} · 无人值守:不要提问,敏感工具默认被拒。]",
+            "逐项检查下面的巡逻清单,该做的直接做;只有真正需要用户注意的事才写进回复。",
+            f"如果没有任何需要用户注意的事,回复中必须包含 {HEARTBEAT_OK}"
+            "(可以附一句简短原因)——这会让通知保持安静。",
+        ]
+        if task.prompt.strip():
+            parts.append(f"附加常设指令: {task.prompt.strip()}")
+        if checklist:
+            parts.append(
+                "巡逻清单如下(内容已从 ~/.minibot/HEARTBEAT.md 内联,"
+                "不需要也不要再去读任何清单文件):\n" + checklist
+            )
+        else:
+            parts.append(
+                f"巡逻清单为空(用户可编辑 ~/.minibot/HEARTBEAT.md),"
+                f"直接回复 {HEARTBEAT_OK}。"
+            )
+        return "\n".join(parts)
 
     def _mark(self, task: ScheduledTask, *, status: str, now: datetime) -> None:
         current = self.store.get(task.id)

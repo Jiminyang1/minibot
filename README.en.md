@@ -182,6 +182,8 @@ uv run minibot-daemon    # resident process; single-instance lock
 - Unattended runs deny sensitive tools by default; set `MINIBOT_APPROVAL_MODE=always` for the daemon at your own risk
 - Manage with `/tasks`, `/tasks cancel <id>`, or plain natural language
 
+**Heartbeat**: cron executes a fixed instruction on time; heartbeat wakes up and decides for itself. Say "patrol every 30 minutes" to create one (`schedule_task` with `heartbeat` mode): on each beat it reviews the `~/.minibot/HEARTBEAT.md` checklist (inlined into the prompt) inside **one persistent session**, does what needs doing, and replies `HEARTBEAT_OK` to stay silent when nothing needs you — notifications fire only when something does. The checklist is plain Markdown (`#` lines are comments); the ever-growing session is kept in check by automatic compaction.
+
 ## CLI commands
 
 `/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/tasks [cancel <id>]` · `/permission [ask|always]` · `/config` · `/help`

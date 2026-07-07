@@ -111,22 +111,34 @@ class ScheduleStoreTests(unittest.TestCase):
 
 
 class _FakeAgentSession:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        reply: str = "简报生成完毕",
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self._error = error
+        self.reply = reply
 
     def prompt(self, session_id, user_input, **kwargs):
         self.calls.append((session_id, user_input))
         if self._error is not None:
             raise self._error
-        return TurnOutcome(reply="简报生成完毕")
+        return TurnOutcome(reply=self.reply)
 
 
 class SchedulerTickTests(unittest.TestCase):
-    def _scheduler(self, tmpdir: str, *, error: Exception | None = None):
+    def _scheduler(
+        self,
+        tmpdir: str,
+        *,
+        error: Exception | None = None,
+        reply: str = "简报生成完毕",
+    ):
         store = ScheduleStore(Path(tmpdir) / "home")
         manager = SessionManager(Path(tmpdir) / "home")
-        agent = _FakeAgentSession(error=error)
+        agent = _FakeAgentSession(error=error, reply=reply)
         notifications: list[tuple[str, str]] = []
         scheduler = Scheduler(
             store=store,
@@ -225,6 +237,104 @@ class SchedulerTickTests(unittest.TestCase):
             self.assertIn("任务失败", notes[0][0])
 
 
+class HeartbeatTests(unittest.TestCase):
+    def _fire_once(self, tmpdir: str, *, reply: str, checklist: str | None = None):
+        store = ScheduleStore(Path(tmpdir) / "home")
+        manager = SessionManager(Path(tmpdir) / "home")
+        agent = _FakeAgentSession(reply=reply)
+        notes: list[tuple[str, str]] = []
+        scheduler = Scheduler(
+            store=store,
+            agent_session=agent,
+            session_manager=manager,
+            notifier=lambda title, body: notes.append((title, body)),
+        )
+        if checklist is not None:
+            (store.state_dir / "HEARTBEAT.md").write_text(
+                checklist, encoding="utf-8"
+            )
+        task = store.add(
+            title="巡逻", prompt="", kind="heartbeat", expr="*/30 * * * *"
+        )
+        due = task.next_run()
+        assert due is not None
+        fired = scheduler.tick(due + timedelta(minutes=1))
+        return scheduler, store, manager, agent, notes, task, fired, due
+
+    def test_quiet_heartbeat_does_not_notify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, store, _, agent, notes, task, fired, _ = self._fire_once(
+                tmpdir,
+                reply="一切正常,HEARTBEAT_OK",
+                checklist="- 检查邮件\n",
+            )
+
+            self.assertEqual(fired, [task.id])
+            self.assertEqual(notes, [])
+            self.assertEqual(store.get(task.id).last_status, "ok-quiet")
+            self.assertIn("检查邮件", agent.calls[0][1])
+            self.assertIn("HEARTBEAT_OK", agent.calls[0][1])
+
+    def test_attention_heartbeat_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, store, _, _, notes, task, _, _ = self._fire_once(
+                tmpdir,
+                reply="你有一封重要邮件需要回复",
+                checklist="- 检查邮件\n",
+            )
+
+            self.assertEqual(store.get(task.id).last_status, "attention")
+            self.assertEqual(len(notes), 1)
+            self.assertIn("心跳", notes[0][0])
+            self.assertIn("重要邮件", notes[0][1])
+
+    def test_heartbeat_reuses_one_persistent_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scheduler, store, manager, agent, _, task, _, due = self._fire_once(
+                tmpdir,
+                reply="HEARTBEAT_OK",
+                checklist="- 检查邮件\n",
+            )
+            stored = store.get(task.id)
+            self.assertIsNotNone(stored.session_id)
+
+            next_due = stored.next_run()
+            assert next_due is not None
+            scheduler.tick(next_due + timedelta(minutes=1))
+
+            self.assertEqual(len(agent.calls), 2)
+            self.assertEqual(agent.calls[0][0], agent.calls[1][0])
+            heartbeat_sessions = [
+                s for s in manager.list_sessions() if s.title.startswith("[心跳]")
+            ]
+            self.assertEqual(len(heartbeat_sessions), 1)
+            # Heartbeats never disable themselves.
+            self.assertTrue(store.get(task.id).enabled)
+
+    def test_missing_checklist_creates_template_and_stays_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, store, _, agent, notes, task, _, _ = self._fire_once(
+                tmpdir, reply="HEARTBEAT_OK"
+            )
+
+            template = (store.state_dir / "HEARTBEAT.md").read_text(encoding="utf-8")
+            self.assertIn("巡逻清单", template)
+            self.assertIn("清单为空", agent.calls[0][1])
+            self.assertEqual(notes, [])
+
+    def test_comment_lines_are_stripped_from_checklist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, _, _, agent, _, _, _, _ = self._fire_once(
+                tmpdir,
+                reply="HEARTBEAT_OK",
+                checklist="# 注释行\n- 真实检查项\n\n# 又一条注释\n",
+            )
+
+            prompt = agent.calls[0][1]
+            self.assertIn("真实检查项", prompt)
+            self.assertNotIn("注释行", prompt)
+
+
 class ScheduleToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -278,6 +388,23 @@ class ScheduleToolTests(unittest.TestCase):
             context=self.context, title="x", prompt="p", cron="nope"
         )
         self.assertEqual(output.code, "invalid_args")
+
+    def test_heartbeat_creation_requires_cron_and_allows_empty_prompt(self) -> None:
+        tool = ScheduleTaskTool(self.store)
+
+        with_at = tool.execute(
+            context=self.context, title="巡逻", prompt="",
+            at="2026-07-08T09:00", heartbeat=True,
+        )
+        self.assertEqual(with_at.code, "invalid_args")
+
+        created = tool.execute(
+            context=self.context, title="巡逻", prompt="",
+            cron="*/30 * * * *", heartbeat=True,
+        )
+        self.assertTrue(created.ok)
+        self.assertEqual(created.data["kind"], "heartbeat")
+        self.assertEqual(self.store.list()[0].kind, "heartbeat")
 
 
 if __name__ == "__main__":
