@@ -109,7 +109,7 @@ class ForgetTool(Tool):
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "要删除的记忆 id，例如 m_20260417_010203。",
+                    "description": "要删除的记忆 id，例如 mem_1。",
                 },
             },
             "required": ["memory_id"],

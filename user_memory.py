@@ -64,7 +64,7 @@ class UserMemoryStore:
             raise ValueError("记忆内容不能为空。")
         items = self.list()
         item = MemoryItem(
-            id=self._next_id(items),
+            id=f"mem_{self._take_next_index(items)}",
             content=content,
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
@@ -86,20 +86,46 @@ class UserMemoryStore:
         return count
 
     def _save(self, items: list[MemoryItem]) -> None:
-        payload = {"memories": [m.to_dict() for m in items]}
+        payload = {
+            "memories": [m.to_dict() for m in items],
+            "next_index": self._stored_next_index(),
+        }
         self.memory_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
+    def _take_next_index(self, existing: list[MemoryItem]) -> int:
+        """Return a never-reused index: a forgotten id must not come back
+        pointing at a different, newer fact (the model may still hold a
+        stale reference to it)."""
+        index = max(
+            self._stored_next_index(),
+            self._highest_item_index(existing) + 1,
+        )
+        self._next_index = index + 1
+        return index
+
+    def _stored_next_index(self) -> int:
+        cached = getattr(self, "_next_index", None)
+        if cached is not None:
+            return cached
+        if self.memory_path.exists():
+            try:
+                data = json.loads(self.memory_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            raw = data.get("next_index") if isinstance(data, dict) else None
+            if isinstance(raw, int) and raw > 0:
+                self._next_index = raw
+                return raw
+        self._next_index = self._highest_item_index(self.list()) + 1
+        return self._next_index
+
     @staticmethod
-    def _next_id(existing: list[MemoryItem]) -> str:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = f"m_{stamp}"
-        taken = {m.id for m in existing}
-        if base not in taken:
-            return base
-        suffix = 1
-        while f"{base}_{suffix}" in taken:
-            suffix += 1
-        return f"{base}_{suffix}"
+    def _highest_item_index(items: list[MemoryItem]) -> int:
+        highest = 0
+        for item in items:
+            if item.id.startswith("mem_") and item.id[4:].isdigit():
+                highest = max(highest, int(item.id[4:]))
+        return highest

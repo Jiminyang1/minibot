@@ -82,11 +82,12 @@ def _make_context_builder(
     *,
     registry: SkillRegistry,
     tool_registry: ToolRegistry,
+    memory_store=None,
     now_provider=None,
 ) -> ContextBuilder:
     return ContextBuilder(
         base_system_prompt="BASE PROMPT",
-        memory_store=None,
+        memory_store=memory_store,
         skill_registry=registry,
         tool_registry=tool_registry,
         now_provider=now_provider,
@@ -127,6 +128,40 @@ class SkillCatalogTests(unittest.TestCase):
             self.assertIn("now_local: 2026-04-23T13:02:05+08:00", prompt)
             self.assertIn("today_local: 2026-04-23", prompt)
             self.assertIn("timezone_local:", prompt)
+
+    def test_memory_context_uses_date_free_ids_after_time_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            memory_store = UserMemoryStore(root=directory / "state")
+            item = memory_store.add(
+                "用户将于 2026 年 7 月 8 日加入深圳 Amazon AGL 团队。"
+            )
+            registry = SkillRegistry.from_directory(directory / "skills")
+            builder = _make_context_builder(
+                registry=registry,
+                tool_registry=ToolRegistry(),
+                memory_store=memory_store,
+                now_provider=lambda: datetime(
+                    2026,
+                    7,
+                    7,
+                    13,
+                    0,
+                    0,
+                    tzinfo=timezone(timedelta(hours=8)),
+                ),
+            )
+
+            prompt = builder.build(Session("s_test").messages).messages[0].content
+
+            self.assertLess(
+                prompt.index("## Local Time Context"),
+                prompt.index("## User Memory Data"),
+            )
+            self.assertIn("today_local: 2026-07-07", prompt)
+            self.assertIn("id: mem_1", prompt)
+            self.assertEqual(item.id, "mem_1")
+            self.assertIn(item.id, prompt)
 
     def test_packaged_skills_include_drawio(self) -> None:
         package_skills_dir = Path(__file__).resolve().parents[1] / "skills"
@@ -334,6 +369,41 @@ class ToolLayerTests(unittest.TestCase):
             ]
 
             self.assertTrue(all(tool.layer == "kernel" for tool in tools))
+
+    def test_memory_ids_are_never_reused_after_forget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = UserMemoryStore(root=Path(tmpdir) / "state")
+            store.add("第一条")
+            second = store.add("第二条")
+            store.delete(second.id)  # forget the highest id
+
+            third = store.add("第三条")
+
+            # A stale reference to mem_2 must not resolve to a newer fact.
+            self.assertNotEqual(third.id, second.id)
+            self.assertEqual(third.id, "mem_3")
+            # The counter survives a reload from disk.
+            reloaded = UserMemoryStore(root=Path(tmpdir) / "state")
+            reloaded.delete(third.id)
+            fourth = reloaded.add("第四条")
+            self.assertEqual(fourth.id, "mem_4")
+
+    def test_forget_deletes_date_free_memory_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            memory_store = UserMemoryStore(root=workspace / "state")
+            old = memory_store.add("旧事实")
+            newest = memory_store.add("新事实")
+            tool = ForgetTool(memory_store)
+
+            output = tool.execute(
+                context=ToolExecutionContext(session_id="s_test"),
+                memory_id=newest.id,
+            )
+
+            self.assertTrue(output.ok)
+            self.assertEqual(output.data["memory_id"], newest.id)
+            self.assertEqual([item.id for item in memory_store.list()], [old.id])
 
     def test_concurrency_metadata_matches_v1_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
