@@ -218,6 +218,49 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertTrue(any("/sessions" in line for line in system_lines))
 
+    async def test_slash_menu_filters_and_tab_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = _ScriptedAgentSession(_REPLY_SCRIPT)
+            app = MinibotApp(_runtime(tmpdir, agent))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                prompt = app.query_one(Input)
+                prompt.value = "/m"
+                app._update_slash_menu(prompt.value)
+
+                menu = app.query_one("#slash-menu", Static)
+                self.assertTrue(menu.has_class("visible"))
+                self.assertIn("/mcp", str(menu.content))
+
+                await pilot.press("tab")
+                await pilot.pause()
+
+                self.assertEqual(prompt.value, "/mcp")
+                self.assertEqual(agent.prompts, [])
+
+    async def test_enter_selects_partial_slash_command_before_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = _ScriptedAgentSession(_REPLY_SCRIPT)
+            app = MinibotApp(_runtime(tmpdir, agent))
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                prompt = app.query_one(Input)
+                prompt.value = "/he"
+                app._update_slash_menu(prompt.value)
+
+                await pilot.press("enter")
+                await pilot.pause()
+
+                self.assertEqual(prompt.value, "/help")
+                self.assertEqual(agent.prompts, [])
+
+                await pilot.press("enter")
+                await pilot.pause()
+
+                system_lines = [str(w.content) for w in app.query(".system-line")]
+                self.assertTrue(any("/sessions" in line for line in system_lines))
+                self.assertEqual(agent.prompts, [])
+
 
 if __name__ == "__main__":
     unittest.main()

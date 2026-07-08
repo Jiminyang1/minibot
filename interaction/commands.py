@@ -66,6 +66,13 @@ _COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
+def command_catalog(*, include_exit: bool = True) -> tuple[tuple[str, str], ...]:
+    """Return the user-facing command catalog for help and completion UIs."""
+    if include_exit:
+        return _COMMANDS
+    return tuple((command, description) for command, description in _COMMANDS if command.startswith("/"))
+
+
 def dispatch_command(
     raw: str,
     current_session_id: str,
@@ -514,8 +521,9 @@ def _session_notice(session: Session) -> CommandNotice:
 
 
 def _format_help() -> str:
-    width = max(len(command) for command, _ in _COMMANDS) + 2
-    return "\n".join(f"{command.ljust(width)}{description}" for command, description in _COMMANDS)
+    commands = command_catalog()
+    width = max(len(command) for command, _ in commands) + 2
+    return "\n".join(f"{command.ljust(width)}{description}" for command, description in commands)
 
 
 def _format_approval_mode(mode: str) -> str:
