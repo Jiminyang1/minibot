@@ -47,7 +47,10 @@ class AgentSession:
         *,
         run_id: str | None = None,
         event_handler: RuntimeEventHandler | None = None,
+        source: str | None = None,
     ) -> TurnOutcome:
+        """Run one turn. *source* names the caller (cli, tui, server, ...)
+        and travels on ``run.started`` so observers can tell runs apart."""
         session = self.session_manager.resolve_session(session_id)
         session_lock = self._session_lock(session.session_id)
         if not session_lock.acquire(blocking=False):
@@ -69,6 +72,8 @@ class AgentSession:
                 {
                     "session_id": session.session_id,
                     "input_preview": preview_text(user_input, 120),
+                    "input": user_input,
+                    "source": source,
                     "model": self.agent_loop.model,
                     "turn_index": session.turn_count() + 1,
                 },

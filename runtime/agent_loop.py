@@ -34,6 +34,7 @@ from .cancel import RunCancelled
 from .compactor import Compactor
 from .context_builder import BuiltRequest, ContextBuilder
 from .events import RuntimeEventEmitter
+from .messages import model_messages_to_openai
 from .tool_output_materializer import ToolOutputMaterializer
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class AgentLoop:
                     session,
                     observed_input_tokens=observed_input_tokens,
                     cancel_event=cancel_event,
+                    emitter=emitter,
                 )
                 if compact_message is not None:
                     compact_messages.append(compact_message)
@@ -139,6 +141,13 @@ class AgentLoop:
                         "iteration": iteration,
                         "model": self.model,
                         "input_preview": _preview(user_input),
+                        # The exact request, for tracing subscribers. Heavy:
+                        # wire-facing subscribers (SSE) strip it.
+                        "messages": model_messages_to_openai(
+                            built.messages,
+                            include_reasoning_content=True,
+                        ),
+                        "tools": [tool.name for tool in built.tool_definitions],
                     },
                 )
                 resp = self._stream_model_response(
@@ -156,6 +165,7 @@ class AgentLoop:
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "tool_call_count": len(resp.tool_calls),
                     "usage": _usage_payload(resp.usage),
+                    "output": _response_output(resp),
                 }
 
                 if not resp.tool_calls:
@@ -261,6 +271,7 @@ class AgentLoop:
         *,
         observed_input_tokens: int | None,
         cancel_event: threading.Event | None,
+        emitter: RuntimeEventEmitter | None = None,
     ) -> tuple[BuiltRequest, str | None]:
         """Step ①+②: check the budget, reduce if needed, assemble the request."""
         built = self.context_builder.build(session.messages)
@@ -277,6 +288,7 @@ class AgentLoop:
             session,
             tokens_before=tokens,
             cancel_event=cancel_event,
+            emitter=emitter,
         )
         built = self.context_builder.build(session.messages)
         self.budget.remember(session)
@@ -641,6 +653,17 @@ def _response_to_message_event(resp: LLMResponse) -> MessageEvent:
         ]
         or None,
     )
+
+
+def _response_output(resp: LLMResponse) -> dict[str, Any]:
+    return {
+        "content": _normalized_reply(resp.content),
+        "reasoning_content": resp.reasoning_content,
+        "tool_calls": [
+            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+            for tc in resp.tool_calls
+        ],
+    }
 
 
 def _preview(text: str, limit: int = 60) -> str:

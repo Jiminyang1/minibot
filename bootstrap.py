@@ -11,6 +11,7 @@ import threading
 
 from .artifacts import ArtifactStore
 from .config import Config, resolve_state_home
+from .langfuse_tracing import LangfuseFold, build_langfuse_fold
 from .llm_factory import build_llm_client_from_profile
 from .llm_profile import build_llm_profile
 from .mcp_host.host import MCPHost
@@ -62,9 +63,12 @@ class MiniBotRuntime:
     agent_session: AgentSession
     approval_policy: ApprovalPolicy
     approval_broker: ApprovalBroker | None = None
+    langfuse: LangfuseFold | None = None
 
     def close(self) -> None:
         self.mcp_host.close()
+        if self.langfuse is not None:
+            self.langfuse.shutdown()
 
 
 def build_runtime(
@@ -165,6 +169,7 @@ def build_runtime(
         summarizer=make_summarizer(llm),
         keep_recent_tokens=config.compact_keep_recent_tokens,
         include_reasoning_content=include_reasoning,
+        model=config.model,
     )
     approval_policy = ApprovalPolicy(
         handler=approval_handler,
@@ -184,12 +189,15 @@ def build_runtime(
         max_parallel_tools=config.max_parallel_tools,
         llm_max_retries=config.llm_max_retries,
     )
+    langfuse = build_langfuse_fold(log=log_handler)
     agent_session = AgentSession(
         agent_loop=agent_loop,
         session_manager=manager,
-        # runs.jsonl is a fold over the same event stream the UIs subscribe to.
+        # runs.jsonl and Langfuse traces are folds over the same event stream
+        # the UIs subscribe to.
         base_event_handler=fanout(
             RunLogFold(run_log_store, tool_registry=tool_registry),
+            langfuse,
             run_event_handler,
         ),
     )
@@ -210,7 +218,9 @@ def build_runtime(
         agent_session=agent_session,
         approval_policy=approval_policy,
         approval_broker=approval_broker,
+        langfuse=langfuse,
     )
+
 
 
 def _resolve_mcp_config(package_dir: Path) -> tuple[Path, Path | None, str]:

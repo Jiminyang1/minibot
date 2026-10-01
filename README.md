@@ -150,6 +150,10 @@ flowchart TB
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | 两个都设置即开启 Langfuse 追踪（每个 turn 一条 trace，含完整请求、工具、审批、压缩） |
+| `LANGFUSE_BASE_URL` | EU 云 | Langfuse 地址：按注册区域填，或自部署地址 |
+| `MINIBOT_LANGFUSE` | `1` | 设为 `0` 保留 key 但关闭追踪 |
+| `MINIBOT_LANGFUSE_MAX_INPUT_MESSAGES` | `50` | 每次模型调用上报的历史消息条数（system prompt 之外；`0` = 全部） |
 | `MINIBOT_HOME` | `~/.minibot` | 全局状态目录（会话 / 运行日志 / 记忆 / mcp.json） |
 
 持久化路径——**状态全局集中**（默认 `~/.minibot`，`MINIBOT_HOME` 可改）。会话属于用户而不属于启动目录；工作目录只决定 fs/exec 工具的根，并作为元数据记在会话上：

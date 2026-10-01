@@ -14,7 +14,9 @@ from minibot.runtime.compaction import (
     find_cut_point,
     prepare_compaction,
 )
-from minibot.runtime.compactor import Compactor
+from minibot.llm import TokenUsage
+from minibot.runtime.compactor import Compactor, SummaryResult
+from minibot.runtime.events import RuntimeEvent, RuntimeEventEmitter
 from minibot.runtime.context_builder import ContextBuilder
 from minibot.runtime.messages import (
     format_model_messages_for_summary,
@@ -190,6 +192,65 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIn("TOOL_RESULT[read_file]:", formatted)
         self.assertIn("characters truncated for summary", formatted)
         self.assertLess(len(formatted), 2100)
+
+    def test_summary_call_is_published_on_the_run_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = _Harness(
+                Path(tmpdir),
+                summarizer=lambda request: SummaryResult(
+                    text="summary",
+                    usage=TokenUsage(input_tokens=900, output_tokens=40, total_tokens=940),
+                ),
+            )
+            harness.add(
+                MessageEvent.create(role="user", content="old " * 2000),
+                MessageEvent.create(role="assistant", content="answer"),
+                MessageEvent.create(role="user", content="current question"),
+            )
+            events: list[RuntimeEvent] = []
+            emitter = RuntimeEventEmitter(
+                run_id="r_test", session_id="s_test", handler=events.append
+            )
+
+            harness.compactor.reduce(
+                harness.session, tokens_before=10000, emitter=emitter
+            )
+
+            self.assertEqual(
+                [event.type for event in events],
+                ["compaction.request.started", "compaction.request.completed"],
+            )
+            request = events[0].payload["messages"]
+            self.assertEqual([message["role"] for message in request], ["system", "user"])
+            completed = events[1].payload
+            self.assertEqual(completed["usage"]["input_tokens"], 900)
+            self.assertEqual(completed["output"], {"content": "summary"})
+
+    def test_failed_summary_call_is_published_then_degrades(self) -> None:
+        def broken(request):
+            raise RuntimeError("summary endpoint down")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = _Harness(Path(tmpdir), summarizer=broken)
+            harness.add(
+                MessageEvent.create(role="user", content="old " * 2000),
+                MessageEvent.create(role="assistant", content="answer"),
+                MessageEvent.create(role="user", content="current question"),
+            )
+            events: list[RuntimeEvent] = []
+            emitter = RuntimeEventEmitter(
+                run_id="r_test", session_id="s_test", handler=events.append
+            )
+
+            message = harness.compactor.reduce(
+                harness.session, tokens_before=10000, emitter=emitter
+            )
+
+            self.assertIn("摘要降级为截断", message)
+            completed = events[-1]
+            self.assertEqual(completed.type, "compaction.request.completed")
+            self.assertEqual(completed.payload["error_type"], "RuntimeError")
+            self.assertIsNone(completed.payload["usage"])
 
     def test_reduce_appends_and_persists_compaction_entry_at_cut_point(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

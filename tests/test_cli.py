@@ -21,7 +21,7 @@ class _AgentSession:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None):
+    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None, source=None):
         self.calls.append((session_id, user_input))
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",

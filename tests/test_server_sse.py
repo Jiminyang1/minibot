@@ -30,6 +30,7 @@ class _FakeAgentSession:
         *,
         event_handler,
         run_id=None,
+        source=None,
     ):
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",

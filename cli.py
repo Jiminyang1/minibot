@@ -794,6 +794,7 @@ def _run_prompt(
             user_input,
             run_id=run_id,
             event_handler=renderer.render_event,
+            source="cli",
         )
     except RunCancelled:
         renderer.clear_status()

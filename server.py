@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 from queue import Empty, Queue
@@ -29,6 +30,21 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 # Advisory events: broadcast to live subscribers, never stored for replay.
 # Reconnecting clients recover the authoritative text from message.completed.
 _TRANSIENT_EVENT_TYPES = {"message.delta"}
+
+# Full model requests ride on these events for tracing subscribers; the browser
+# never uses them, and they would bloat SSE frames and the replay backlog.
+_WIRE_STRIPPED_KEYS = {
+    "model.request.started": ("messages",),
+    "compaction.request.started": ("messages",),
+}
+
+
+def _for_wire(event: RuntimeEvent) -> RuntimeEvent:
+    keys = _WIRE_STRIPPED_KEYS.get(event.type)
+    if not keys:
+        return event
+    payload = {k: v for k, v in event.payload.items() if k not in keys}
+    return replace(event, payload=payload)
 
 
 class RunRequest(BaseModel):
@@ -222,7 +238,7 @@ def create_app(runtime: MiniBotRuntime):
         event_store.create(run_id)
 
         def sink(event: RuntimeEvent) -> None:
-            event_store.append(event)
+            event_store.append(_for_wire(event))
 
         def worker() -> None:
             try:
@@ -231,6 +247,7 @@ def create_app(runtime: MiniBotRuntime):
                     request.input,
                     run_id=run_id,
                     event_handler=sink,
+                    source="server",
                 )
             except RunCancelled:
                 pass

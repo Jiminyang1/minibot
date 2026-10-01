@@ -78,7 +78,8 @@ class RunLogFold:
         if acc is None:
             return
 
-        if event.type == "model.request.completed":
+        # Summary calls made during compaction cost tokens too.
+        if event.type in {"model.request.completed", "compaction.request.completed"}:
             acc.llm_call_count += 1
             self._add_usage(acc, payload.get("usage"))
         elif event.type in {"tool_call.completed", "tool_call.failed"}:

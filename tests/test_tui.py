@@ -28,7 +28,7 @@ class _ScriptedAgentSession:
         self.policy: ApprovalPolicy | None = None
         self.prompts: list[str] = []
 
-    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None):
+    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None, source=None):
         self.prompts.append(user_input)
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_tui",
@@ -57,7 +57,7 @@ class _ScriptedAgentSession:
 
 
 class _FailingAgentSession(_ScriptedAgentSession):
-    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None):
+    def prompt(self, session_id, user_input, *, run_id=None, event_handler=None, source=None):
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_tui_failure",
             session_id=session_id,

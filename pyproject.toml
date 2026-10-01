@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
     "jsonschema>=4.20",
+    "langfuse>=4.16,<5",
     "matplotlib>=3.10.9",
     "mcp>=1.27,<2",
     "openai>=1.0",

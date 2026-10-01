@@ -150,6 +150,10 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | setting both enables Langfuse tracing (one trace per turn: full requests, tools, approvals, compaction) |
+| `LANGFUSE_BASE_URL` | EU cloud | Langfuse endpoint: your signup region, or a self-hosted URL |
+| `MINIBOT_LANGFUSE` | `1` | `0` keeps keys configured but disables tracing |
+| `MINIBOT_LANGFUSE_MAX_INPUT_MESSAGES` | `50` | history messages uploaded per model call, after the system prompt (`0` = all) |
 | `MINIBOT_HOME` | `~/.minibot` | global state home (sessions / run log / memory / mcp.json) |
 
 Persistence — **state is centralized globally** (default `~/.minibot`, override with `MINIBOT_HOME`). Conversations belong to the user, not to the launch directory; the workspace only roots the fs/exec tools and is recorded as session metadata:

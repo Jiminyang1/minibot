@@ -124,7 +124,9 @@ class Scheduler:
             f"敏感工具默认会被拒绝,直接产出最终结果。]\n{task.prompt}"
         )
         try:
-            outcome = self.agent_session.prompt(session.session_id, prompt)
+            outcome = self.agent_session.prompt(
+                session.session_id, prompt, source="scheduler"
+            )
         except RunCancelled:
             self._mark(task, status="cancelled", now=now)
             return
@@ -145,7 +147,9 @@ class Scheduler:
         checklist = self._read_checklist()
         prompt = self._heartbeat_prompt(task, checklist, now)
         try:
-            outcome = self.agent_session.prompt(session.session_id, prompt)
+            outcome = self.agent_session.prompt(
+                session.session_id, prompt, source="heartbeat"
+            )
         except RunCancelled:
             self._mark(task, status="cancelled", now=now)
             return

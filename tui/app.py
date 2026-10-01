@@ -624,6 +624,7 @@ class MinibotApp(App):
                 text,
                 run_id=run_id,
                 event_handler=self._on_event_from_worker,
+                source="tui",
             )
         except RunCancelled:
             notice = "已取消。"

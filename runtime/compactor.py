@@ -8,10 +8,12 @@ call — there is no pending state to reconcile later.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
 import threading
+import time
 from typing import TYPE_CHECKING
 
-from ..llm import LLMClient
+from ..llm import LLMClient, TokenUsage
 from ..prompts import SUMMARY_SYSTEM_PROMPT
 from .budget import TokenBudget
 from .cancel import RunCancelled
@@ -26,9 +28,11 @@ from .compaction import (
     summary_projection_offset,
 )
 from .context_builder import ContextBuilder
+from .events import RuntimeEventEmitter
 from .messages import (
     ModelMessage,
     format_model_messages_for_summary,
+    model_messages_to_openai,
     session_message_to_model,
 )
 
@@ -37,21 +41,37 @@ if TYPE_CHECKING:
     from ..tools.registry import ToolRegistry
 
 
-def make_summarizer(llm: LLMClient) -> Callable[[SummaryRequest], str]:
+@dataclass(frozen=True)
+class SummaryResult:
+    """A summariser's answer plus what the call cost, when known."""
+
+    text: str
+    usage: TokenUsage | None = None
+
+
+# A plain ``str`` is accepted too, for summarisers that don't call a model.
+Summarizer = Callable[[SummaryRequest], "str | SummaryResult"]
+
+
+def summary_messages(request: SummaryRequest) -> list[ModelMessage]:
+    """The exact model request a summary is produced from."""
+    return [
+        ModelMessage.create(role="system", content=SUMMARY_SYSTEM_PROMPT),
+        ModelMessage.create(role="user", content=format_summary_request(request)),
+    ]
+
+
+def make_summarizer(llm: LLMClient) -> Summarizer:
     """Create a summariser closure backed by the given LLM client."""
 
-    def summarize(request: SummaryRequest) -> str:
+    def summarize(request: SummaryRequest) -> SummaryResult:
         if not request.messages and not request.turn_prefix_messages:
             raise ValueError("没有可供摘要的历史消息。")
-        formatted = format_summary_request(request)
-        resp = llm.chat([
-            ModelMessage.create(role="system", content=SUMMARY_SYSTEM_PROMPT),
-            ModelMessage.create(role="user", content=formatted),
-        ])
+        resp = llm.chat(summary_messages(request))
         summary = (resp.content or "").strip()
         if not summary:
             raise RuntimeError("模型没有返回有效摘要。")
-        return summary
+        return SummaryResult(text=summary, usage=resp.usage)
 
     return summarize
 
@@ -66,9 +86,10 @@ class Compactor:
         context_builder: ContextBuilder,
         budget: TokenBudget,
         tool_registry: ToolRegistry,
-        summarizer: Callable[[SummaryRequest], str],
+        summarizer: Summarizer,
         keep_recent_tokens: int,
         include_reasoning_content: bool = False,
+        model: str | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.context_builder = context_builder
@@ -77,6 +98,7 @@ class Compactor:
         self.summarizer = summarizer
         self.keep_recent_tokens = keep_recent_tokens
         self.include_reasoning_content = include_reasoning_content
+        self.model = model
 
     def reduce(
         self,
@@ -84,18 +106,25 @@ class Compactor:
         *,
         tokens_before: int,
         cancel_event: threading.Event | None = None,
+        emitter: RuntimeEventEmitter | None = None,
     ) -> str:
-        """Bring *session* back under budget or raise a user-actionable error."""
+        """Bring *session* back under budget or raise a user-actionable error.
+
+        With an *emitter*, each summary model call is published as a
+        ``compaction.request.started``/``completed`` pair on the run's stream.
+        """
         did_compact, message = self._compact_once(
             session,
             tokens_before=tokens_before,
             cancel_event=cancel_event,
+            emitter=emitter,
         )
         if not did_compact:
             drop_message = self._drop_read_only_tool_tail(
                 session,
                 tokens_before=tokens_before,
                 cancel_event=cancel_event,
+                emitter=emitter,
             )
             if drop_message is None:
                 # Nothing reducible: raise with the request size that tripped
@@ -114,6 +143,7 @@ class Compactor:
                 session,
                 tokens_before=tokens_after,
                 cancel_event=cancel_event,
+                emitter=emitter,
             )
             if drop_message is not None:
                 message = f"{message}\n{drop_message}"
@@ -134,6 +164,7 @@ class Compactor:
         *,
         tokens_before: int,
         cancel_event: threading.Event | None,
+        emitter: RuntimeEventEmitter | None = None,
     ) -> tuple[bool, str]:
         projected_messages = list(session.messages)
         previous = self._latest_compaction_entry(session)
@@ -163,13 +194,14 @@ class Compactor:
         ]
         degraded_reason: str | None = None
         try:
-            summary = self.summarizer(
+            summary = self._summarize(
                 build_summary_request(
                     preparation.messages_to_summarize,
                     previous_summary=preparation.previous_summary,
                     turn_prefix_messages=preparation.turn_prefix_messages,
                     include_reasoning_content=self.include_reasoning_content,
-                )
+                ),
+                emitter=emitter,
             )
         except RunCancelled:
             raise
@@ -213,6 +245,7 @@ class Compactor:
         *,
         tokens_before: int,
         cancel_event: threading.Event | None,
+        emitter: RuntimeEventEmitter | None = None,
     ) -> str | None:
         projected_messages = list(session.messages)
         block = self._latest_tool_transaction_block(projected_messages)
@@ -231,6 +264,7 @@ class Compactor:
             prefix,
             tool_names=tool_names,
             cancel_event=cancel_event,
+            emitter=emitter,
         )
         previous = self._latest_compaction_entry(session)
         details = extract_compaction_details(
@@ -280,6 +314,7 @@ class Compactor:
         *,
         tool_names: list[str],
         cancel_event: threading.Event | None,
+        emitter: RuntimeEventEmitter | None = None,
     ) -> str:
         note = (
             "[Omitted oversized read-only tool transaction]\n"
@@ -299,12 +334,13 @@ class Compactor:
 
         self._check_cancel_event(cancel_event)
         try:
-            summary = self.summarizer(
+            summary = self._summarize(
                 build_summary_request(
                     prefix,
                     previous_summary=previous_summary,
                     include_reasoning_content=self.include_reasoning_content,
-                )
+                ),
+                emitter=emitter,
             )
         except RunCancelled:
             raise
@@ -316,6 +352,58 @@ class Compactor:
             )
         self._check_cancel_event(cancel_event)
         return summary.strip() + "\n\n" + note
+
+    def _summarize(
+        self,
+        request: SummaryRequest,
+        *,
+        emitter: RuntimeEventEmitter | None,
+    ) -> str:
+        """Call the summariser; publish it as a model call when in a run.
+
+        Summary calls cost tokens like any other model call, so they belong
+        on the run's event stream (run log usage, tracing), not off the books.
+        """
+        if emitter is not None:
+            emitter.emit(
+                "compaction.request.started",
+                {
+                    "model": self.model,
+                    "messages": model_messages_to_openai(
+                        summary_messages(request),
+                        include_reasoning_content=True,
+                    ),
+                },
+            )
+        started = time.perf_counter()
+        try:
+            result = self.summarizer(request)
+        except Exception as exc:
+            if emitter is not None:
+                emitter.emit(
+                    "compaction.request.completed",
+                    {
+                        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                        "usage": None,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            raise
+        if isinstance(result, SummaryResult):
+            text, usage = result.text, result.usage
+        else:
+            text, usage = result, None
+        if emitter is not None:
+            emitter.emit(
+                "compaction.request.completed",
+                {
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "usage": None if usage is None else asdict(usage),
+                    "output": {"content": text},
+                },
+            )
+        return text
 
     _FALLBACK_TAIL_CHARS = 2000
 
