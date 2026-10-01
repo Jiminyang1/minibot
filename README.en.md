@@ -103,7 +103,7 @@ flowchart TB
 | Orchestration vs mechanics | The loop only decides and delegates; mechanics live in named, independently testable components |
 | One output channel | RuntimeEvent is the sole exit; `runs.jsonl` is `RunLogFold`'s fold over the stream |
 | Append-only session | `messages.jsonl` is the source of truth; compaction appends an entry and persists immediately |
-| Projected view | `SessionContextProjector` derives model-visible messages (incl. incomplete tool-transaction filtering) |
+| Projected view | `SessionContextProjector` derives model-visible messages (incl. `interrupted` results for cut-off tool calls) |
 | Sync turn loop | Main loop is synchronous; MCP asyncio lives in background threads |
 
 Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules, per-turn sequence diagram, the full event catalog, the compaction decision tree, error/cancellation/concurrency semantics; **[docs/core-philosophy.md](docs/core-philosophy.md)** — the judgment criteria behind this shape (both in Chinese).

@@ -18,6 +18,7 @@ ToolCode: TypeAlias = Literal[
     "conflict",
     "error",
     "noop",
+    "interrupted",
 ]
 
 

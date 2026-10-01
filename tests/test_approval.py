@@ -126,7 +126,7 @@ class ToolApprovalGateTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(events, [])
 
-    def test_missing_handler_approves_in_ask_mode(self) -> None:
+    def test_missing_handler_denies_in_ask_mode(self) -> None:
         gate = ToolApprovalGate(ApprovalPolicy(handler=None, mode="ask"))
 
         result = gate.check(
@@ -137,7 +137,9 @@ class ToolApprovalGateTests(unittest.TestCase):
             cancel_event=None,
         )
 
-        self.assertIsNone(result)
+        assert result is not None
+        self.assertFalse(result.ok)
+        self.assertEqual(result.code, "denied")
 
     def test_cancelled_run_raises_before_asking(self) -> None:
         cancel_event = threading.Event()

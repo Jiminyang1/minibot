@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from minibot.artifacts import ArtifactStore
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from minibot.runtime.approval import ApprovalPolicy
+from minibot.runtime.cancel import RunCancelled
 from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.messages import ModelMessage
 from minibot.session import MessageEvent
@@ -87,6 +88,33 @@ class _EchoTool(Tool):
     def execute(self, *, context: ToolExecutionContext, value: str) -> ToolOutput:
         del context
         return ToolOutput.success("ok", data={"value": value})
+
+
+class _CancellingTool(Tool):
+    """Performs its effect, then the user cancels before the result lands."""
+
+    def __init__(self, cancel_event: threading.Event) -> None:
+        super().__init__()
+        self._cancel_event = cancel_event
+        self.executions = 0
+
+    @property
+    def name(self) -> str:
+        return "delete_files"
+
+    @property
+    def description(self) -> str:
+        return "delete_files"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}}
+
+    def execute(self, *, context: ToolExecutionContext) -> ToolOutput:
+        del context
+        self.executions += 1
+        self._cancel_event.set()
+        return ToolOutput.success("deleted")
 
 
 class _TrackingState:
@@ -192,6 +220,39 @@ def _turn_messages(session) -> list[MessageEvent]:
 
 
 class AgentLoopUsageTests(unittest.TestCase):
+    def test_next_turn_sees_tool_call_interrupted_by_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cancel_event = threading.Event()
+            tool = _CancellingTool(cancel_event)
+            llm = _ScriptedLLM(
+                [
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(id="call_1", name="delete_files", arguments="{}")
+                        ],
+                    ),
+                    LLMResponse(content="checked"),
+                ]
+            )
+            loop, manager = build_loop(llm, _registry(tool), Path(tmpdir))
+
+            with self.assertRaises(RunCancelled):
+                run_turn(loop, manager, "delete stale files", cancel_event=cancel_event)
+            outcome, _ = run_turn(loop, manager, "did it run?")
+
+            self.assertEqual(outcome.reply, "checked")
+            self.assertEqual(tool.executions, 1)
+            request = llm.calls[1]["messages"]
+            self.assertEqual(
+                [message.role for message in request],
+                ["system", "user", "assistant", "tool", "user"],
+            )
+            self.assertEqual(request[2].tool_calls[0].id, "call_1")
+            self.assertEqual(request[3].tool_call_id, "call_1")
+            payload = json.loads(request[3].content)
+            self.assertEqual(payload["code"], "interrupted")
+
     def test_fails_fast_when_model_returns_empty_final_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = _registry(_EchoTool())

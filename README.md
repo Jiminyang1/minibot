@@ -103,7 +103,7 @@ flowchart TB
 | 编排与机制分离 | 循环只做"判断 + 调用具名组件"；机制在各自模块，均可脱离循环单测 |
 | 单一输出通道 | RuntimeEvent 是唯一出口；`runs.jsonl` 是 `RunLogFold` 对事件流的 fold |
 | Append-only session | `messages.jsonl` 是唯一真相源；compact 只追加 entry 且即时落盘 |
-| 投影视图 | `SessionContextProjector` 从 entry 派生模型可见消息（含不完整工具事务过滤） |
+| 投影视图 | `SessionContextProjector` 从 entry 派生模型可见消息（含中断工具调用的 `interrupted` 结果补全） |
 | 同步 turn loop | 主循环同步；MCP asyncio 隔离在后台线程 |
 
 深入阅读：**[docs/architecture.md](docs/architecture.md)** —— 分层与依赖规则、单轮时序图、完整事件目录、压缩决策树、错误/取消/并发语义；**[docs/core-philosophy.md](docs/core-philosophy.md)** —— 这套形状背后的判断标准与取舍论证。

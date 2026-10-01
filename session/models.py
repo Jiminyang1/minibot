@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +15,27 @@ def utc_now() -> str:
 def preview(text: str, limit: int = 30) -> str:
     compact = " ".join(text.split())
     return compact if len(compact) <= limit else compact[:limit] + "..."
+
+
+def _interrupted_tool_content(tool_name: str | None) -> str:
+    # Same envelope as ToolResult.to_model_content, built here because the
+    # session layer sits below tools and must not import it.
+    return json.dumps(
+        {
+            "ok": False,
+            "code": "interrupted",
+            "summary": (
+                f"工具 {tool_name or '?'} 没有记录到结果：运行被取消或进程中断。"
+                "它可能未执行、部分执行或已执行完毕，副作用未知；"
+                "重试有副作用的操作前请先确认当前状态。"
+            ),
+            "data": {"tool": tool_name},
+            "artifact": None,
+            "truncated": False,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 class MessageEvent:
@@ -274,11 +296,22 @@ class SessionContextProjector:
                 kept.append(entry.message)
         return kept
 
-    @staticmethod
+    @classmethod
     def _filter_incomplete_tool_transactions(
+        cls,
         messages: list[MessageEvent],
     ) -> list[MessageEvent]:
-        """Drop assistant tool-call blocks that do not have a complete tool tail."""
+        """Keep every tool-call block well-formed for the next model request.
+
+        A block missing some tool results is handled by position:
+
+        - at the tail it may still be running (the live turn appends results
+          one by one), so it is left out until it completes;
+        - once anything follows it, the run that produced it is over (cancelled
+          or crashed). The call is kept and each missing result is filled with
+          an ``interrupted`` result, so the model sees that the call was issued
+          and its effect is unknown, instead of the call silently vanishing.
+        """
         projected: list[MessageEvent] = []
         index = 0
         while index < len(messages):
@@ -299,6 +332,11 @@ class SessionContextProjector:
                 if expected_ids and len(expected_ids) == len(actual_ids) and set(expected_ids) == set(actual_ids):
                     projected.append(message)
                     projected.extend(tool_messages)
+                elif cursor < len(messages):
+                    projected.append(message)
+                    projected.extend(
+                        cls._results_with_interruptions(message, tool_messages)
+                    )
                 index = cursor
                 continue
 
@@ -306,6 +344,38 @@ class SessionContextProjector:
             index += 1
 
         return projected
+
+    @staticmethod
+    def _results_with_interruptions(
+        message: MessageEvent,
+        tool_messages: list[MessageEvent],
+    ) -> list[MessageEvent]:
+        """Recorded results in call order, synthesizing the missing ones."""
+        recorded = {
+            str(tool_message.tool_call_id): tool_message
+            for tool_message in tool_messages
+            if tool_message.tool_call_id
+        }
+        results: list[MessageEvent] = []
+        for call in message.tool_calls or []:
+            call_id = str(call.get("id", ""))
+            existing = recorded.get(call_id)
+            if existing is not None:
+                results.append(existing)
+                continue
+            function = call.get("function")
+            name = function.get("name") if isinstance(function, dict) else None
+            results.append(
+                MessageEvent(
+                    id=f"{message.id}_{call_id}_interrupted",
+                    role="tool",
+                    tool_call_id=call_id,
+                    name=name,
+                    created_at=message.created_at,
+                    content=_interrupted_tool_content(name),
+                )
+            )
+        return results
 
 
 class Session:

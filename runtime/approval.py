@@ -65,7 +65,7 @@ class ApprovalPolicy:
         if cancel_event is not None and cancel_event.is_set():
             raise RunCancelled("run cancelled while waiting for approval")
         if self.handler is None:
-            return True
+            return False
         return bool(self.handler(request, cancel_event))
 
 
@@ -105,7 +105,23 @@ class ToolApprovalGate:
             return None
 
         if self.policy.handler is None:
-            return None
+            # Fail closed: a frontend that never wired an approval channel
+            # must not let sensitive tools run unasked.
+            _emit(
+                emitter,
+                "approval.resolved",
+                {
+                    "tool_call_id": call.tool_call_id,
+                    "tool": call.tool.name,
+                    "approved": False,
+                    "auto": True,
+                },
+            )
+            return ToolOutput.failure(
+                "denied",
+                f"工具 {call.tool.name} 需要审批，但当前没有可用的审批渠道，已拒绝执行。",
+                data={"tool": call.tool.name, "args": call.args},
+            )
 
         approval_id = "ap_" + uuid.uuid4().hex[:12]
         request = ApprovalRequest(

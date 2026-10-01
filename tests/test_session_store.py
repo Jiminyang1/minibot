@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -128,7 +129,9 @@ class SessionStoreTests(unittest.TestCase):
         self.assertIsNone(entry.details)
         self.assertNotIn("details", entry.to_dict())
 
-    def test_incomplete_tool_transaction_is_not_projected_back_to_model(self) -> None:
+    def test_incomplete_tool_transaction_at_tail_is_held_back(self) -> None:
+        # A tail block may still be running: the live turn appends its tool
+        # results one by one, so it must not be projected until complete.
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             manager = SessionManager(workspace)
@@ -136,28 +139,76 @@ class SessionStoreTests(unittest.TestCase):
             session.add_message(
                 MessageEvent.create(role="user", content="run tool")
             )
-            session.add_message(
-                MessageEvent.create(
-                    role="assistant",
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "echo",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                )
-            )
+            session.add_message(_tool_call_message("call_1", "call_2"))
+            session.add_message(_tool_result("call_1", "one"))
             manager.save(session)
 
             reloaded = manager.load("s_test")
 
             assert reloaded is not None
             self.assertEqual([message.role for message in reloaded.messages], ["user"])
+
+    def test_interrupted_tool_calls_are_kept_with_synthetic_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            session = manager.create_session("s_test")
+            session.add_message(
+                MessageEvent.create(role="user", content="run tools")
+            )
+            session.add_message(_tool_call_message("call_1", "call_2"))
+            session.add_message(_tool_result("call_2", "two"))
+            # The run died; the next turn's input ends the dangling block.
+            session.add_message(
+                MessageEvent.create(role="user", content="what happened?")
+            )
+            manager.save(session)
+
+            reloaded = manager.load("s_test")
+
+            assert reloaded is not None
+            self.assertEqual(
+                [message.role for message in reloaded.messages],
+                ["user", "assistant", "tool", "tool", "user"],
+            )
+            first, second = reloaded.messages[2], reloaded.messages[3]
+            # Results follow call order; the recorded one is kept verbatim.
+            self.assertEqual(first.tool_call_id, "call_1")
+            self.assertEqual(first.name, "echo")
+            payload = json.loads(first.content)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["code"], "interrupted")
+            self.assertEqual(second.tool_call_id, "call_2")
+            self.assertEqual(second.content, "two")
+            # Nothing synthetic is written back to disk.
+            raw_lines = (
+                workspace / "sessions" / "s_test" / "messages.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(raw_lines), 4)
+
+
+def _tool_call_message(*call_ids: str) -> MessageEvent:
+    return MessageEvent.create(
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "echo", "arguments": "{}"},
+            }
+            for call_id in call_ids
+        ],
+    )
+
+
+def _tool_result(call_id: str, content: str) -> MessageEvent:
+    return MessageEvent.create(
+        role="tool",
+        tool_call_id=call_id,
+        name="echo",
+        content=content,
+    )
 
 
 if __name__ == "__main__":
