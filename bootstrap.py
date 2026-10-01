@@ -79,7 +79,14 @@ def build_runtime(
     log_handler: Callable[[str], None] | None = None,
     approval_handler: Callable[[ApprovalRequest, threading.Event | None], bool] | None = None,
     approval_broker: ApprovalBroker | None = None,
+    state_home: Path | None = None,
+    enable_mcp: bool = True,
 ) -> MiniBotRuntime:
+    """Assemble a runtime.
+
+    *state_home* overrides ``MINIBOT_HOME`` and *enable_mcp* skips connecting
+    MCP servers; both exist so evals can run against an isolated sandbox.
+    """
     package_dir = Path(__file__).resolve().parent
     resolved_workspace = (workspace or Path.cwd()).resolve()
     os.environ.setdefault("MINIBOT_PYTHON", sys.executable)
@@ -87,7 +94,7 @@ def build_runtime(
 
     # State is global (assistant memory belongs to the user); the workspace
     # only scopes tools and is stamped onto sessions as provenance metadata.
-    state_home = resolve_state_home()
+    state_home = state_home or resolve_state_home()
     manager = SessionManager(state_home, default_workspace=resolved_workspace)
     artifact_store = ArtifactStore(state_home)
     memory_store = UserMemoryStore(state_home)
@@ -114,21 +121,24 @@ def build_runtime(
         schedule_toolset(schedule_store, workspace=resolved_workspace)
     )
 
-    mcp_config_root, mcp_config_path, mcp_config_source = _resolve_mcp_config(
-        package_dir,
-    )
-    if log_handler is not None:
-        if mcp_config_path is None:
-            log_handler("未找到全局 MCP 配置，启动时不加载 MCP server。")
-        else:
-            log_handler(
-                f"MCP 配置路径 ({mcp_config_source}): {mcp_config_path}"
-            )
+    if enable_mcp:
+        mcp_config_root, mcp_config_path, mcp_config_source = _resolve_mcp_config(
+            package_dir,
+        )
+        if log_handler is not None:
+            if mcp_config_path is None:
+                log_handler("未找到全局 MCP 配置，启动时不加载 MCP server。")
+            else:
+                log_handler(
+                    f"MCP 配置路径 ({mcp_config_source}): {mcp_config_path}"
+                )
 
-    mcp_host = MCPHost.from_config_root(
-        mcp_config_root,
-        event_handler=log_handler,
-    )
+        mcp_host = MCPHost.from_config_root(
+            mcp_config_root,
+            event_handler=log_handler,
+        )
+    else:
+        mcp_host = MCPHost([], event_handler=log_handler)
     for tool in mcp_host.connect_all():
         if tool_registry.get(tool.name) is not None:
             if log_handler is not None:

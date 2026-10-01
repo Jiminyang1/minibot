@@ -32,6 +32,7 @@ minibot-daemon = "minibot.scheduler:main"
 [tool.setuptools]
 packages = [
     "minibot",
+    "minibot.evals",
     "minibot.interaction",
     "minibot.llm_providers",
     "minibot.mcp_host",
@@ -62,3 +63,4 @@ packages = [
 [tool.setuptools.package-data]
 "minibot" = ["mcp.json", "web/*"]
 "minibot.skills" = ["*.md"]
+"minibot.evals" = ["*.json"]
