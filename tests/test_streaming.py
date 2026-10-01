@@ -447,10 +447,10 @@ class CliTypewriterTests(unittest.TestCase):
         renderer, out = self._renderer()
 
         renderer.render_event(
-            self._event("message.delta", {"channel": "text", "text": "你好"}, 1)
+            self._event("message.delta", {"iteration": 1, "channel": "text", "text": "你好"}, 1)
         )
         renderer.render_event(
-            self._event("message.delta", {"channel": "text", "text": "世界"}, 2)
+            self._event("message.delta", {"iteration": 1, "channel": "text", "text": "世界"}, 2)
         )
         renderer.render_event(
             self._event("message.completed", {"iteration": 1, "content": "你好世界"}, 3)
@@ -460,6 +460,49 @@ class CliTypewriterTests(unittest.TestCase):
         output = out.getvalue()
         self.assertEqual(output.count("你好世界"), 1)
         self.assertIn("MiniBot › 你好世界", output.replace("\n", ""))
+
+    def test_verbose_lines_between_stream_and_completion_do_not_repeat_reply(self) -> None:
+        # In verbose mode model.request.completed prints a line before
+        # message.completed arrives, which closes the typewriter line first.
+        out = io.StringIO()
+        renderer = CliRenderer(verbose=True, no_color=True, stdout=out)
+
+        renderer.render_event(
+            self._event("message.delta", {"iteration": 1, "channel": "text", "text": "你好世界"}, 1)
+        )
+        renderer.render_event(
+            self._event(
+                "model.request.completed",
+                {"iteration": 1, "tool_call_count": 0, "elapsed_ms": 5, "usage": None},
+                2,
+            )
+        )
+        renderer.render_event(
+            self._event("message.completed", {"iteration": 1, "content": "你好世界"}, 3)
+        )
+        renderer.print_reply("你好世界", run_id="r_test")
+
+        self.assertEqual(out.getvalue().count("你好世界"), 1)
+
+    def test_reply_prints_when_only_an_earlier_iteration_streamed(self) -> None:
+        renderer, out = self._renderer()
+
+        renderer.render_event(
+            self._event("message.delta", {"iteration": 1, "channel": "text", "text": "先查一下"}, 1)
+        )
+        renderer.render_event(
+            self._event(
+                "tool_call.started",
+                {"tool_call_id": "c1", "tool": "read_file", "display_name": "read_file", "args": {}},
+                2,
+            )
+        )
+        renderer.render_event(
+            self._event("message.completed", {"iteration": 2, "content": "最终答案"}, 3)
+        )
+        renderer.print_reply("最终答案", run_id="r_test")
+
+        self.assertIn("MiniBot › 最终答案", out.getvalue())
 
     def test_reasoning_deltas_are_not_rendered(self) -> None:
         renderer, out = self._renderer()

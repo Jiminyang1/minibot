@@ -98,6 +98,8 @@ class CliRenderer:
         # Typewriter state: True while a streamed line is open on the terminal.
         # While open, the spinner stays off and block output breaks the line first.
         self._stream_open = False
+        # (run_id, iteration) pairs whose reply text reached the terminal.
+        self._streamed_iterations: set[tuple[str, object]] = set()
         self._streamed_replies: set[str] = set()
         self._reasoning = ReasoningPreview(
             self,
@@ -194,11 +196,17 @@ class CliRenderer:
         if event.type == "message.delta":
             self._render_stream_delta(event)
             return
-        if event.type == "message.completed" and self._stream_open:
-            # The reply just finished streaming; close the line and remember
-            # the run so print_reply does not repeat the text.
-            self._flush_live_regions()
-            self._streamed_replies.add(event.run_id)
+        if event.type == "message.completed":
+            # Judge by what streamed, not by whether the line is still open:
+            # verbose lines printed in between may have closed it already.
+            streamed = (event.run_id, event.payload.get("iteration"))
+            if streamed in self._streamed_iterations:
+                self._flush_live_regions()
+                self._streamed_replies.add(event.run_id)
+        if event.type in {"message.completed", "run.failed", "run.cancelled"}:
+            self._streamed_iterations = {
+                key for key in self._streamed_iterations if key[0] != event.run_id
+            }
         message = self.format_event(event)
         if message:
             self._flush_live_regions()
@@ -228,6 +236,7 @@ class CliRenderer:
         if not self._stream_open:
             self._stream_open = True
             self.stdout.write(f"\n{self.c('MiniBot ›', 'bold', 'magenta')} ")
+        self._streamed_iterations.add((event.run_id, payload.get("iteration")))
         self.stdout.write(text)
         self.stdout.flush()
 
