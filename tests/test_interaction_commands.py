@@ -6,7 +6,13 @@ import types
 import unittest
 
 from minibot.config import Config
-from minibot.interaction.commands import CommandContext, dispatch_command
+from minibot.runtime.budget import TokenBudget
+from minibot.interaction.commands import (
+    CommandContext,
+    command_catalog,
+    command_defs,
+    dispatch_command,
+)
 from minibot.mcp_host.models import MCPHostSummary, MCPServerStatus
 from minibot.runtime.approval import ApprovalPolicy
 from minibot.session import SessionManager
@@ -92,6 +98,15 @@ class InteractionCommandTests(unittest.TestCase):
             self.assertTrue(resumed)
             self.assertEqual(loaded.session_id, created.session_id)
 
+    def test_command_catalog_is_derived_from_structured_definitions(self) -> None:
+        expected = tuple(
+            (command.display, command.description)
+            for command in command_defs()
+        )
+
+        self.assertEqual(command_catalog(include_exit=False), expected)
+        self.assertEqual(command_catalog(), expected + (("exit", "退出"),))
+
     def test_session_commands_switch_create_resume_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SessionManager(Path(tmpdir))
@@ -135,6 +150,38 @@ class InteractionCommandTests(unittest.TestCase):
                 self.assertTrue(result.notices, command)
 
             self.assertEqual(ctx.approval_policy.mode, "always")
+
+    def test_config_reports_resolved_model_and_policy_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            session = manager.create_session("s_test")
+            base = self._context(manager)
+            context = CommandContext(
+                sessions=base.sessions,
+                compactor=base.compactor,
+                context_builder=base.context_builder,
+                memory_store=base.memory_store,
+                approval_policy=base.approval_policy,
+                mcp_host=base.mcp_host,
+                config=Config(
+                    model="deepseek-v4-pro",
+                    max_output_tokens=32_000,
+                    compact_token_threshold=500_000,
+                ),
+                budget=TokenBudget(
+                    context_window_tokens=1_048_576,
+                    max_output_tokens=32_000,
+                    compact_token_threshold=500_000,
+                ),
+            )
+
+            result = dispatch_command("/config", session.session_id, context)
+
+            body = result.notices[0].body
+            self.assertIn("context_window_tokens: 1048576", body)
+            self.assertIn("max_output_tokens: 32000", body)
+            self.assertIn("hard_input_limit: 1016576", body)
+            self.assertIn("compact_token_threshold: 500000", body)
 
     def test_normal_prompt_is_not_handled_and_exit_is_handled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

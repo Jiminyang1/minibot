@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..config import Config
     from ..mcp_host.host import MCPHost
     from ..runtime.approval import ApprovalPolicy
+    from ..runtime.budget import TokenBudget
     from ..runtime.compactor import Compactor
     from ..runtime.context_builder import ContextBuilder
     from ..schedule_store import ScheduleStore
@@ -19,6 +20,13 @@ if TYPE_CHECKING:
 
 
 NoticeKind = Literal["info", "success", "warning", "error"]
+CommandParamType = Literal[
+    "none",
+    "choice",
+    "sessions",
+    "sessions_delete",
+    "text",
+]
 
 
 @dataclass(frozen=True)
@@ -45,32 +53,51 @@ class CommandContext:
     approval_policy: "ApprovalPolicy"
     mcp_host: "MCPHost | None" = None
     config: "Config | None" = None
+    budget: "TokenBudget | None" = None
     schedule_store: "ScheduleStore | None" = None
 
 
-_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("/sessions", "查看所有会话"),
-    ("/new", "新建会话"),
-    ("/resume <id>", "恢复指定会话"),
-    ("/delete <id|current>", "删除会话"),
-    ("/compact", "压缩当前会话"),
-    ("/mcp", "查看 MCP server 状态"),
-    ("/mcp tools [server]", "查看 MCP 工具列表"),
-    ("/skills", "查看当前可用 skills"),
-    ("/tasks [cancel <id>]", "查看或取消定时任务"),
-    ("/permission [ask|always]", "查看或切换审批模式"),
-    ("/config", "查看当前运行配置"),
-    ("/memory", "查看长期记忆 (clear / forget <id>)"),
-    ("/help", "显示帮助"),
-    ("exit", "退出"),
+@dataclass(frozen=True)
+class CommandDef:
+    """Structured command definition for UIs that want richer completion."""
+
+    display: str
+    description: str
+    param_type: CommandParamType = "none"
+    param_options: tuple[str, ...] = ()
+
+
+_COMMAND_DEFS: tuple[CommandDef, ...] = (
+    CommandDef("/sessions", "查看所有会话"),
+    CommandDef("/new", "新建会话"),
+    CommandDef("/resume <id>", "恢复指定会话", "sessions"),
+    CommandDef("/delete <id|current>", "删除会话", "sessions_delete"),
+    CommandDef("/compact", "压缩当前会话"),
+    CommandDef("/mcp", "查看 MCP server 状态"),
+    CommandDef("/mcp tools [server]", "查看 MCP 工具列表", "text"),
+    CommandDef("/skills", "查看当前可用 skills"),
+    CommandDef("/tasks [cancel <id>]", "查看或取消定时任务", "text"),
+    CommandDef("/permission [ask|always]", "查看或切换审批模式", "choice", ("ask", "always")),
+    CommandDef("/config", "查看当前运行配置"),
+    CommandDef("/memory", "查看长期记忆 (clear / forget <id>)", "text"),
+    CommandDef("/help", "显示帮助"),
 )
+
+
+def command_defs() -> tuple[CommandDef, ...]:
+    """Return structured command definitions for richer UI completion."""
+    return _COMMAND_DEFS
 
 
 def command_catalog(*, include_exit: bool = True) -> tuple[tuple[str, str], ...]:
     """Return the user-facing command catalog for help and completion UIs."""
+    commands = tuple(
+        (command.display, command.description)
+        for command in _COMMAND_DEFS
+    )
     if include_exit:
-        return _COMMANDS
-    return tuple((command, description) for command, description in _COMMANDS if command.startswith("/"))
+        return commands + (("exit", "退出"),)
+    return commands
 
 
 def dispatch_command(
@@ -429,13 +456,41 @@ def _config(context: CommandContext, current_session_id: str) -> CommandResult:
             notices=(_notice("info", "当前未传入运行配置。"),),
         )
     config = context.config
+    budget = context.budget
     rows = [
         ("model", config.model),
         ("approval_mode", _format_approval_mode(context.approval_policy.mode)),
         ("max_iterations", str(config.max_iterations)),
         ("max_parallel_tools", str(config.max_parallel_tools)),
-        ("compact_token_threshold", str(config.compact_token_threshold)),
-        ("reserved_completion_tokens", str(config.reserved_completion_tokens)),
+        (
+            "context_window_tokens",
+            str(
+                budget.context_window_tokens
+                if budget
+                else config.context_window_tokens or "auto"
+            ),
+        ),
+        (
+            "model_max_input_tokens",
+            str(
+                budget.model_max_input_tokens
+                if budget and budget.model_max_input_tokens is not None
+                else config.model_max_input_tokens or "context-derived"
+            ),
+        ),
+        ("max_output_tokens", str(config.max_output_tokens)),
+        (
+            "hard_input_limit",
+            str(budget.input_budget if budget else "runtime"),
+        ),
+        (
+            "compact_token_threshold",
+            str(
+                budget.compaction_trigger_tokens
+                if budget
+                else config.compact_token_threshold or "model input limit"
+            ),
+        ),
         ("compact_keep_recent_tokens", str(config.compact_keep_recent_tokens)),
     ]
     return CommandResult(

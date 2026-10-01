@@ -348,6 +348,23 @@ class RunLogFoldTests(unittest.TestCase):
             usage_events = [e for e in events if e.type == "context.usage"]
             self.assertEqual(len(usage_events), 1)
             self.assertEqual(usage_events[0].payload["budget"], 50_000 - 4_096)
+            self.assertEqual(
+                usage_events[0].payload["compact_trigger_tokens"],
+                50_000 - 4_096,
+            )
+            self.assertEqual(
+                usage_events[0].payload["context_window_tokens"],
+                50_000,
+            )
+            self.assertEqual(
+                usage_events[0].payload["max_output_tokens"],
+                4_096,
+            )
+            self.assertEqual(
+                usage_events[0].payload["current_tokens"],
+                usage_events[0].payload["message_tokens"]
+                + usage_events[0].payload["tool_definition_tokens"],
+            )
             self.assertGreater(usage_events[0].payload["current_tokens"], 0)
 
 

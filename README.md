@@ -137,12 +137,16 @@ flowchart TB
 | `OPENAI_API_KEY` | — | 必填 |
 | `OPENAI_BASE_URL` | 官方 | 兼容 OpenAI 的 endpoint |
 | `MINIBOT_MODEL` | `gpt-5.4-mini` | 模型名 |
+| `MINIBOT_CONTEXT_WINDOW_TOKENS` | 模型目录 | 未知/兼容模型的硬上下文窗口覆盖 |
+| `MINIBOT_MODEL_MAX_INPUT_TOKENS` | 模型目录 | provider 另有限制时的硬输入上限覆盖 |
+| `MINIBOT_MODEL_MAX_OUTPUT_TOKENS` | 模型目录 | 未知/兼容模型的硬输出上限覆盖 |
+| `MINIBOT_MAX_OUTPUT_TOKENS` | `4096` | 每次请求真正发送给 provider 的输出上限 |
 | `MINIBOT_APPROVAL_MODE` | `ask` | `ask` / `always` |
 | `MINIBOT_MAX_ITERATIONS` | `20` | 单 turn 最大 LLM↔tool 轮次 |
 | `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | 同响应并发 tool 上限 |
-| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | 触发 compact 的 token 阈值 |
-| `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | 预留给输出的 token |
+| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | 模型硬输入上限 | 触发 compact 的策略阈值，不是模型窗口 |
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | compact 后保留的近期上下文 |
+| `MINIBOT_RESERVED_COMPLETION_TOKENS` | — | `MINIBOT_MAX_OUTPUT_TOKENS` 的旧兼容别名 |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |

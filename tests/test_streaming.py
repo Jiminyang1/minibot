@@ -58,7 +58,12 @@ class _FakeStream:
         self.closed = True
 
 
-def _provider_client(*, supports_streaming: bool = True):
+def _provider_client(
+    *,
+    supports_streaming: bool = True,
+    request_max_output_tokens: int | None = None,
+    max_output_parameter: str = "max_completion_tokens",
+):
     from minibot.llm_providers.openai_compatible import OpenAICompatibleClient
 
     profile = LLMProfile(
@@ -67,12 +72,63 @@ def _provider_client(*, supports_streaming: bool = True):
         model="test-model",
         base_url=None,
         api_key="sk-test",
-        compat=OpenAICompatibleCompat(supports_streaming=supports_streaming),
+        compat=OpenAICompatibleCompat(
+            supports_streaming=supports_streaming,
+            max_output_parameter=max_output_parameter,
+        ),
+        request_max_output_tokens=request_max_output_tokens,
     )
     return OpenAICompatibleClient(profile)
 
 
 class ProviderStreamTests(unittest.TestCase):
+    def test_request_enforces_profile_output_ceiling(self) -> None:
+        client = _provider_client(request_max_output_tokens=12_345)
+        seen_kwargs: dict = {}
+
+        def _create(**kwargs):
+            seen_kwargs.update(kwargs)
+            return _ns(
+                choices=[
+                    _ns(
+                        message=_ns(content="ok", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+
+        client.chat([ModelMessage.create(role="user", content="hi")])
+
+        self.assertEqual(seen_kwargs["max_completion_tokens"], 12_345)
+
+    def test_deepseek_compatible_request_uses_max_tokens(self) -> None:
+        client = _provider_client(
+            request_max_output_tokens=32_000,
+            max_output_parameter="max_tokens",
+        )
+        seen_kwargs: dict = {}
+
+        def _create(**kwargs):
+            seen_kwargs.update(kwargs)
+            return _ns(
+                choices=[
+                    _ns(
+                        message=_ns(content="ok", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+
+        client.chat([ModelMessage.create(role="user", content="hi")])
+
+        self.assertEqual(seen_kwargs["max_tokens"], 32_000)
+
     def test_stream_accumulates_deltas_tool_fragments_and_usage(self) -> None:
         client = _provider_client()
         stream = _FakeStream(

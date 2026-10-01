@@ -25,6 +25,7 @@ class OpenAICompatibleClient(LLMClient):
                 f"缺少 {profile.provider} API key，请在 .env 或环境变量里设置。"
             )
 
+        self.profile = profile
         self.model = profile.model
         self.provider = profile.provider
         self.base_url = profile.base_url or ""
@@ -49,6 +50,10 @@ class OpenAICompatibleClient(LLMClient):
                 include_reasoning_content=self.compat.include_reasoning_content,
             ),
         }
+        if self.profile.request_max_output_tokens is not None:
+            kwargs[self.compat.max_output_parameter] = (
+                self.profile.request_max_output_tokens
+            )
         if tools:
             kwargs["tools"] = model_tool_definitions_to_openai(tools)
         return kwargs

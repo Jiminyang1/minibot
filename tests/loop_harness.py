@@ -41,8 +41,11 @@ def build_loop(
         tool_registry=registry,
     )
     budget = TokenBudget(
-        compact_token_threshold=compact_token_threshold,
-        reserved_completion_tokens=reserved_completion_tokens,
+        context_window_tokens=compact_token_threshold,
+        max_output_tokens=reserved_completion_tokens,
+        compact_token_threshold=(
+            compact_token_threshold - reserved_completion_tokens
+        ),
     )
     compactor = Compactor(
         session_manager=manager,

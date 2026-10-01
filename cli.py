@@ -37,7 +37,7 @@ from .config import Config, load_env
 from .interaction.commands import (
     CommandContext,
     CommandNotice,
-    _COMMANDS,
+    command_catalog,
     dispatch_command,
 )
 from .run_log import make_run_id
@@ -50,6 +50,7 @@ _PASTE_DRAIN_IDLE_SECONDS = 0.05
 _PASTE_DRAIN_MAX_SECONDS = 0.35
 _PASTE_DRAIN_CHUNK_SIZE = 4096
 _PASTE_DRAIN_MAX_BYTES = 64 * 1024
+_COMMANDS = command_catalog()
 _COMMAND_NAMES = tuple(dict.fromkeys(command.split()[0] for command, _ in _COMMANDS))
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -876,6 +877,7 @@ def _command_context(runtime: MiniBotRuntime) -> CommandContext:
         approval_policy=runtime.approval_policy,
         mcp_host=runtime.mcp_host,
         config=runtime.config,
+        budget=getattr(runtime, "budget", None),
         schedule_store=runtime.schedule_store,
     )
 

@@ -84,8 +84,11 @@ class _Harness:
             tool_registry=registry,
         )
         self.budget = TokenBudget(
-            compact_token_threshold=compact_token_threshold,
-            reserved_completion_tokens=reserved_completion_tokens,
+            context_window_tokens=compact_token_threshold,
+            max_output_tokens=reserved_completion_tokens,
+            compact_token_threshold=(
+                compact_token_threshold - reserved_completion_tokens
+            ),
         )
         self.compactor = Compactor(
             session_manager=self.manager,

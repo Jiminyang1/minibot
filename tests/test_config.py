@@ -31,6 +31,49 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.compact_keep_recent_tokens, 12000)
 
+    def test_from_env_reads_model_budget_overrides(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "MINIBOT_CONTEXT_WINDOW_TOKENS": "1048576",
+                "MINIBOT_MODEL_MAX_INPUT_TOKENS": "900000",
+                "MINIBOT_MODEL_MAX_OUTPUT_TOKENS": "393216",
+                "MINIBOT_MAX_OUTPUT_TOKENS": "32000",
+                "MINIBOT_COMPACT_TOKEN_THRESHOLD": "500000",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.context_window_tokens, 1_048_576)
+        self.assertEqual(config.model_max_input_tokens, 900_000)
+        self.assertEqual(config.model_max_output_tokens, 393_216)
+        self.assertEqual(config.max_output_tokens, 32_000)
+        self.assertEqual(config.compact_token_threshold, 500_000)
+
+    def test_legacy_reserved_completion_tokens_is_an_output_alias(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"MINIBOT_RESERVED_COMPLETION_TOKENS": "12000"},
+            clear=True,
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.max_output_tokens, 12_000)
+
+    def test_new_max_output_env_wins_over_legacy_alias(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "MINIBOT_MAX_OUTPUT_TOKENS": "16000",
+                "MINIBOT_RESERVED_COMPLETION_TOKENS": "12000",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+
+        self.assertEqual(config.max_output_tokens, 16_000)
+
     def test_from_env_reads_approval_mode(self) -> None:
         with patch.dict(
             "os.environ",
@@ -81,12 +124,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(max_parallel_tools=-1)
 
-    def test_compact_keep_recent_tokens_must_fit_input_budget(self) -> None:
+    def test_compact_keep_recent_tokens_must_fit_below_trigger(self) -> None:
         with self.assertRaises(ValueError):
             Config(
                 compact_token_threshold=1000,
-                reserved_completion_tokens=200,
-                compact_keep_recent_tokens=800,
+                max_output_tokens=200,
+                compact_keep_recent_tokens=1000,
             )
 
 

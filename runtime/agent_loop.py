@@ -269,7 +269,7 @@ class AgentLoop:
             session=session,
             observed_input_tokens=observed_input_tokens,
         )
-        if tokens <= self.budget.input_budget:
+        if not self.budget.should_compact(tokens):
             self.budget.remember(session)
             return built, None
 
@@ -387,11 +387,24 @@ class AgentLoop:
         session: Session,
         emitter: RuntimeEventEmitter,
     ) -> None:
+        built = self.context_builder.build(session.messages)
+        estimate = self.budget.estimate_breakdown(built)
         emitter.emit(
             "context.usage",
             {
-                "current_tokens": self.estimate_visible_tokens(session),
+                "current_tokens": estimate.total_tokens,
+                "message_tokens": estimate.message_tokens,
+                "tool_definition_tokens": estimate.tool_definition_tokens,
+                "memory_tokens": built.memory_tokens,
                 "budget": self.budget.input_budget,
+                "compact_trigger_tokens": (
+                    self.budget.compaction_trigger_tokens
+                ),
+                "context_window_tokens": self.budget.context_window_tokens,
+                "model_max_input_tokens": (
+                    self.budget.model_max_input_tokens
+                ),
+                "max_output_tokens": self.budget.max_output_tokens,
             },
         )
 

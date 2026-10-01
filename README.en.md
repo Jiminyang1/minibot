@@ -137,12 +137,16 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `OPENAI_API_KEY` | — | required |
 | `OPENAI_BASE_URL` | official | OpenAI-compatible endpoint |
 | `MINIBOT_MODEL` | `gpt-5.4-mini` | model name |
+| `MINIBOT_CONTEXT_WINDOW_TOKENS` | model catalog | hard context-window override for unknown/compatible models |
+| `MINIBOT_MODEL_MAX_INPUT_TOKENS` | model catalog | hard input-limit override when the provider has a separate cap |
+| `MINIBOT_MODEL_MAX_OUTPUT_TOKENS` | model catalog | hard output-limit override for unknown/compatible models |
+| `MINIBOT_MAX_OUTPUT_TOKENS` | `4096` | output ceiling actually sent to the provider on every request |
 | `MINIBOT_APPROVAL_MODE` | `ask` | `ask` / `always` |
 | `MINIBOT_MAX_ITERATIONS` | `20` | max LLM↔tool rounds per turn |
 | `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | parallel tool cap per response |
-| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | `40000` | token threshold that triggers compaction |
-| `MINIBOT_RESERVED_COMPLETION_TOKENS` | `4096` | tokens reserved for output |
+| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | model hard input limit | compaction policy threshold, not the model window |
 | `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | recent context kept after compaction |
+| `MINIBOT_RESERVED_COMPLETION_TOKENS` | — | legacy alias for `MINIBOT_MAX_OUTPUT_TOKENS` |
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |

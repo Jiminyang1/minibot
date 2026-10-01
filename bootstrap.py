@@ -89,7 +89,13 @@ def build_runtime(
     memory_store = UserMemoryStore(state_home)
     run_log_store = RunLogStore(state_home)
     schedule_store = ScheduleStore(state_home)
-    llm_profile = build_llm_profile(model=config.model)
+    llm_profile = build_llm_profile(
+        model=config.model,
+        context_window_tokens=config.context_window_tokens,
+        model_max_input_tokens=config.model_max_input_tokens,
+        model_max_output_tokens=config.model_max_output_tokens,
+        request_max_output_tokens=config.max_output_tokens,
+    )
     llm = build_llm_client_from_profile(llm_profile)
     skill_registry = SkillRegistry.from_directory(package_dir / "skills")
 
@@ -135,11 +141,22 @@ def build_runtime(
         include_reasoning_content=include_reasoning,
         workspace=resolved_workspace,
     )
+    capabilities = llm_profile.capabilities
+    if capabilities is None:  # Defensive: build_llm_profile always resolves it.
+        raise RuntimeError(f"模型 {config.model!r} 缺少能力信息。")
     budget = TokenBudget(
+        context_window_tokens=capabilities.context_window_tokens,
+        model_max_input_tokens=capabilities.max_input_tokens,
+        max_output_tokens=config.max_output_tokens,
         compact_token_threshold=config.compact_token_threshold,
-        reserved_completion_tokens=config.reserved_completion_tokens,
         include_reasoning_content=include_reasoning,
     )
+    if config.compact_keep_recent_tokens >= budget.compaction_trigger_tokens:
+        raise ValueError(
+            "compact_keep_recent_tokens 必须小于解析后的压缩触发阈值: "
+            f"{config.compact_keep_recent_tokens} >= "
+            f"{budget.compaction_trigger_tokens}。"
+        )
     compactor = Compactor(
         session_manager=manager,
         context_builder=context_builder,

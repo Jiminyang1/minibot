@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
 import tempfile
@@ -121,6 +122,15 @@ class MigrationTests(unittest.TestCase):
 
 class SearchHistoryTests(unittest.TestCase):
     def setUp(self) -> None:
+        now = datetime.now(UTC)
+
+        def timestamp(*, days_ago: int, minutes: int = 0) -> str:
+            return (
+                (now - timedelta(days=days_ago) + timedelta(minutes=minutes))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+
         self._tmp = tempfile.TemporaryDirectory()
         self.manager = SessionManager(Path(self._tmp.name))
         self.tool = SearchHistoryTool(self.manager)
@@ -128,26 +138,30 @@ class SearchHistoryTests(unittest.TestCase):
         _make_session(
             self.manager,
             "s_current",
-            [("user", "现在正在聊的餐厅话题", "2026-07-05T10:00:00Z")],
+            [("user", "现在正在聊的餐厅话题", timestamp(days_ago=0))],
         )
         _make_session(
             self.manager,
             "s_food",
             [
-                ("user", "帮我找一家好吃的川菜餐厅", "2026-07-01T10:00:00Z"),
-                ("assistant", "推荐眉州东坡，川菜口碑不错", "2026-07-01T10:01:00Z"),
+                ("user", "帮我找一家好吃的川菜餐厅", timestamp(days_ago=2)),
+                (
+                    "assistant",
+                    "推荐眉州东坡，川菜口碑不错",
+                    timestamp(days_ago=2, minutes=1),
+                ),
             ],
             workspace="/Users/jimin/Desktop/Projects/minibot",
         )
         _make_session(
             self.manager,
             "s_old",
-            [("user", "很久以前聊过的餐厅", "2026-01-01T10:00:00Z")],
+            [("user", "很久以前聊过的餐厅", timestamp(days_ago=120))],
         )
         _make_session(
             self.manager,
             "s_compacted",
-            [("user", "无关内容", "2026-06-20T10:00:00Z")],
+            [("user", "无关内容", timestamp(days_ago=10))],
             summary="用户决定周五去吃眉州东坡的川菜",
         )
 

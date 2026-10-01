@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING
 
 from .context_builder import BuiltRequest
 from .messages import session_message_to_model
-from .token_budget import estimate_messages_tokens, estimate_request_tokens
+from .token_budget import (
+    RequestTokenEstimate,
+    estimate_messages_tokens,
+    estimate_request_token_breakdown,
+    estimate_request_tokens,
+)
 
 if TYPE_CHECKING:
     from ..session import Session
@@ -27,12 +32,47 @@ class TokenBudget:
     def __init__(
         self,
         *,
-        compact_token_threshold: int,
-        reserved_completion_tokens: int,
+        context_window_tokens: int,
+        model_max_input_tokens: int | None = None,
+        max_output_tokens: int,
+        compact_token_threshold: int | None = None,
         include_reasoning_content: bool = False,
     ) -> None:
-        self.compact_token_threshold = compact_token_threshold
-        self.reserved_completion_tokens = reserved_completion_tokens
+        if context_window_tokens <= 0:
+            raise ValueError("context_window_tokens 必须大于 0。")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens 必须大于 0。")
+        if max_output_tokens >= context_window_tokens:
+            raise ValueError("max_output_tokens 必须小于 context_window_tokens。")
+        if model_max_input_tokens is not None:
+            if model_max_input_tokens <= 0:
+                raise ValueError("model_max_input_tokens 必须大于 0。")
+            if model_max_input_tokens > context_window_tokens:
+                raise ValueError(
+                    "model_max_input_tokens 不能超过 context_window_tokens。"
+                )
+        context_input_limit = context_window_tokens - max_output_tokens
+        input_limit = (
+            context_input_limit
+            if model_max_input_tokens is None
+            else min(context_input_limit, model_max_input_tokens)
+        )
+        trigger = (
+            input_limit
+            if compact_token_threshold is None
+            else compact_token_threshold
+        )
+        if trigger <= 0:
+            raise ValueError("compact_token_threshold 必须大于 0。")
+        if trigger > input_limit:
+            raise ValueError(
+                "compact_token_threshold 不能超过模型硬输入上限: "
+                f"{trigger} > {input_limit}。"
+            )
+        self.context_window_tokens = context_window_tokens
+        self.model_max_input_tokens = model_max_input_tokens
+        self.max_output_tokens = max_output_tokens
+        self.compact_token_threshold = trigger
         self.include_reasoning_content = include_reasoning_content
         # Per-session message count at the last built request, used to estimate
         # the next request from the observed input usage + only the new messages.
@@ -42,11 +82,32 @@ class TokenBudget:
 
     @property
     def input_budget(self) -> int:
-        return self.compact_token_threshold - self.reserved_completion_tokens
+        """Hard input limit after reserving the enforced response ceiling."""
+
+        context_input_limit = self.context_window_tokens - self.max_output_tokens
+        if self.model_max_input_tokens is None:
+            return context_input_limit
+        return min(context_input_limit, self.model_max_input_tokens)
+
+    @property
+    def compaction_trigger_tokens(self) -> int:
+        """Application policy threshold, independent of the model hard limit."""
+
+        return self.compact_token_threshold
+
+    def should_compact(self, request_tokens: int) -> bool:
+        return request_tokens > self.compaction_trigger_tokens
 
     def estimate(self, built: BuiltRequest) -> int:
         """Full token estimate for an assembled request (cold path only)."""
         return estimate_request_tokens(
+            built.messages,
+            built.tool_definitions,
+            include_reasoning_content=self.include_reasoning_content,
+        )
+
+    def estimate_breakdown(self, built: BuiltRequest) -> RequestTokenEstimate:
+        return estimate_request_token_breakdown(
             built.messages,
             built.tool_definitions,
             include_reasoning_content=self.include_reasoning_content,
