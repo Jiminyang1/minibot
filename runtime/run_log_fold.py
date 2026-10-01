@@ -31,6 +31,7 @@ class _RunAccumulator:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cached_input_tokens: int | None = None
     saw_usage: bool = False
     tool_call_count: int = 0
     tools_used: list[str] = field(default_factory=list)
@@ -155,6 +156,9 @@ class RunLogFold:
             input_tokens=acc.input_tokens if acc.saw_usage else None,
             output_tokens=acc.output_tokens if acc.saw_usage else None,
             total_tokens=acc.total_tokens if acc.saw_usage else None,
+            cached_input_tokens=(
+                acc.cached_input_tokens if acc.saw_usage else None
+            ),
             llm_call_count=acc.llm_call_count,
             tool_call_count=acc.tool_call_count,
             tools_used=list(acc.tools_used),
@@ -187,6 +191,9 @@ class RunLogFold:
         )
         acc.total_tokens = _sum_optional(
             acc.total_tokens, usage.get("total_tokens"), first=first
+        )
+        acc.cached_input_tokens = _sum_optional(
+            acc.cached_input_tokens, usage.get("cached_input_tokens"), first=first
         )
 
     def _add_tool_call(self, acc: _RunAccumulator, payload: dict[str, Any]) -> None:

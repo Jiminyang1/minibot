@@ -407,7 +407,14 @@ class AgentLoopUsageTests(unittest.TestCase):
             ]
             self.assertEqual(
                 usage_events,
-                [{"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}],
+                [
+                    {
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "total_tokens": 110,
+                        "cached_input_tokens": None,
+                    }
+                ],
             )
 
     def test_batches_concurrency_safe_tools_before_exclusive_work(self) -> None:

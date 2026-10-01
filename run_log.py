@@ -63,6 +63,7 @@ class RunLogRecord:
     final_reply_preview: str | None
     error_type: str | None
     error_message_preview: str | None
+    cached_input_tokens: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

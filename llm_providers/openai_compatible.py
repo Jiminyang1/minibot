@@ -313,6 +313,7 @@ def _extract_token_usage(raw_usage: Any) -> TokenUsage | None:
         _usage_value(raw_usage, "completion_tokens", "output_tokens")
     )
     total_tokens = _coerce_token_count(_usage_value(raw_usage, "total_tokens"))
+    cached_input_tokens = _cached_input_tokens(raw_usage)
 
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
@@ -324,7 +325,20 @@ def _extract_token_usage(raw_usage: Any) -> TokenUsage | None:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
+        cached_input_tokens=cached_input_tokens,
     )
+
+
+def _cached_input_tokens(raw_usage: Any) -> int | None:
+    # DeepSeek reports prompt_cache_hit_tokens at the top level; OpenAI nests
+    # cached_tokens under prompt_tokens_details.
+    hit = _coerce_token_count(_usage_value(raw_usage, "prompt_cache_hit_tokens"))
+    if hit is not None:
+        return hit
+    details = _usage_value(raw_usage, "prompt_tokens_details", "input_tokens_details")
+    if details is None:
+        return None
+    return _coerce_token_count(_usage_value(details, "cached_tokens"))
 
 
 def _usage_value(raw_usage: Any, *names: str) -> Any:

@@ -697,6 +697,9 @@ def _merge_usage(
         input_tokens=_sum_optional(accumulated.input_tokens, current.input_tokens),
         output_tokens=_sum_optional(accumulated.output_tokens, current.output_tokens),
         total_tokens=_sum_optional(accumulated.total_tokens, current.total_tokens),
+        cached_input_tokens=_sum_optional(
+            accumulated.cached_input_tokens, current.cached_input_tokens
+        ),
     )
 
 
@@ -713,4 +716,5 @@ def _usage_payload(usage: TokenUsage | None) -> dict[str, int | None] | None:
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
     }

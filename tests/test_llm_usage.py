@@ -108,6 +108,39 @@ class LLMUsageExtractionTests(unittest.TestCase):
             TokenUsage(input_tokens=12, output_tokens=8, total_tokens=20),
         )
 
+    def test_extracts_deepseek_prompt_cache_hits(self) -> None:
+        raw_usage = types.SimpleNamespace(
+            prompt_tokens=1000,
+            completion_tokens=50,
+            total_tokens=1050,
+            prompt_cache_hit_tokens=896,
+            prompt_cache_miss_tokens=104,
+        )
+
+        usage = _extract_token_usage(raw_usage)
+
+        assert usage is not None
+        self.assertEqual(usage.cached_input_tokens, 896)
+
+    def test_extracts_openai_nested_cached_tokens(self) -> None:
+        raw_usage = {
+            "prompt_tokens": 2000,
+            "completion_tokens": 20,
+            "total_tokens": 2020,
+            "prompt_tokens_details": {"cached_tokens": 1792},
+        }
+
+        usage = _extract_token_usage(raw_usage)
+
+        assert usage is not None
+        self.assertEqual(usage.cached_input_tokens, 1792)
+
+    def test_cached_tokens_absent_when_provider_does_not_report(self) -> None:
+        usage = _extract_token_usage({"prompt_tokens": 12, "completion_tokens": 8})
+
+        assert usage is not None
+        self.assertIsNone(usage.cached_input_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from minibot.artifacts import ArtifactStore
 from minibot.runtime.context_builder import ContextBuilder
-from minibot.session import Session
+from minibot.session import MessageEvent, Session
 from minibot.skills import SkillRegistry
 from minibot.tools.base import Tool, ToolExecutionContext
 from minibot.tools.edit_file import EditFileTool
@@ -122,12 +122,25 @@ class SkillCatalogTests(unittest.TestCase):
                 ),
             )
 
-            prompt = builder.build(Session("s_test").messages).messages[0].content
+            session = Session("s_test")
+            session.add_message(MessageEvent.create(role="user", content="earlier"))
+            session.add_message(MessageEvent.create(role="assistant", content="ok"))
+            session.add_message(MessageEvent.create(role="user", content="now?"))
+            messages = builder.build(session.messages).messages
+            prompt = messages[0].content
 
             self.assertIn("## Local Time Context", prompt)
-            self.assertIn("now_local: 2026-04-23T13:02:05+08:00", prompt)
             self.assertIn("today_local: 2026-04-23", prompt)
             self.assertIn("timezone_local:", prompt)
+            # Nothing finer than the day in the cached prefix.
+            self.assertNotIn("13:02", prompt)
+            # The exact time rides on the latest user message only.
+            self.assertEqual(messages[1].content, "earlier")
+            self.assertEqual(
+                messages[3].content,
+                "now?\n\n[当前本地时间 2026-04-23 13:02 星期四 UTC+08:00]",
+            )
+            self.assertEqual(session.messages[-1].content, "now?")
 
     def test_memory_context_uses_date_free_ids_after_time_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

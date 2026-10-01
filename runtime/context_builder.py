@@ -8,7 +8,7 @@ out. It never mutates the session, never calls a model, and never touches disk
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -70,10 +70,12 @@ class ContextBuilder:
             )
             for message in history_messages
         ]
+        now = self._local_now()
+        history = self._stamp_latest_user_message(history, now)
         memory_block, memory_tokens = self._render_memory_block()
         system_prompt = self._build_system_prompt(
             memory_block,
-            self._render_time_context_block(),
+            self._render_time_context_block(now),
             self._render_workspace_block(),
             self._render_skill_catalog_block(),
         )
@@ -123,30 +125,60 @@ class ContextBuilder:
             "文件与命令类工具以此目录为根;会话记录是全局的,不随目录变化。"
         )
 
-    def _render_time_context_block(self) -> str:
+    def _local_now(self) -> datetime:
         current = self.now_provider()
-        if current.tzinfo is None:
-            current = current.astimezone()
+        return current if current.tzinfo is not None else current.astimezone()
 
+    @staticmethod
+    def _utc_offset(current: datetime) -> str:
         offset = current.strftime("%z")
         if len(offset) == 5:
-            offset = f"{offset[:3]}:{offset[3:]}"
-        elif not offset:
-            offset = "+00:00"
+            return f"{offset[:3]}:{offset[3:]}"
+        return offset or "+00:00"
 
+    def _render_time_context_block(self, current: datetime) -> str:
+        # Day-level only: the system prompt heads every request, so anything
+        # finer would change the prefix on every call and defeat the
+        # provider's prompt cache. The exact time rides on the latest user
+        # message instead (see _stamp_latest_user_message).
         tz_name = current.tzname() or "local"
         weekday = self._WEEKDAY_NAMES[current.weekday()]
 
         lines = [
             "## Local Time Context",
-            "以下时间由当前机器实时生成。处理“今天 / 明天 / 本周 / 下周”等相对时间时，必须以这里的本地时间为准，不要猜测，也不要沿用旧对话里的日期。",
-            f"- now_local: {current.isoformat(timespec='seconds')}",
+            "以下日期由当前机器实时生成。处理“今天 / 明天 / 本周 / 下周”等相对时间时，必须以这里的本地日期为准，不要猜测，也不要沿用旧对话里的日期。",
             f"- today_local: {current.date().isoformat()}",
             f"- weekday_local: {weekday}",
-            f"- timezone_local: {tz_name} (UTC{offset})",
-            "如果用户的问题依赖相对日期，先用这些值锚定时间，再决定是否调用日历、提醒事项或其他工具。",
+            f"- timezone_local: {tz_name} (UTC{self._utc_offset(current)})",
+            "精确到分钟的当前时间附在最新一条用户消息末尾的 [当前本地时间 …] 标注里；它由系统添加，不是用户输入。",
+            "如果用户的问题依赖相对日期或时间，先用这些值锚定，再决定是否调用日历、提醒事项或其他工具。",
         ]
         return "\n".join(lines)
+
+    def _stamp_latest_user_message(
+        self,
+        history: list[ModelMessage],
+        current: datetime,
+    ) -> list[ModelMessage]:
+        """Append the minute-level local time to the latest user message.
+
+        Request-only: the session keeps the original text. Only this turn's
+        tail sits after the stamp, so a changing clock costs at most one
+        turn of prompt cache instead of the whole conversation.
+        """
+        for index in range(len(history) - 1, -1, -1):
+            message = history[index]
+            if message.role != "user":
+                continue
+            weekday = self._WEEKDAY_NAMES[current.weekday()]
+            stamp = (
+                f"[当前本地时间 {current.strftime('%Y-%m-%d %H:%M')} "
+                f"{weekday} UTC{self._utc_offset(current)}]"
+            )
+            stamped = list(history)
+            stamped[index] = replace(message, content=f"{message.content}\n\n{stamp}")
+            return stamped
+        return history
 
     def _render_skill_catalog_block(self) -> str:
         skills = self.list_available_skills()
