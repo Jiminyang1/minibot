@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import signal
 import subprocess
 from typing import Any
 
@@ -26,6 +28,12 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\biptables\s+-F\b|\bnft\s+flush\b"),             "清空防火墙规则"),
     (re.compile(r"\bsudo\s+su\b|\bsudo\s+-i\b|\bsudo\s+-s\b"),    "获取 root shell"),
 ]
+
+
+# pipefail: `pytest ... | tail` must report pytest's failure, not tail's 0.
+_BASH = shutil.which("bash")
+# Under pipefail, `producer | head` exits 128+SIGPIPE once head stops reading.
+_SIGPIPE_EXIT = 128 + signal.SIGPIPE
 
 
 def _check_dangerous(command: str) -> str | None:
@@ -100,7 +108,8 @@ class ExecTool(Tool):
             )
         try:
             result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
+                [_BASH, "-o", "pipefail", "-c", command] if _BASH else command,
+                shell=_BASH is None, capture_output=True, text=True,
                 timeout=self._TIMEOUT,
                 cwd=self._workspace,
             )
@@ -139,6 +148,17 @@ class ExecTool(Tool):
                 f"{stdout}\n\n"
                 "[stderr]\n"
                 f"{stderr}"
+            )
+
+        if result.returncode == _SIGPIPE_EXIT:
+            return ToolOutput.success(
+                f"命令已执行，退出码 {result.returncode}"
+                "（管道下游提前停止读取，上游收到 SIGPIPE，通常无害）。",
+                data=data,
+                truncated=truncated,
+                content=full_output,
+                content_kind="text",
+                content_name="exec_output",
             )
 
         if result.returncode != 0:

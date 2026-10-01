@@ -145,6 +145,32 @@ class ToolBehaviorTests(unittest.TestCase):
             self.assertEqual(result.data["exit_code"], 0)
             self.assertEqual(result.data["stdout"], "ok\n")
 
+    def test_exec_reports_failure_hidden_behind_a_pipe(self) -> None:
+        # `pytest ... | tail` used to report tail's exit code 0 even when
+        # pytest itself was missing.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = ToolExecutionContext(session_id="s_test")
+            tool = ExecTool(workspace=Path(tmpdir))
+
+            result = tool.execute(context=context, command="exit 3 | cat")
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["exit_code"], 3)
+
+    def test_exec_treats_sigpipe_from_early_closing_reader_as_success(self) -> None:
+        # `producer | head` kills the producer with SIGPIPE once head is
+        # done; under pipefail that is exit 141 but nothing went wrong.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = ToolExecutionContext(session_id="s_test")
+            tool = ExecTool(workspace=Path(tmpdir))
+
+            result = tool.execute(context=context, command="yes | head -n 1")
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.data["stdout"], "y\n")
+            self.assertEqual(result.data["exit_code"], 141)
+            self.assertIn("SIGPIPE", result.summary)
+
     def test_search_files_many_matches_returns_preview_and_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
