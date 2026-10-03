@@ -84,7 +84,7 @@ flowchart TB
 | `ToolOutputMaterializer` | `runtime/tool_output_materializer.py` | >12k 字符的工具输出落盘为 artifact,模型只见引用+预览 | — |
 | `RunLogFold` | `runtime/run_log_fold.py` | 订阅事件流,终止事件时把一个 run reduce 成 `runs.jsonl` 一行 | 永不让 run 失败(best-effort) |
 | `SessionManager` | `session/store.py` | append-only 持久化、meta、跨进程文件锁 | — |
-| `SessionContextProjector` | `session/models.py` | entries → 模型可见消息(摘要注入、不完整工具事务过滤) | — |
+| `SessionContextProjector` | `session/models.py` | entries → 模型可见消息(摘要注入、中断的工具调用补 `interrupted` 结果) | — |
 
 ## 2. 一次 turn 的时序
 
@@ -147,11 +147,12 @@ sequenceDiagram
 
 | 类型 | 发射点 | payload 关键字段 | 主要消费者 |
 |---|---|---|---|
-| `run.started` | AgentSession | `session_id` `input_preview` `model` `turn_index` | fold(开账)、UI 状态行 |
+| `run.started` | AgentSession | `session_id` `input_preview` `input`(全文) `source`(`cli`/`tui`/`server`/`scheduler`/`heartbeat`) `model` `turn_index` | fold(开账)、Langfuse(trace 根 + 标签)、UI 状态行 |
 | `context.usage` | AgentLoop(turn 开始) | `current_tokens` `budget` | CLI verbose |
 | `context.compacted` | AgentLoop(reduce 之后) | `iteration` `message` | CLI 提示、fold(`did_compact`) |
-| `model.request.started` | AgentLoop | `iteration` `model` `input_preview` | CLI 状态行 |
-| `model.request.completed` | AgentLoop | `iteration` `elapsed_ms` `tool_call_count` `usage`(本次调用);空回复时另有 `empty_reply` `response_debug` | fold(`llm_call_count`、usage 求和)、CLI |
+| `model.request.started` | AgentLoop | `iteration` `model` `input_preview` `messages`(完整请求,OpenAI 格式) `tools`(工具名) | CLI 状态行、Langfuse generation 输入;**SSE 出口剥掉 `messages`** |
+| `model.request.completed` | AgentLoop | `iteration` `elapsed_ms` `tool_call_count` `usage`(本次调用,含 `cached_input_tokens`) `output`(`content` `reasoning_content` `tool_calls`);空回复时另有 `empty_reply` `response_debug` | fold(`llm_call_count`、usage 求和)、Langfuse、CLI |
+| `compaction.request.started` / `.completed` | Compactor(仅 run 内触发) | started: `model` `messages`;completed: `elapsed_ms` `usage` `output`,失败时 `error_type` `message` | fold(计入 `llm_call_count` 与 usage——摘要调用不再漏账)、Langfuse;UI 忽略 |
 | `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI(text → 打字机;reasoning → 折叠式灰字预览)、web 流式气泡;**fold 与重放忽略** |
 | `model.request.retrying` | AgentLoop(瞬时错误退避时) | `iteration` `attempt` `max_retries` `delay_seconds` `error_type` `message` | CLI 提示与状态行;fold 忽略 |
 | `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval` | CLI |
@@ -169,9 +170,17 @@ sequenceDiagram
 
 ## 4. 预算与压缩
 
-预算:`input_budget = compact_token_threshold − reserved_completion_tokens`(默认 40000 − 4096)。
+模型硬能力与压缩策略分离:
+
+- `hard_input_limit = min(model_max_input_tokens, context_window_tokens − max_output_tokens)`;模型没有独立输入上限时忽略第一项,`max_output_tokens` 会真实发送给 provider。
+- `compact_token_threshold` 只决定何时压缩;未配置时等于 `hard_input_limit`,且不能超过硬输入上限。
+- `compact_keep_recent_tokens` 决定压缩时保留多少近期原文,与触发阈值独立。
+
+已知模型从内置 `(provider, model)` 能力目录解析窗口;未知兼容模型必须显式提供窗口/输出能力,运行时不猜测。
 
 **增量估算**(热路径,`TokenBudget.request_tokens`):有上一轮真实 `input_tokens` 时,下一请求 ≈ 观测值 + 仅新增消息的估算。基线是 per-session 消息数,LRU 上限 512 个会话;基线缺失/倒退时退回全量估算。会话删除时经 `budget.forget(session_id)` 清基线(server 的 DELETE 端点已接)。
+
+`context.usage` 同时记录 message、tool definition、memory 的估算占用,以及模型窗口、硬输入上限、输出上限和压缩触发线,便于区分 UI 卡顿、schema 开销与 provider 首 token 延迟。
 
 **超预算时 `Compactor.reduce` 的决策树:**
 
@@ -204,7 +213,7 @@ flowchart TD
 
 **取消**:`AgentSession.abort(run_id)` 置位 cancel event,循环在这些检查点协作退出——每个 iteration 开头、模型流的每个 delta 之间、每个工具批次前、并行 future 的 50ms 轮询间隙、审批等待中、compaction 摘要调用前后。取消抛 `RunCancelled` → `run.cancelled` 事件 → fold 记 `failed / RunCancelled`。流中途取消时,循环在 `finally` 里 close 生成器,provider 的 `finally` 随之关闭底层 HTTP 流;半截文本不落盘。
 
-**取消或崩溃留下的悬空 tool_calls**(assistant 带 tool_calls 但 tool 结果未落盘):投影层 `_filter_incomplete_tool_transactions` 在读取时整块过滤,保证下一轮请求永远合法。这是 append-only + 投影架构的直接收益。
+**取消或崩溃留下的悬空 tool_calls**(assistant 带 tool_calls 但 tool 结果未落盘):投影层 `_filter_incomplete_tool_transactions` 按位置处理——位于末尾时可能仍在执行(循环逐条追加结果),暂不投影;一旦后面有任何消息,说明产生它的 run 已结束,保留这次调用并为缺失的结果补一条 `code: "interrupted"`(副作用未知)的合成结果,只存在于投影、不落盘。下一轮请求因此永远合法,模型也能看到"这里执行过、结果未知",而不是调用凭空消失后重做一遍。这是 append-only + 投影架构的直接收益。
 
 **LLM 瞬时失败**:429/5xx/连接类错误按指数退避重试(默认 ≤3 次,`MINIBOT_LLM_MAX_RETRIES` 可调),每次重试发 `model.request.retrying` 事件;退避等待用 `cancel_event.wait` 实现,取消随时打断。**首个 delta 发出后不再重试**——文本已到达用户,静默重来会显示两遍。分类逻辑在 `llm.py` 的 `is_retryable_llm_error`(有 `status_code` 按码判断,连接/超时类天然瞬时)。重试耗尽或不可重试的异常直接向上抛,无包装;已消耗的 usage 不丢——它随每次 `model.request.completed` 事件即时离开循环,fold 手里已有累计值(这就是旧 `PartialRunError` 被删掉的原因)。
 
@@ -257,7 +266,7 @@ flowchart TD
 | 新外部能力 | `mcp.json` 加一个 server,工具自动以 `mcp__<server>__<tool>` 挂载 |
 | 新前端 | 订阅事件流 + 调 `AgentSession.prompt`;同步核心对接异步 UI 参照 `tui/app.py`(worker 线程跑 turn,`call_from_thread` 编组事件,10Hz 缓冲刷流式 Markdown,审批用 threading.Event 会合模态框),纯 HTTP 参照 `server.py` 的 `RunEventStore` |
 | 新审批 UI | 提供 `ApprovalPolicy.handler`(CLI 是问答,web 是 `ApprovalBroker` 会合) |
-| 新运行观测 | 写一个事件订阅者,`bootstrap.py` 的 `fanout` 里加一行,参照 `RunLogFold` |
+| 新运行观测 | 写一个事件订阅者,`bootstrap.py` 的 `fanout` 里加一行,参照 `RunLogFold` / `LangfuseFold`(`langfuse_tracing.py`) |
 | 新 LLM provider | 实现 `LLMClient.chat`;可选覆写 `chat_stream` 获得原生流式(不覆写则自动退化为单终局事件) |
 
 刻意**没有**的扩展点:hook 管道。干预类扩展(改写请求/参数)目前只有审批一个真实需求,已作为显式依赖注入;出现第二个再设计通用接口,理由见 [core-philosophy.md](core-philosophy.md) §4。
