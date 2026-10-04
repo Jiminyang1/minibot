@@ -1,5 +1,7 @@
 # MiniBot
 
+> **This repository is archived and no longer updated.** MiniBot was rewritten in TypeScript: see [Jiminyang1/minibot-ts](https://github.com/Jiminyang1/minibot-ts).
+
 [中文](README.md)
 
 A local command-line AI agent runtime built on OpenAI-compatible `chat.completions`. A single-owner synchronous turn loop with tool calling, unifying local tools, MCP, Skills, and cross-session long-term memory; every runtime fact flows through one event stream to the CLI, the Web/SSE UI, and the run log.

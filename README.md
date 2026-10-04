@@ -1,5 +1,7 @@
 # MiniBot
 
+> **本仓库已归档,不再更新。** MiniBot 已用 TypeScript 重写,新代码在 [Jiminyang1/minibot-ts](https://github.com/Jiminyang1/minibot-ts)。
+
 [English](README.en.md)
 
 本地命令行 AI agent runtime，基于 OpenAI-compatible `chat.completions`。单一 owner 的同步 turn loop + tool calling，统一接入本地工具、MCP、Skills 与跨会话长期记忆；一切运行时事实通过同一条事件流对 CLI、Web/SSE 与运行日志可见。
