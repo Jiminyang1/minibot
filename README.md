@@ -1,75 +1,75 @@
 # MiniBot
 
-> **本仓库已归档,不再更新。** MiniBot 已用 TypeScript 重写,新代码在 [Jiminyang1/minibot-ts](https://github.com/Jiminyang1/minibot-ts)。
+> MiniBot has been rewritten in TypeScript: [Jiminyang1/minibot-ts](https://github.com/Jiminyang1/minibot-ts). This repository holds the original Python version.
 
-[English](README.en.md)
+[中文](README.zh-CN.md)
 
-本地命令行 AI agent runtime，基于 OpenAI-compatible `chat.completions`。单一 owner 的同步 turn loop + tool calling，统一接入本地工具、MCP、Skills 与跨会话长期记忆；一切运行时事实通过同一条事件流对 CLI、Web/SSE 与运行日志可见。
+A local command-line AI agent runtime built on OpenAI-compatible `chat.completions`. A single-owner synchronous turn loop with tool calling, unifying local tools, MCP, Skills, and cross-session long-term memory; every runtime fact flows through one event stream to the CLI, the Web/SSE UI, and the run log.
 
-## 能力
+## Capabilities
 
-- token 级流式输出：CLI 打字机、Web 流式气泡（`message.delta` 事件，权威全文仍以 `message.completed` 为准）
-- 本地工具 + MCP 工具（统一 `Tool` 接口与 schema，声明式并发/审批属性）
-- 会话 append-only 持久化，超预算自动 compact（安全切点摘要 + 只读工具块降级）
-- 结构化 `RuntimeEvent` 单一出口：CLI 渲染、SSE Web UI、runs.jsonl 都是订阅者
-- Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
-- 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
-- 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
-- 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）
-- 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
-- MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
+- Token-level streaming: CLI typewriter and Web streaming bubbles (`message.delta` events; `message.completed` stays authoritative)
+- Local + MCP tools behind one `Tool` interface (declarative concurrency/approval properties)
+- Append-only session persistence with automatic compaction (safe-cut-point summaries, read-only tool-block fallback)
+- Structured `RuntimeEvent` as the sole output channel: CLI rendering, SSE Web UI, and runs.jsonl are all subscribers
+- Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
+- Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
+- Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
+- Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint)
+- Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
+- MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
 
-## 快速开始
+## Quick start
 
-使用 `uv` 管理环境（Python 3.12）：
+Uses `uv` (Python 3.12):
 
 ```bash
-cp .env.example .env   # 填入 OPENAI_API_KEY
+cp .env.example .env   # set OPENAI_API_KEY
 uv sync
 uv run minibot
 ```
 
-Web UI：
+Web UI:
 
 ```bash
 uv run minibot-server --host 127.0.0.1 --port 8765
-# 打开 http://127.0.0.1:8765/
+# open http://127.0.0.1:8765/
 ```
 
-`minibot` 默认进入**全屏 TUI**（Textual）：可滚动对话区、Markdown 渲染回复、流式打字、思考过程与工具调用折叠成单行（点击展开）、底部固定输入框、审批弹模态框（y/n），`Esc` 取消运行、`Ctrl+N` 新会话。斜杠命令照常可用。
+`minibot` opens a **full-screen TUI** (Textual) by default: scrollable conversation, Markdown-rendered replies, streaming, reasoning and tool calls collapsed into clickable one-liners, a bottom-pinned input, and an approval modal (y/n); `Esc` cancels the run, `Ctrl+N` starts a session. Slash commands work as usual.
 
-行式 REPL 保留为 `minibot --plain`（管道/非 tty 自动降级）：`--verbose`（模型轮次、context usage、完整工具参数）、`--no-color`；spinner 状态栏、打字机流式、推理灰字尾部预览折叠为 `⋯ 已思考 · Ns` 等行为不变。
+The line REPL remains as `minibot --plain` (auto-fallback when piped): `--verbose`, `--no-color`, spinner status bar, typewriter streaming, and the collapsing reasoning preview all behave as before.
 
-## 架构
+## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph entry [入口]
+    subgraph entry [Entry]
         CLI[CLI]
         Web[Web / SSE]
     end
 
-    subgraph core [核心]
+    subgraph core [Core]
         AS[AgentSession]
         AL[AgentLoop]
     end
 
-    subgraph services [服务]
+    subgraph services [Services]
         CB[ContextBuilder]
         TB[TokenBudget]
         CP[Compactor]
         GATE[ToolApprovalGate]
     end
 
-    subgraph infra [基础设施]
+    subgraph infra [Infrastructure]
         SM[SessionManager]
         TRG[ToolRegistry]
         MCP[MCPHost]
         LLM[LLMClient]
     end
 
-    subgraph subscribers [事件订阅者]
-        EV[(事件流)]
+    subgraph subscribers [Event subscribers]
+        EV[(Event stream)]
         FOLD[RunLogFold → runs.jsonl]
     end
 
@@ -89,137 +89,137 @@ flowchart TB
     Proxy --> MCP
 ```
 
-**单轮数据流** —— `AgentLoop.run_turn` 是唯一 owner，每个 iteration 顺序执行：
+**Per-turn flow** — `AgentLoop.run_turn` is the single owner; each iteration runs in order:
 
-1. 预算检查（`TokenBudget`），超预算则 `Compactor.reduce`（压缩 + 即时落盘 + 发事件）
-2. `ContextBuilder.build` 纯函数拼装请求（system prompt / memory / 时间 / skills 目录 + 历史投影）
-3. LLM 流式调用（delta 边到边发 `message.delta` 事件，终局 `LLMResponse` 驱动后续一切）
-4. 工具执行（审批经注入的 `ToolApprovalGate`；连续只读工具并行成批）
-5. 追加消息（session 落盘 + 事件）；大输出经 `ToolOutputMaterializer` 转为 artifact 引用
+1. Budget check (`TokenBudget`); if over budget, `Compactor.reduce` (compact + persist + emit)
+2. `ContextBuilder.build` assembles the request as a pure function (system prompt / memory / time / skills catalog + projected history)
+3. Streamed LLM call (deltas publish as `message.delta` events; the terminal `LLMResponse` drives everything downstream)
+4. Tool execution (approval via the injected `ToolApprovalGate`; consecutive read-only tools run as a parallel batch)
+5. Message append (session persistence + event); large outputs become artifact references via `ToolOutputMaterializer`
 
-**设计约束**
+**Design constraints**
 
-| 原则 | 说明 |
+| Principle | Detail |
 |---|---|
-| 单一 owner | `run_turn` 从上到下就是一个 turn 的完整生命周期，turn 状态只活在循环局部变量里 |
-| 编排与机制分离 | 循环只做"判断 + 调用具名组件"；机制在各自模块，均可脱离循环单测 |
-| 单一输出通道 | RuntimeEvent 是唯一出口；`runs.jsonl` 是 `RunLogFold` 对事件流的 fold |
-| Append-only session | `messages.jsonl` 是唯一真相源；compact 只追加 entry 且即时落盘 |
-| 投影视图 | `SessionContextProjector` 从 entry 派生模型可见消息（含中断工具调用的 `interrupted` 结果补全） |
-| 同步 turn loop | 主循环同步；MCP asyncio 隔离在后台线程 |
+| Single owner | `run_turn` reads top-to-bottom as one turn's full lifecycle; turn state lives only in loop locals |
+| Orchestration vs mechanics | The loop only decides and delegates; mechanics live in named, independently testable components |
+| One output channel | RuntimeEvent is the sole exit; `runs.jsonl` is `RunLogFold`'s fold over the stream |
+| Append-only session | `messages.jsonl` is the source of truth; compaction appends an entry and persists immediately |
+| Projected view | `SessionContextProjector` derives model-visible messages (incl. `interrupted` results for cut-off tool calls) |
+| Sync turn loop | Main loop is synchronous; MCP asyncio lives in background threads |
 
-深入阅读：**[docs/architecture.md](docs/architecture.md)** —— 分层与依赖规则、单轮时序图、完整事件目录、压缩决策树、错误/取消/并发语义；**[docs/core-philosophy.md](docs/core-philosophy.md)** —— 这套形状背后的判断标准与取舍论证。
+Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules, per-turn sequence diagram, the full event catalog, the compaction decision tree, error/cancellation/concurrency semantics; **[docs/core-philosophy.md](docs/core-philosophy.md)** — the judgment criteria behind this shape (both in Chinese).
 
-## 模块
+## Modules
 
-| 路径 | 职责 |
+| Path | Role |
 |---|---|
-| `bootstrap.py` | Composition root，组装 runtime |
-| `runtime/agent_session.py` | run 生命周期：会话锁、取消、`run.*` 事件、事件扇出 |
-| `runtime/agent_loop.py` | 核心循环（唯一 owner） |
-| `runtime/context_builder.py` | 纯函数请求拼装 |
-| `runtime/budget.py` | token 预算与增量估算 |
-| `runtime/compactor.py` | 压缩机制 + 即时落盘（切点规则在 `compaction.py` 纯函数） |
-| `runtime/approval.py` | 审批策略与注入式审批门 |
-| `runtime/run_log_fold.py` | runs.jsonl = 事件流的 fold |
-| `session/` | Append-only 持久化 + 投影 |
-| `tools/` | 本地 `Tool` 实现与 `ToolRegistry` |
-| `mcp_host/` | MCP 客户端、transport、`MCPToolProxy` |
-| `mcp_servers/` | 内置 SQLite / macOS MCP server |
-| `skills/` | Skill 元数据与 Markdown 正文 |
-| `user_memory.py` | 全局长期记忆 |
-| `cli.py` / `server.py` | CLI 与 Web 入口 |
+| `bootstrap.py` | Composition root; wires the runtime |
+| `runtime/agent_session.py` | Run lifecycle: session lock, cancellation, `run.*` events, event fan-out |
+| `runtime/agent_loop.py` | The core loop (single owner) |
+| `runtime/context_builder.py` | Pure request assembly |
+| `runtime/budget.py` | Token budget and incremental estimation |
+| `runtime/compactor.py` | Compaction mechanics + immediate persistence (cut-point rules in `compaction.py`) |
+| `runtime/approval.py` | Approval policy and the injected approval gate |
+| `runtime/run_log_fold.py` | runs.jsonl as a fold over the event stream |
+| `session/` | Append-only persistence + projection |
+| `tools/` | Local `Tool` implementations and `ToolRegistry` |
+| `mcp_host/` | MCP client, transports, `MCPToolProxy` |
+| `mcp_servers/` | Bundled SQLite / macOS MCP servers |
+| `skills/` | Skill metadata and Markdown bodies |
+| `user_memory.py` | Global long-term memory |
+| `cli.py` / `server.py` | CLI and Web entry points |
 
-## 配置
+## Configuration
 
-### Agent（`.env`）
+### Agent (`.env`)
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 |---|---|---|
-| `OPENAI_API_KEY` | — | 必填 |
-| `OPENAI_BASE_URL` | 官方 | 兼容 OpenAI 的 endpoint |
-| `MINIBOT_MODEL` | `gpt-5.4-mini` | 模型名 |
-| `MINIBOT_CONTEXT_WINDOW_TOKENS` | 模型目录 | 未知/兼容模型的硬上下文窗口覆盖 |
-| `MINIBOT_MODEL_MAX_INPUT_TOKENS` | 模型目录 | provider 另有限制时的硬输入上限覆盖 |
-| `MINIBOT_MODEL_MAX_OUTPUT_TOKENS` | 模型目录 | 未知/兼容模型的硬输出上限覆盖 |
-| `MINIBOT_MAX_OUTPUT_TOKENS` | `4096` | 每次请求真正发送给 provider 的输出上限 |
+| `OPENAI_API_KEY` | — | required |
+| `OPENAI_BASE_URL` | official | OpenAI-compatible endpoint |
+| `MINIBOT_MODEL` | `gpt-5.4-mini` | model name |
+| `MINIBOT_CONTEXT_WINDOW_TOKENS` | model catalog | hard context-window override for unknown/compatible models |
+| `MINIBOT_MODEL_MAX_INPUT_TOKENS` | model catalog | hard input-limit override when the provider has a separate cap |
+| `MINIBOT_MODEL_MAX_OUTPUT_TOKENS` | model catalog | hard output-limit override for unknown/compatible models |
+| `MINIBOT_MAX_OUTPUT_TOKENS` | `4096` | output ceiling actually sent to the provider on every request |
 | `MINIBOT_APPROVAL_MODE` | `ask` | `ask` / `always` |
-| `MINIBOT_MAX_ITERATIONS` | `20` | 单 turn 最大 LLM↔tool 轮次 |
-| `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | 同响应并发 tool 上限 |
-| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | 模型硬输入上限 | 触发 compact 的策略阈值，不是模型窗口 |
-| `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | compact 后保留的近期上下文 |
-| `MINIBOT_RESERVED_COMPLETION_TOKENS` | — | `MINIBOT_MAX_OUTPUT_TOKENS` 的旧兼容别名 |
-| `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
-| `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
-| `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | 两个都设置即开启 Langfuse 追踪（每个 turn 一条 trace，含完整请求、工具、审批、压缩） |
-| `LANGFUSE_BASE_URL` | EU 云 | Langfuse 地址：按注册区域填，或自部署地址 |
-| `MINIBOT_LANGFUSE` | `1` | 设为 `0` 保留 key 但关闭追踪 |
-| `MINIBOT_LANGFUSE_MAX_INPUT_MESSAGES` | `50` | 每次模型调用上报的历史消息条数（system prompt 之外；`0` = 全部） |
-| `MINIBOT_HOME` | `~/.minibot` | 全局状态目录（会话 / 运行日志 / 记忆 / mcp.json） |
+| `MINIBOT_MAX_ITERATIONS` | `20` | max LLM↔tool rounds per turn |
+| `MINIBOT_MAX_PARALLEL_TOOLS` | `4` | parallel tool cap per response |
+| `MINIBOT_COMPACT_TOKEN_THRESHOLD` | model hard input limit | compaction policy threshold, not the model window |
+| `MINIBOT_COMPACT_KEEP_RECENT_TOKENS` | `16000` | recent context kept after compaction |
+| `MINIBOT_RESERVED_COMPLETION_TOKENS` | — | legacy alias for `MINIBOT_MAX_OUTPUT_TOKENS` |
+| `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
+| `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
+| `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | setting both enables Langfuse tracing (one trace per turn: full requests, tools, approvals, compaction) |
+| `LANGFUSE_BASE_URL` | EU cloud | Langfuse endpoint: your signup region, or a self-hosted URL |
+| `MINIBOT_LANGFUSE` | `1` | `0` keeps keys configured but disables tracing |
+| `MINIBOT_LANGFUSE_MAX_INPUT_MESSAGES` | `50` | history messages uploaded per model call, after the system prompt (`0` = all) |
+| `MINIBOT_HOME` | `~/.minibot` | global state home (sessions / run log / memory / mcp.json) |
 
-持久化路径——**状态全局集中**（默认 `~/.minibot`，`MINIBOT_HOME` 可改）。会话属于用户而不属于启动目录；工作目录只决定 fs/exec 工具的根，并作为元数据记在会话上：
+Persistence — **state is centralized globally** (default `~/.minibot`, override with `MINIBOT_HOME`). Conversations belong to the user, not to the launch directory; the workspace only roots the fs/exec tools and is recorded as session metadata:
 
-- `~/.minibot/sessions/<id>/messages.jsonl` — 所有会话（append-only，meta 含 workspace 来源）
-- `~/.minibot/runs.jsonl` — 运行摘要（事件流的 fold）
-- `~/.minibot/sessions/<id>/artifacts/` — 大 tool 输出
-- `~/.minibot/user_memory.json` — 长期记忆
+- `~/.minibot/sessions/<id>/messages.jsonl` — all sessions (append-only; meta records workspace provenance)
+- `~/.minibot/runs.jsonl` — run summaries (fold of the event stream)
+- `~/.minibot/sessions/<id>/artifacts/` — large tool outputs
+- `~/.minibot/user_memory.json` — long-term memory
 
-旧版本散落在各目录的 `<workspace>/.minibot` 用一条命令收编（id 冲突自动重命名、run 日志合并）：
-
-```bash
-uv run minibot --migrate <目录1> <目录2> ...
-```
-
-### MCP（`mcp.json`，全局）
-
-查找顺序：`MINIBOT_MCP_CONFIG_PATH` → `~/.minibot/mcp.json` → 包内 `mcp.json`。
-
-- `enabled: true` 的 server 启动时连接并发现工具；单 server 失败不阻塞整体启动
-- `trusted: true` 免审批
-- transport 支持 `${ENV_VAR}`、`${MINIBOT_PYTHON}`、`${MINIBOT_PACKAGE_DIR}`
-- 包内默认配置包含 `sqlite`、`macos_system`，以及通过 `npx -y @drawio/mcp` 启动的外部 draw.io MCP server
-
-## 定时任务
-
-对话里直接说「每天早上 8 点给我生成今日简报」或「明天 9 点提醒我交周报」，MiniBot 会调用 `schedule_task`（需审批确认）写入 `~/.minibot/schedule.json`。到点执行靠常驻 daemon：
+Legacy per-workspace `.minibot` directories migrate with one command (id collisions renamed, run logs merged):
 
 ```bash
-uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
+uv run minibot --migrate <dir1> <dir2> ...
 ```
 
-- 周期任务用 5 字段 cron（本地时间），一次性提醒用 ISO 时间
-- 每次触发新建一个 `[定时]` 会话（可被 `search_history` 检索），结果弹 macOS 通知
-- 错过的触发在 1 小时宽限期内补跑（如合盖睡眠后），更久的记为 missed 顺延下一次
-- 无人值守运行中敏感工具**默认拒绝**；需要完整权限可给 daemon 设 `MINIBOT_APPROVAL_MODE=always`（自担风险）
-- `/tasks` 查看、`/tasks cancel <id>` 取消，或直接用自然语言管理
+### MCP (`mcp.json`, global)
 
-**Heartbeat（心跳巡逻）**：cron 是"到点执行写死的指令"，heartbeat 是"到点醒来自己判断"。对话里说「每 30 分钟帮我巡逻一次」即可创建（`schedule_task` 的 `heartbeat` 模式）：按周期在**同一个持久会话**里读 `~/.minibot/HEARTBEAT.md` 巡逻清单（内容内联进 prompt），逐项检查、该做的做；没有需要注意的事就回 `HEARTBEAT_OK` **保持静默**，只有真有情况才弹通知。清单是纯 Markdown，`#` 行为注释，直接编辑即可；会话上下文连续增长由自动 compaction 兜底。
+Lookup order: `MINIBOT_MCP_CONFIG_PATH` → `~/.minibot/mcp.json` → bundled `mcp.json`.
 
-## CLI 命令
+- Servers with `enabled: true` connect and discover tools at startup; one failing server never blocks startup
+- `trusted: true` skips approval
+- Transports support `${ENV_VAR}`, `${MINIBOT_PYTHON}`, `${MINIBOT_PACKAGE_DIR}`
+- The bundled config includes `sqlite`, `macos_system`, and an external draw.io MCP server launched via `npx -y @drawio/mcp`
+
+## Scheduled tasks
+
+Say "generate my daily brief at 8 every morning" or "remind me to submit the report tomorrow at 9" in conversation — MiniBot calls `schedule_task` (approval-gated) and writes `~/.minibot/schedule.json`. Firing needs the resident daemon:
+
+```bash
+uv run minibot-daemon    # resident process; single-instance lock
+```
+
+- Routines use five-field cron (local time); one-shot reminders use ISO timestamps
+- Each firing creates a fresh `[定时]` session (searchable via `search_history`) and posts a macOS notification
+- Missed firings catch up within a one-hour grace window (laptop lid, daemon downtime); older misses are recorded and skipped
+- Unattended runs deny sensitive tools by default; set `MINIBOT_APPROVAL_MODE=always` for the daemon at your own risk
+- Manage with `/tasks`, `/tasks cancel <id>`, or plain natural language
+
+**Heartbeat**: cron executes a fixed instruction on time; heartbeat wakes up and decides for itself. Say "patrol every 30 minutes" to create one (`schedule_task` with `heartbeat` mode): on each beat it reviews the `~/.minibot/HEARTBEAT.md` checklist (inlined into the prompt) inside **one persistent session**, does what needs doing, and replies `HEARTBEAT_OK` to stay silent when nothing needs you — notifications fire only when something does. The checklist is plain Markdown (`#` lines are comments); the ever-growing session is kept in check by automatic compaction.
+
+## CLI commands
 
 `/sessions` · `/new` · `/resume <id>` · `/delete <id|current>` · `/compact` · `/mcp` · `/mcp tools [server]` · `/memory [clear|forget <id>]` · `/skills` · `/tasks [cancel <id>]` · `/permission [ask|always]` · `/config` · `/help`
 
 ## Web API
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 |---|---|---|
-| `POST` | `/runs` | 创建 run，返回 `run_id` |
-| `GET` | `/runs/{run_id}/events` | SSE，支持 `Last-Event-ID` 断点重放 |
-| `POST` | `/runs/{run_id}/cancel` | 取消 run |
-| `POST` | `/runs/{run_id}/approvals/{approval_id}` | 审批工具调用 |
-| `GET` | `/sessions` | 会话列表 |
-| `GET` | `/sessions/current` | 当前会话 |
-| `POST` | `/sessions` | 创建并切换当前会话 |
-| `GET/PATCH/DELETE` | `/sessions/{id}` | 读取、改标题、删除会话 |
-| `GET` | `/sessions/{id}/messages` | 对话历史 |
+| `POST` | `/runs` | create a run, returns `run_id` |
+| `GET` | `/runs/{run_id}/events` | SSE with `Last-Event-ID` replay |
+| `POST` | `/runs/{run_id}/cancel` | cancel a run |
+| `POST` | `/runs/{run_id}/approvals/{approval_id}` | resolve a tool approval |
+| `GET` | `/sessions` | list sessions |
+| `GET` | `/sessions/current` | current session |
+| `POST` | `/sessions` | create and switch the current session |
+| `GET/PATCH/DELETE` | `/sessions/{id}` | read, retitle, delete a session |
+| `GET` | `/sessions/{id}/messages` | conversation history |
 
-SSE 断开只取消订阅，不取消后台 run。
+Disconnecting from SSE only cancels the subscription, not the background run.
 
-## 测试
+## Tests
 
 ```bash
 uv run python -m unittest discover -s tests
 ```
 
-事件名与 payload 是 CLI / SSE / run log 共同依赖的稳定契约，改动时先看 [docs/architecture.md](docs/architecture.md) 的事件目录。
+Event names and payloads are the stable contract shared by the CLI, SSE, and the run log; consult the event catalog in [docs/architecture.md](docs/architecture.md) before changing them.

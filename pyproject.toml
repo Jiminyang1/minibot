@@ -7,6 +7,7 @@ name = "minibot"
 version = "0.1.0"
 description = "Local command-line AI agent with tools, MCP, skills, sessions, and memory."
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
