@@ -231,15 +231,14 @@ def extract_compaction_details(
             cursor += 1
 
         for call in message.tool_calls:
-            function = call.get("function") or {}
-            name = str(function.get("name", ""))
-            call_id = str(call.get("id", ""))
+            name = call.name
+            call_id = call.id
             if name in {"write_file", "edit_file"}:
-                path = _tool_path_argument(function.get("arguments"))
+                path = _tool_path_argument(call.arguments)
                 if path:
                     modified_files.add(path)
             elif name == "read_file":
-                path = _tool_path_argument(function.get("arguments"))
+                path = _tool_path_argument(call.arguments)
                 if path:
                     read_files.add(path)
             elif name == "read_artifact":
@@ -313,7 +312,7 @@ def _starts_with_incomplete_tool_transaction(
     message = messages[index]
     if message.role != "assistant" or not message.tool_calls:
         return False
-    expected_ids = [str(call.get("id", "")) for call in message.tool_calls]
+    expected_ids = [call.id for call in message.tool_calls]
     if not expected_ids:
         return True
     cursor = index + 1

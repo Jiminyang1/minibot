@@ -7,6 +7,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from ..llm import ToolCall
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -38,6 +40,34 @@ def _interrupted_tool_content(tool_name: str | None) -> str:
     )
 
 
+def coerce_tool_calls(raw: list[Any] | None) -> list[ToolCall] | None:
+    """Normalize stored tool calls to provider-neutral ``ToolCall`` values.
+
+    Sessions persist ``{"id", "name", "arguments"}``. Sessions written before
+    that stored the OpenAI wire shape (``{"type": "function", "function":
+    {...}}``); both still load.
+    """
+    if not raw:
+        return None
+    calls: list[ToolCall] = []
+    for item in raw:
+        if isinstance(item, ToolCall):
+            calls.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        source = function if isinstance(function, dict) else item
+        calls.append(
+            ToolCall(
+                id=str(item.get("id", "")),
+                name=str(source.get("name", "")),
+                arguments=str(source.get("arguments") or "{}"),
+            )
+        )
+    return calls or None
+
+
 class MessageEvent:
     """One message in a conversation."""
 
@@ -59,7 +89,7 @@ class MessageEvent:
         content: str,
         id: str | None = None,
         created_at: str | None = None,
-        tool_calls: list[dict[str, Any]] | None = None,
+        tool_calls: list[ToolCall] | list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
         reasoning_content: str | None = None,
@@ -68,7 +98,7 @@ class MessageEvent:
         self.role = role
         self.content = content
         self.created_at = created_at or utc_now()
-        self.tool_calls = tool_calls
+        self.tool_calls = coerce_tool_calls(tool_calls)
         self.tool_call_id = tool_call_id
         self.name = name
         self.reasoning_content = reasoning_content
@@ -79,7 +109,7 @@ class MessageEvent:
         *,
         role: str,
         content: str,
-        tool_calls: list[dict[str, Any]] | None = None,
+        tool_calls: list[ToolCall] | list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
         reasoning_content: str | None = None,
@@ -101,7 +131,10 @@ class MessageEvent:
             "created_at": self.created_at,
         }
         if self.tool_calls:
-            data["tool_calls"] = self.tool_calls
+            data["tool_calls"] = [
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+                for call in self.tool_calls
+            ]
         if self.tool_call_id:
             data["tool_call_id"] = self.tool_call_id
         if self.name:
@@ -344,7 +377,7 @@ class SessionContextProjector:
                     tool_messages.append(messages[cursor])
                     cursor += 1
 
-                expected_ids = [str(call.get("id", "")) for call in message.tool_calls]
+                expected_ids = [call.id for call in message.tool_calls]
                 actual_ids = [
                     str(tool_message.tool_call_id)
                     for tool_message in tool_messages
@@ -379,13 +412,12 @@ class SessionContextProjector:
         }
         results: list[MessageEvent] = []
         for call in message.tool_calls or []:
-            call_id = str(call.get("id", ""))
+            call_id = call.id
             existing = recorded.get(call_id)
             if existing is not None:
                 results.append(existing)
                 continue
-            function = call.get("function")
-            name = function.get("name") if isinstance(function, dict) else None
+            name = call.name or None
             results.append(
                 MessageEvent(
                     id=f"{message.id}_{call_id}_interrupted",

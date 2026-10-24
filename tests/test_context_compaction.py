@@ -399,6 +399,28 @@ class ContextCompactionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "包含非只读工具"):
                 harness.compactor.reduce(harness.session, tokens_before=tokens_before)
 
+    def test_compaction_records_files_read_by_read_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness = _Harness(Path(tmpdir))
+            first = MessageEvent.create(role="user", content="look at a.py")
+            read_call = MessageEvent.create(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("read_file", '{"path": "a.py"}')],
+            )
+            read_result = MessageEvent.create(
+                role="tool", content="print(1)", tool_call_id="call_1", name="read_file"
+            )
+            answer = MessageEvent.create(role="assistant", content="done")
+            current = MessageEvent.create(role="user", content="current")
+            harness.add(first, read_call, read_result, answer, current)
+
+            harness.compactor.reduce(harness.session, tokens_before=10000)
+
+            latest = harness.session.entries[-1]
+            self.assertEqual(latest.type, "compaction")
+            self.assertEqual(latest.details["read_files"], ["a.py"])
+
     def test_repeated_compaction_passes_previous_summary_and_merges_file_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             seen_requests: list[SummaryRequest] = []

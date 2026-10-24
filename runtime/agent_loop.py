@@ -701,15 +701,7 @@ def _response_to_message_event(resp: LLMResponse) -> MessageEvent:
         role="assistant",
         content=resp.content or "",
         reasoning_content=resp.reasoning_content,
-        tool_calls=[
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.name, "arguments": tc.arguments},
-            }
-            for tc in resp.tool_calls
-        ]
-        or None,
+        tool_calls=list(resp.tool_calls) or None,
     )
 
 
