@@ -389,6 +389,12 @@ function appendEvent(event) {
   body.append(summary);
 
   if (event.type === "approval.required") {
+    if (event.payload.reason) {
+      const reason = document.createElement("div");
+      reason.className = "event-summary";
+      reason.textContent = event.payload.reason;
+      body.append(reason);
+    }
     const actions = document.createElement("div");
     actions.className = "approval-actions";
     const approve = document.createElement("button");

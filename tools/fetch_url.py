@@ -13,7 +13,7 @@ import re
 import socket
 import xml.etree.ElementTree as ET
 
-from .base import Tool, ToolExecutionContext
+from .base import Tool, ToolExecutionContext, UntrustedExposure
 from .result import ToolOutput
 
 
@@ -244,6 +244,29 @@ class FetchUrlTool(Tool):
     @property
     def read_only(self) -> bool:
         return True
+
+    @property
+    def untrusted_output(self) -> bool:
+        return True
+
+    def approval_reason(
+        self,
+        args: dict[str, Any],
+        exposure: UntrustedExposure,
+    ) -> str | None:
+        # A URL is also an outbound channel: injected text can make the model
+        # put private data into one. Links the user or a tool result showed
+        # are followed freely; a URL the model assembled itself is asked.
+        # Residual: choosing among shown links still leaks a few bits.
+        if not exposure.tainted:
+            return None
+        url = str(args.get("url", "")).strip()
+        if exposure.mentions(url) or exposure.mentions(url.rstrip("/")):
+            return None
+        return (
+            "会话里已经有网页、搜索结果或 MCP 返回的内容，其中可能夹带针对模型的指令。这个 URL 没有在对话或工具结果里出现过，"
+            "可能是模型自己拼出来的；请确认它不会带出隐私数据。"
+        )
 
     @property
     def exclusive(self) -> bool:

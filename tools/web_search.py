@@ -52,6 +52,10 @@ class WebSearchTool(Tool):
         return True
 
     @property
+    def untrusted_output(self) -> bool:
+        return True
+
+    @property
     def exclusive(self) -> bool:
         return True
 

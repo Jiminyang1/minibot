@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall, is_retryable_llm_error
 from ..session import MessageEvent, SessionEntry
-from ..tools.base import Tool, ToolExecutionContext
+from ..tools.base import Tool, ToolExecutionContext, UntrustedExposure
 from ..tools.registry import PreparedToolCall, ToolRegistry
 from ..tools.result import ToolOutput
-from .approval import ToolApprovalGate
+from .approval import ToolApprovalGate, untrusted_exposure
 from .budget import TokenBudget
 from .cancel import RunCancelled
 from .compactor import Compactor
@@ -68,6 +68,9 @@ class _PlannedToolCall:
     # Why the raw arguments are unusable (not JSON / not an object); such a
     # call is answered with ``invalid_args`` and never approved or executed.
     args_error: str | None = None
+    # What the session had shown the model when the call was planned; the
+    # approval gate uses it to ask once untrusted content is in play.
+    exposure: UntrustedExposure = UntrustedExposure()
 
 
 class AgentLoop:
@@ -208,7 +211,11 @@ class AgentLoop:
                 emitter.emit("model.request.completed", completed_payload)
                 self._append(session, _response_to_message_event(resp))
 
-                planned_tool_calls = self._plan_tool_calls(resp.tool_calls, emitter)
+                planned_tool_calls = self._plan_tool_calls(
+                    resp.tool_calls,
+                    emitter,
+                    untrusted_exposure(session, self.tool_registry),
+                )
                 self._check_cancel(cancel_event)
                 if executor is None and self._wants_executor(planned_tool_calls):
                     executor = ThreadPoolExecutor(
@@ -474,6 +481,7 @@ class AgentLoop:
         self,
         tool_calls: list[ToolCall],
         emitter: RuntimeEventEmitter,
+        exposure: UntrustedExposure,
     ) -> list[_PlannedToolCall]:
         planned: list[_PlannedToolCall] = []
         for tool_call in tool_calls:
@@ -485,7 +493,11 @@ class AgentLoop:
                 "display_name": _tool_label(tool, tool_call.name),
                 "source": None if tool is None else tool.source,
                 "args": args,
-                "requires_approval": bool(tool and tool.requires_approval),
+                "requires_approval": bool(
+                    tool
+                    and args_error is None
+                    and tool.approval_reason(args, exposure) is not None
+                ),
             }
             if args_error is not None:
                 payload["args_error"] = args_error
@@ -496,6 +508,7 @@ class AgentLoop:
                     args=args,
                     tool=tool,
                     args_error=args_error,
+                    exposure=exposure,
                 )
             )
         return planned
@@ -650,6 +663,7 @@ class AgentLoop:
                 session_id=context.session_id,
                 emitter=emitter,
                 cancel_event=cancel_event,
+                exposure=planned.exposure,
             )
         except RunCancelled:
             raise

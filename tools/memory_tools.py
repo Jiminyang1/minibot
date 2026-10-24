@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..user_memory import UserMemoryStore
-from .base import Tool, ToolExecutionContext
+from .base import Tool, ToolExecutionContext, UntrustedExposure
 from .result import ToolOutput
 
 
@@ -32,6 +32,18 @@ class RememberTool(Tool):
     @property
     def exclusive(self) -> bool:
         return True
+
+    def approval_reason(
+        self,
+        args: dict[str, Any],
+        exposure: UntrustedExposure,
+    ) -> str | None:
+        # Memory reaches every future session's prompt. Before any untrusted
+        # text arrived the write reflects the user; after, it may not.
+        del args
+        if not exposure.tainted:
+            return None
+        return "会话里已经有网页、搜索结果或 MCP 返回的内容，其中可能夹带针对模型的指令。写入长期记忆会影响以后的每个会话，请确认内容出自你的意愿。"
 
     @property
     def description(self) -> str:

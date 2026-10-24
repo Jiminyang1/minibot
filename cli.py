@@ -390,6 +390,8 @@ class CliRenderer:
             raise RunCancelled("run cancelled while waiting for approval")
 
         self._flush_live_regions()
+        if request.reason:
+            print(f"  {self.c(request.reason, 'gray')}")
         preview = ", ".join(f"{key}={value!r}" for key, value in request.args.items())
         prompt = (
             f"  {self.c('批准执行', 'yellow', 'bold')} "

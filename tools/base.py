@@ -25,6 +25,24 @@ class ToolExecutionContext:
     cancel_event: threading.Event | None = None
 
 
+@dataclass(frozen=True)
+class UntrustedExposure:
+    """What the session has already shown the model from untrusted sources.
+
+    ``tainted``: a tool whose output may carry third-party text (web pages,
+    search results, MCP servers) has returned into this session, so the
+    model may be following injected instructions. ``seen_text`` is what the
+    user and tools have put in front of the model; a URL found there was
+    followed, a URL missing from it was built by the model itself.
+    """
+
+    tainted: bool = False
+    seen_text: str = ""
+
+    def mentions(self, text: str) -> bool:
+        return bool(text) and text in self.seen_text
+
+
 class Tool(ABC):
     """A single agent capability exposed through function calling."""
 
@@ -69,6 +87,24 @@ class Tool(ABC):
     def requires_approval(self) -> bool:
         """Whether this tool needs user confirmation before execution."""
         return False
+
+    @property
+    def untrusted_output(self) -> bool:
+        """Whether results may carry third-party text the model could obey."""
+        return self.source == "mcp"
+
+    def approval_reason(
+        self,
+        args: dict[str, Any],
+        exposure: UntrustedExposure,
+    ) -> str | None:
+        """Why this call needs approval, or None to run it unasked.
+
+        The default follows the static ``requires_approval`` flag. Tools
+        override it to ask only once untrusted content is in the session.
+        """
+        del args, exposure
+        return "该工具需要审批。" if self.requires_approval else None
 
     @property
     def read_only(self) -> bool:
