@@ -164,7 +164,7 @@ class SessionManager:
             session_id = validate_session_id(session_id)
         except ValueError:
             return None
-        if self._meta_path(session_id).exists():
+        if _is_native_meta(self._read_meta(session_id)):
             return self._load_native(session_id)
         return None
 
@@ -344,7 +344,7 @@ class SessionManager:
             except ValueError:
                 continue
             meta = self._read_meta(session_dir.name)
-            if meta:
+            if _is_native_meta(meta):
                 metas_by_id[session_dir.name] = meta
 
         return sorted(
@@ -377,6 +377,16 @@ class SessionManager:
         temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temp_path.write_text(text, encoding="utf-8")
         os.replace(temp_path, path)
+
+
+def _is_native_meta(meta: dict[str, object] | None) -> bool:
+    """True for a meta.json this store wrote.
+
+    minibot-ts shares ``~/.minibot/sessions`` but writes camelCase meta
+    (``id``, ``createdAt``) and ``entries.jsonl``. Such directories are not
+    listed or loaded here, so appending can never corrupt them.
+    """
+    return bool(meta) and isinstance(meta.get("session_id"), str)
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:

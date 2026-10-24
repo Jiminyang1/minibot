@@ -61,6 +61,24 @@ class SessionStoreTests(unittest.TestCase):
             self.assertEqual(reloaded.message_count, 1)
             self.assertEqual(reloaded.messages[0].content, "hello")
 
+    def test_sessions_written_by_minibot_ts_are_ignored_not_touched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            foreign = workspace / "sessions" / "s_20261003_002929"
+            foreign.mkdir(parents=True)
+            meta = {"id": foreign.name, "title": "ts", "createdAt": "x", "updatedAt": "y",
+                    "workspace": "/w", "messageCount": 2}
+            (foreign / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            (foreign / "entries.jsonl").write_text("{}\n", encoding="utf-8")
+            manager.create_session("s_native")
+
+            self.assertEqual([s.session_id for s in manager.list_sessions()], ["s_native"])
+            self.assertIsNone(manager.load(foreign.name))
+            self.assertEqual(manager.latest_session().session_id, "s_native")
+            self.assertEqual(json.loads((foreign / "meta.json").read_text()), meta)
+            self.assertFalse((foreign / "messages.jsonl").exists())
+
     def test_session_id_validation_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = SessionManager(Path(tmpdir))
