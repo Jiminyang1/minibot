@@ -225,6 +225,7 @@ SSE 断开只取消订阅，不取消后台 run。
 
 ```bash
 uv run python -m unittest discover -s tests
+uv run ruff check .
 ```
 
 事件名与 payload 是 CLI / SSE / run log 共同依赖的稳定契约，改动时先看 [docs/architecture.md](docs/architecture.md) 的事件目录。

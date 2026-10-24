@@ -225,6 +225,7 @@ Disconnecting from SSE only cancels the subscription, not the background run.
 
 ```bash
 uv run python -m unittest discover -s tests
+uv run ruff check .
 ```
 
 Event names and payloads are the stable contract shared by the CLI, SSE, and the run log; consult the event catalog in [docs/architecture.md](docs/architecture.md) before changing them.

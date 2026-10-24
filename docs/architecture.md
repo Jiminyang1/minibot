@@ -257,6 +257,8 @@ flowchart TD
 └── mcp.json                # 全局 MCP 配置(可选,优先于包内默认)
 ```
 
+工具调用按中立格式 `{id, name, arguments}` 存储;更早写入的 OpenAI 格式(`{type: "function", function: {...}}`)读取时照常兼容。minibot-ts 也用 `~/.minibot/sessions`,但写的是驼峰 meta 和 `entries.jsonl`;这类目录不列出、不加载,所以永远不会被追加写坏。
+
 真相源只有 `messages.jsonl`;`session.messages`、`meta.json`、`runs.jsonl` 都是它或事件流的派生物。旧版散落的 `<workspace>/.minibot` 由 `minibot --migrate <dir>...` 一次性收编(id 冲突重命名并改写 meta、runs.jsonl 合并、回填 workspace 字段)。
 
 **情景记忆**:`search_history` 工具对这份全局存储做 agentic search——关键词 AND 匹配消息原文与 compaction 摘要,支持 days / session / workspace 过滤,自动排除当前会话("现在"不是"历史")。不引入向量库:单用户规模下,对真相源的直接检索在透明度和新鲜度上优于预蒸馏管线;召回不足时再考虑本地嵌入(先用失败案例证明需求)。
