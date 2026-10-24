@@ -532,15 +532,19 @@ dependencies = [
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "langfuse" },
-    { name = "matplotlib" },
     { name = "mcp" },
     { name = "openai" },
-    { name = "openpyxl" },
-    { name = "pandas" },
-    { name = "tabulate" },
     { name = "textual" },
     { name = "tiktoken" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+data = [
+    { name = "matplotlib" },
+    { name = "openpyxl" },
+    { name = "pandas" },
+    { name = "tabulate" },
 ]
 
 [package.metadata]
@@ -549,16 +553,17 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "langfuse", specifier = ">=4.16,<5" },
-    { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "matplotlib", marker = "extra == 'data'", specifier = ">=3.10.9" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "openai", specifier = ">=1.0" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pandas", specifier = ">=3.0.3" },
-    { name = "tabulate", specifier = ">=0.10.0" },
+    { name = "openpyxl", marker = "extra == 'data'", specifier = ">=3.1.5" },
+    { name = "pandas", marker = "extra == 'data'", specifier = ">=3.0.3" },
+    { name = "tabulate", marker = "extra == 'data'", specifier = ">=0.10.0" },
     { name = "textual", specifier = ">=8.2.8" },
     { name = "tiktoken", specifier = ">=0.7" },
     { name = "uvicorn", specifier = ">=0.29" },
 ]
+provides-extras = ["data"]
 
 [[package]]
 name = "numpy"
