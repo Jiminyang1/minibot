@@ -665,7 +665,7 @@ class FetchUrlTool(Tool):
                     continue
             if not addresses:
                 if strict:
-                    raise ValueError(f"无法解析主机 {host}")
+                    raise ValueError(f"无法解析主机 {host}") from None
                 return
 
         for ip in addresses:

@@ -229,7 +229,7 @@ class AgentLoop:
                     executor,
                 )
 
-                for planned, output in zip(planned_tool_calls, tool_outputs):
+                for planned, output in zip(planned_tool_calls, tool_outputs, strict=True):
                     self._check_cancel(cancel_event)
                     result = self.materializer.materialize(output, context=tool_context)
                     emitter.emit(
@@ -611,7 +611,7 @@ class AgentLoop:
                 f"工具 {planned.tool_call.name} 未返回结果。",
                 data={"tool": planned.tool_call.name},
             )
-            for planned, output in zip(batch, outputs)
+            for planned, output in zip(batch, outputs, strict=True)
         ]
 
     def _execute_single(

@@ -70,3 +70,18 @@ packages = [
 "minibot" = ["mcp.json", "web/*"]
 "minibot.skills" = ["*.md"]
 "minibot.evals" = ["*.json"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+# Bug-finding rules only: pyflakes, pycodestyle errors, bugbear.
+select = ["E4", "E7", "E9", "F", "B"]
+# FastAPI's `Body(...)` defaults are the framework idiom.
+ignore = ["B008"]

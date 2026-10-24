@@ -235,7 +235,7 @@ class SessionStoreTests(unittest.TestCase):
                 [message.role for message in reloaded.messages],
                 ["user", "assistant", "tool", "tool", "assistant"],
             )
-            for message, call_id in zip(reloaded.messages[2:4], ["call_1", "call_2"]):
+            for message, call_id in zip(reloaded.messages[2:4], ["call_1", "call_2"], strict=True):
                 self.assertEqual(message.tool_call_id, call_id)
                 self.assertEqual(json.loads(message.content)["code"], "interrupted")
 
