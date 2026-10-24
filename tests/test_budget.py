@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
+import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -64,6 +66,32 @@ class TokenBudgetPolicyTests(unittest.TestCase):
             estimate.total_tokens,
             estimate.message_tokens + estimate.tool_definition_tokens,
         )
+
+    def test_request_estimate_does_not_load_provider_modules(self) -> None:
+        # Fresh interpreter: other tests may already have imported providers.
+        script = textwrap.dedent(
+            """
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from minibot.runtime.token_budget import estimate_request_token_breakdown
+            from minibot.tools.definitions import ModelToolDefinition
+
+            estimate_request_token_breakdown(
+                [],
+                [ModelToolDefinition(name="echo", description="", parameters={})],
+            )
+            loaded = [name for name in sys.modules if ".llm_providers" in name]
+            print(",".join(loaded))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parents[2])],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "")
 
 
 if __name__ == "__main__":
