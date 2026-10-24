@@ -15,7 +15,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
 - Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
 - Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
-- Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint)
+- Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint). Once web pages, search results or MCP output are in a session, `remember` and `fetch_url` to a URL nobody showed also ask, so injected text cannot quietly persist or send data out
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
 
@@ -29,12 +29,16 @@ uv sync
 uv run minibot
 ```
 
+`uv sync --extra data` also installs pandas, matplotlib, openpyxl and tabulate, for scripts that the `exec` tool runs on artifacts. MiniBot itself does not import them, and a plain `uv sync` removes them again.
+
 Web UI:
 
 ```bash
 uv run minibot-server --host 127.0.0.1 --port 8765
 # open http://127.0.0.1:8765/
 ```
+
+The server has no authentication. It accepts only loopback `Host` headers (`localhost`, `127.0.0.1`, `[::1]`), which blocks DNS rebinding, and rejects writes that carry a foreign `Origin`. Binding a non-loopback `--host` prints a warning; add the names remote clients use with `--allowed-host`.
 
 `minibot` opens a **full-screen TUI** (Textual) by default: scrollable conversation, Markdown-rendered replies, streaming, reasoning and tool calls collapsed into clickable one-liners, a bottom-pinned input, and an approval modal (y/n); `Esc` cancels the run, `Ctrl+N` starts a session. Slash commands work as usual.
 
@@ -152,6 +156,7 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
+| `MINIBOT_FETCH_VIA_JINA` | `0` | `1` lets `fetch_url` try the Jina reader (`r.jina.ai`) first; better text extraction, but every fetched URL goes to that third party |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | setting both enables Langfuse tracing (one trace per turn: full requests, tools, approvals, compaction) |
 | `LANGFUSE_BASE_URL` | EU cloud | Langfuse endpoint: your signup region, or a self-hosted URL |
 | `MINIBOT_LANGFUSE` | `1` | `0` keeps keys configured but disables tracing |
@@ -176,7 +181,7 @@ uv run minibot --migrate <dir1> <dir2> ...
 Lookup order: `MINIBOT_MCP_CONFIG_PATH` → `~/.minibot/mcp.json` → bundled `mcp.json`.
 
 - Servers with `enabled: true` connect and discover tools at startup; one failing server never blocks startup
-- `trusted: true` skips approval
+- `trusted: true` skips approval; MCP output still counts as untrusted content for the approval rules above
 - Transports support `${ENV_VAR}`, `${MINIBOT_PYTHON}`, `${MINIBOT_PACKAGE_DIR}`
 - The bundled config includes `sqlite`, `macos_system`, and an external draw.io MCP server launched via `npx -y @drawio/mcp`
 

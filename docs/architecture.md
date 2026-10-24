@@ -80,7 +80,7 @@ flowchart TB
 | `ContextBuilder` | `runtime/context_builder.py` | system prompt(base + memory + 时间 + skills 目录)+ 历史投影 → `BuiltRequest` | 零副作用:不调模型、不碰盘、不改 session |
 | `TokenBudget` | `runtime/budget.py` | `input_budget`、全量/增量估算、超支报错文案 | 不决定何时压缩 |
 | `Compactor` | `runtime/compactor.py` | 压缩机制:安全切点摘要、只读工具块丢弃;**变异 + 落盘在同一调用内完成** | 不决定何时触发(循环决定) |
-| `ToolApprovalGate` | `runtime/approval.py` | 敏感工具放行/拒绝,emit `approval.*` | 不执行工具 |
+| `ToolApprovalGate` | `runtime/approval.py` | 按工具的 `approval_reason` 放行/拒绝(静态 `requires_approval`,或会话已有不可信内容后的动态规则,见 §10),emit `approval.*` | 不执行工具 |
 | `ToolOutputMaterializer` | `runtime/tool_output_materializer.py` | >12k 字符的工具输出落盘为 artifact,模型只见引用+预览 | — |
 | `RunLogFold` | `runtime/run_log_fold.py` | 订阅事件流,终止事件时把一个 run reduce 成 `runs.jsonl` 一行 | 永不让 run 失败(best-effort) |
 | `SessionManager` | `session/store.py` | append-only 持久化、meta、跨进程文件锁 | — |
@@ -155,8 +155,8 @@ sequenceDiagram
 | `compaction.request.started` / `.completed` | Compactor(仅 run 内触发) | started: `model` `messages`;completed: `elapsed_ms` `usage` `output`,失败时 `error_type` `message` | fold(计入 `llm_call_count` 与 usage——摘要调用不再漏账)、Langfuse;UI 忽略 |
 | `message.delta` | AgentLoop(消费模型流时) | `iteration` `channel`(`text`/`reasoning`) `text` | CLI(text → 打字机;reasoning → 折叠式灰字预览)、web 流式气泡;**fold 与重放忽略** |
 | `model.request.retrying` | AgentLoop(瞬时错误退避时) | `iteration` `attempt` `max_retries` `delay_seconds` `error_type` `message` | CLI 提示与状态行;fold 忽略 |
-| `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval` | CLI |
-| `approval.required` | ToolApprovalGate | `approval_id` `tool_call_id` `tool` `args` | CLI 提问、web 审批端点 |
+| `tool_call.started` | AgentLoop(计划阶段) | `tool_call_id` `tool` `display_name` `source` `args` `requires_approval`(按本次参数和会话曝光计算);参数不是 JSON 对象时另有 `args_error` | CLI |
+| `approval.required` | ToolApprovalGate | `approval_id` `tool_call_id` `tool` `args` `reason`(为什么要审批) | CLI 提问、web 审批端点 |
 | `approval.resolved` | ToolApprovalGate | 同上 + `approved`,自动放行时 `auto: true` | CLI、web |
 | `tool_call.completed` / `.failed` | AgentLoop(materialize 后) | `tool_call_id` `tool` `source` `ok` `code` `summary` `artifact` `truncated` | CLI、fold(工具/MCP 统计) |
 | `message.completed` | AgentLoop | `iteration` `content`;达上限时 `reason: "max_iterations"` | CLI |
@@ -206,12 +206,15 @@ flowchart TD
 - 切点永不落在 tool 结果上、永不切开未完成的工具事务(`runtime/compaction.py` 纯函数保证)。
 - 增量摘要:新摘要在 `previous_summary` 基础上合并,read/modified 文件清单跨 compaction 累积(`<read-files>` / `<modified-files>` 区块)。
 - 变异与落盘同调用完成(`Compactor._apply_compaction`),不存在待对账的中间态。
+- 摘要在投影里是一条 **user** 消息(内容包在 `<conversation-summary>` 标签里,id 以 `_summary` 结尾),不是 assistant 消息:摘要会引用工具输出,模型不能把它当成自己说过的话。它不算轮次、不能当切点,时间戳也不打在它上面。后面紧跟的真实用户消息会形成两条连续的 user 消息,`deepseek-v4-pro` 实测接受。
 
 手动 `/compact` 走 `Compactor.compact_now`,只做一次安全切点压缩,无事可做时返回说明而不报错。
 
 ## 5. 错误与取消语义
 
-**取消**:`AgentSession.abort(run_id)` 置位 cancel event,循环在这些检查点协作退出——每个 iteration 开头、模型流的每个 delta 之间、每个工具批次前、并行 future 的 50ms 轮询间隙、审批等待中、compaction 摘要调用前后。取消抛 `RunCancelled` → `run.cancelled` 事件 → fold 记 `failed / RunCancelled`。流中途取消时,循环在 `finally` 里 close 生成器,provider 的 `finally` 随之关闭底层 HTTP 流;半截文本不落盘。
+**取消**:`AgentSession.abort(run_id)` 置位 cancel event,循环在这些检查点协作退出——每个 iteration 开头、模型流的每个 delta 之间、每个工具批次前、并行 future 的 50ms 轮询间隙、审批等待中、compaction 摘要调用前后。取消抛 `RunCancelled` → `run.cancelled` 事件 → fold 记 `failed / RunCancelled`。流中途取消时,循环在 `finally` 里 close 生成器,provider 的 `finally` 随之关闭底层 HTTP 流;半截文本不落盘。`exec` 在独立的进程组里运行命令,每 0.1 秒检查一次取消;取消或 30 秒超时时整组先 SIGTERM、0.5 秒后 SIGKILL,孙进程不会残留。
+
+**没有答完的一轮**:用户消息落盘之后,只要这一轮以取消或异常结束(包括空回复、LLM 失败、压缩失败、Ctrl+C),循环先追加一条固定的收尾回复("本轮已被用户取消…" / "本轮因错误中止(<异常类型>)…"),再把异常抛出去。否则下一轮的模型会看到一个没回答的请求,把它重做一遍。收尾回复只落盘,不发 `message.completed`;它前面缺结果的工具调用块由投影补 `interrupted`。用户消息还没写入,或者最后一条已经是最终回复时,不写。写收尾回复失败只作为 note 附在原异常上,不会盖掉原异常。
 
 **取消或崩溃留下的悬空 tool_calls**(assistant 带 tool_calls 但 tool 结果未落盘):投影层 `_filter_incomplete_tool_transactions` 按位置处理——位于末尾时可能仍在执行(循环逐条追加结果),暂不投影;一旦后面有任何消息,说明产生它的 run 已结束,保留这次调用并为缺失的结果补一条 `code: "interrupted"`(副作用未知)的合成结果,只存在于投影、不落盘。下一轮请求因此永远合法,模型也能看到"这里执行过、结果未知",而不是调用凭空消失后重做一遍。这是 append-only + 投影架构的直接收益。
 
@@ -225,7 +228,7 @@ flowchart TD
 
 **工具异常**:永远不炸循环——registry 层捕获为 `ToolOutput.failure`,审批 handler 崩溃降级为错误输出,并行批次中单个工具失败不影响同批其他工具。
 
-**工具参数校验**:`registry.prepare` 先对照工具声明给模型的 JSON Schema 校验参数(`jsonschema`),违规返回带 `$.path` 定位的 `invalid_args`,让模型在执行前自我纠正;schema 本身畸形(部分 MCP server 会给宽松 schema)则跳过校验、退回签名绑定兜底。校验器按工具缓存编译。
+**工具参数校验**:模型给的参数不是合法 JSON,或者不是 JSON 对象时,工具不执行,也不进审批,直接返回带解析错误和原文预览的 `invalid_args`(空参数仍然等于 `{}`)。之后 `registry.prepare` 先对照工具声明给模型的 JSON Schema 校验参数(`jsonschema`),违规返回带 `$.path` 定位的 `invalid_args`,让模型在执行前自我纠正;schema 本身畸形(部分 MCP server 会给宽松 schema)则跳过校验、退回签名绑定兜底。校验器按工具缓存编译。
 
 **fold 的容错**:`RunLogFold` 整体 try/except,观测记账失败绝不反噬 run 本身。
 
@@ -282,3 +285,16 @@ flowchart TD
 - **agent 自排程**:`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 三个工具,自然语言即可管理;CLI 侧 `/tasks` 查看与取消。
 - **Heartbeat(`kind: "heartbeat"`)**:与 cron 的本质区别在"该做什么"的决定时机——cron 执行预写指令,heartbeat 把判断推迟到醒来那一刻。实现为特殊任务类型:cron 表达式定节奏;**复用一个持久会话**(`session_id` 回写到任务上,上下文连续,增长交给自动 compaction);每次醒来把 `~/.minibot/HEARTBEAT.md` 清单**内联**进 prompt(`#` 行过滤,文件缺失时生成模板;内联是因为 fs 工具以 workspace 为根,够不到 state home);**静默协议**——回复含 `HEARTBEAT_OK` 则不发通知(`last_status: ok-quiet`),否则视为需要注意(`attention`)并通知。heartbeat 永不自我禁用,错过宽限窗口的心跳直接顺延(巡逻没有补跳的意义)。
 - 刻意不做:秒级精度(tick 30s,分钟粒度足够)、任务间依赖、失败重试(下个周期天然覆盖;LLM 层瞬时重试已存在)。
+
+## 10. 安全边界
+
+MiniBot 在用户自己的权限下运行,没有沙箱。下面几条边界防的是提示注入和本机服务被滥用:
+
+- **审批规则是按调用算的。** `Tool.approval_reason(args, exposure)` 返回审批原因,`None` 表示直接放行;默认实现跟随静态的 `requires_approval`。`exposure` 由 `untrusted_exposure(session, registry)` 从整个会话(包括被压缩的记录)折叠出来:`tainted` 表示 `untrusted_output` 的工具(`fetch_url`、`web_search`、所有 MCP 工具)已经返回过内容,一旦变脏整个会话都保持脏;`seen_text` 是用户消息、工具结果和压缩摘要的原文。
+  - `remember`:会话变脏以后要审批。记忆会进入以后每个会话的 prompt。
+  - `fetch_url`:会话变脏以后,URL 没有在 `seen_text` 里出现过(也就是模型自己拼出来的)就要审批,因为 URL 本身就能把数据带出去。用户或工具结果里出现过的链接照常放行。剩余风险:从已出现的多个链接里挑一个,仍然能泄露少量信息。
+  - 没有审批渠道的运行(daemon、heartbeat)在这些情况下一律拒绝;`always` 模式全部放行。
+- **`fetch_url` 只访问公网。** 请求前检查主机名、DNS 解析出的每个地址和每一跳重定向,要求都是 `is_global`(所以 `100.64.0.0/10` 也会被拦)。检查时间和连接时间之间的 DNS rebinding 空档没有处理(没有固定 IP)。Jina 阅读器默认关闭,`MINIBOT_FETCH_VIA_JINA=1` 才会把 URL 发给 `r.jina.ai`。
+- **服务端只认回环地址。** `LocalOnlyMiddleware` 只接受 `localhost`、`127.0.0.1`、`[::1]` 的 `Host`(挡 DNS rebinding),写请求带外部 `Origin` 时返回 403。服务端没有认证;`--host` 设成非回环地址会打印警告,远程访问的主机名用 `--allowed-host` 加。
+- **`exec`**:要审批(`ask` 模式),另有一份危险命令黑名单作为纵深防御,黑名单本身可以绕过。
+
