@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from minibot.artifacts import ArtifactStore
+from minibot.runtime.agent_loop import _CANCELLED_TURN_REPLY
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from minibot.runtime.approval import ApprovalPolicy
 from minibot.runtime.cancel import RunCancelled
@@ -246,12 +247,13 @@ class AgentLoopUsageTests(unittest.TestCase):
             request = llm.calls[1]["messages"]
             self.assertEqual(
                 [message.role for message in request],
-                ["system", "user", "assistant", "tool", "user"],
+                ["system", "user", "assistant", "tool", "assistant", "user"],
             )
             self.assertEqual(request[2].tool_calls[0].id, "call_1")
             self.assertEqual(request[3].tool_call_id, "call_1")
             payload = json.loads(request[3].content)
             self.assertEqual(payload["code"], "interrupted")
+            self.assertEqual(request[4].content, _CANCELLED_TURN_REPLY)
 
     def test_fails_fast_when_model_returns_empty_final_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -285,8 +287,9 @@ class AgentLoopUsageTests(unittest.TestCase):
             assert session is not None
             self.assertEqual(
                 [message.role for message in session.messages],
-                ["user", "assistant", "tool"],
+                ["user", "assistant", "tool", "assistant"],
             )
+            self.assertIn("RuntimeError", session.messages[-1].content)
             self.assertTrue(
                 any(
                     event.type == "model.request.completed"
@@ -398,7 +401,7 @@ class AgentLoopUsageTests(unittest.TestCase):
             assert session is not None
             self.assertEqual(
                 [message.role for message in session.messages],
-                ["user", "assistant", "tool"],
+                ["user", "assistant", "tool", "assistant"],
             )
             usage_events = [
                 event.payload.get("usage")
@@ -703,6 +706,382 @@ class AgentLoopUsageTests(unittest.TestCase):
             self.assertEqual(
                 store.read_page("s_test", artifact_b, offset=0, limit=5000).content,
                 "B" * 5000,
+            )
+
+
+
+class _SequenceLLM(LLMClient):
+    """Plays scripted responses in order; an Exception item is raised instead."""
+
+    def __init__(self, items: list[LLMResponse | Exception]) -> None:
+        self._items = list(items)
+        self.calls: list[list[ModelMessage]] = []
+
+    def chat(
+        self,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        del tools, model
+        self.calls.append(list(messages))
+        item = self._items.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _tool_payloads(session) -> dict[str, dict[str, object]]:
+    return {
+        str(message.tool_call_id): json.loads(message.content)
+        for message in session.messages
+        if message.role == "tool"
+    }
+
+
+def _closing_replies(session) -> list[MessageEvent]:
+    """Assistant replies without tool calls among the persisted entries."""
+    return [
+        entry.message
+        for entry in session.entries
+        if entry.message is not None
+        and entry.message.role == "assistant"
+        and not entry.message.tool_calls
+    ]
+
+
+class MalformedToolArgsTests(unittest.TestCase):
+    def test_invalid_json_args_fail_without_approval_or_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = _registry(
+                _TrackingTool("sensitive", state=state, requires_approval=True)
+            )
+            approvals: list[str] = []
+            events: list[RuntimeEvent] = []
+            loop, manager = build_loop(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(
+                                    id="call_1",
+                                    name="sensitive",
+                                    arguments='{"path": "a.txt"',
+                                ),
+                                ToolCall(
+                                    id="call_2", name="sensitive", arguments='["a.txt"]'
+                                ),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                Path(tmpdir),
+                max_parallel_tools=1,
+                approval_policy=ApprovalPolicy(
+                    handler=lambda request, cancel_event: approvals.append(
+                        request.tool_name
+                    )
+                    or True
+                ),
+            )
+
+            outcome, session = run_turn(loop, manager, "run tool", events=events)
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(state.executions, {})
+            self.assertEqual(approvals, [])
+            payloads = _tool_payloads(session)
+            self.assertEqual(payloads["call_1"]["code"], "invalid_args")
+            self.assertIn("JSON", payloads["call_1"]["summary"])
+            self.assertIn('{"path": "a.txt"', payloads["call_1"]["summary"])
+            self.assertEqual(payloads["call_2"]["code"], "invalid_args")
+            self.assertIn("list", payloads["call_2"]["summary"])
+            started = [e.payload for e in events if e.type == "tool_call.started"]
+            self.assertEqual([p["args"] for p in started], [{}, {}])
+            self.assertTrue(all(p.get("args_error") for p in started))
+            self.assertEqual(
+                [e.payload["code"] for e in events if e.type == "tool_call.failed"],
+                ["invalid_args", "invalid_args"],
+            )
+
+    def test_invalid_json_args_in_parallel_batch_skip_only_that_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = _registry(
+                _TrackingTool("read_a", state=state, read_only=True),
+                _TrackingTool("read_b", state=state, read_only=True),
+                _TrackingTool("read_c", state=state, read_only=True),
+            )
+            loop, manager = build_loop(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="read_a", arguments="{}"),
+                                ToolCall(id="call_2", name="read_b", arguments="not json"),
+                                ToolCall(id="call_3", name="read_c", arguments="{}"),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                Path(tmpdir),
+                max_parallel_tools=4,
+            )
+
+            outcome, session = run_turn(loop, manager, "run tools")
+
+            self.assertEqual(outcome.reply, "done")
+            self.assertEqual(state.executions, {"read_a": 1, "read_c": 1})
+            self.assertEqual(
+                [
+                    message.tool_call_id
+                    for message in session.messages
+                    if message.role == "tool"
+                ],
+                ["call_1", "call_2", "call_3"],
+            )
+            payloads = _tool_payloads(session)
+            self.assertEqual(payloads["call_1"]["code"], "success")
+            self.assertEqual(payloads["call_2"]["code"], "invalid_args")
+            self.assertIn("not json", payloads["call_2"]["summary"])
+            self.assertEqual(payloads["call_3"]["code"], "success")
+
+    def test_empty_args_still_mean_no_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _TrackingState()
+            registry = _registry(_TrackingTool("read_a", state=state, read_only=True))
+            loop, manager = build_loop(
+                _ScriptedLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[
+                                ToolCall(id="call_1", name="read_a", arguments=""),
+                            ],
+                        ),
+                        LLMResponse(content="done"),
+                    ]
+                ),
+                registry,
+                Path(tmpdir),
+            )
+
+            _, session = run_turn(loop, manager, "run tool")
+
+            self.assertEqual(state.executions, {"read_a": 1})
+            self.assertEqual(_tool_payloads(session)["call_1"]["code"], "success")
+
+
+class UnfinishedTurnClosureTests(unittest.TestCase):
+    def test_cancelled_turn_is_closed_and_dangling_calls_project_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cancel_event = threading.Event()
+            tool = _CancellingTool(cancel_event)
+            llm = _SequenceLLM(
+                [
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(id="call_1", name="echo", arguments='{"value":"a"}'),
+                            ToolCall(id="call_2", name="delete_files", arguments="{}"),
+                        ],
+                    ),
+                    LLMResponse(content="checked"),
+                ]
+            )
+            loop, manager = build_loop(
+                llm, _registry(_EchoTool(), tool), Path(tmpdir), max_parallel_tools=1
+            )
+            events: list[RuntimeEvent] = []
+
+            with self.assertRaises(RunCancelled):
+                run_turn(
+                    loop,
+                    manager,
+                    "delete stale files",
+                    events=events,
+                    cancel_event=cancel_event,
+                )
+
+            self.assertNotIn("message.completed", [e.type for e in events])
+            session = manager.load("s_test")
+            assert session is not None
+            # On disk: the tool-call block has no results, the closing reply follows.
+            tail = [entry.message for entry in session.entries[-2:]]
+            self.assertTrue(tail[0].tool_calls)
+            self.assertEqual(tail[1].role, "assistant")
+            self.assertEqual(tail[1].content, _CANCELLED_TURN_REPLY)
+            self.assertEqual(len(_closing_replies(session)), 1)
+
+            outcome, _ = run_turn(loop, manager, "did it run?")
+
+            self.assertEqual(outcome.reply, "checked")
+            request = llm.calls[1]
+            self.assertEqual(
+                [message.role for message in request],
+                ["system", "user", "assistant", "tool", "tool", "assistant", "user"],
+            )
+            self.assertEqual(
+                [message.tool_call_id for message in request[3:5]],
+                ["call_1", "call_2"],
+            )
+            for message in request[3:5]:
+                self.assertEqual(json.loads(message.content)["code"], "interrupted")
+            self.assertEqual(request[5].content, _CANCELLED_TURN_REPLY)
+
+    def test_failed_turn_is_closed_once_and_next_request_is_well_formed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            llm = _SequenceLLM(
+                [
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(id="call_1", name="echo", arguments='{"value":"hi"}')
+                        ],
+                    ),
+                    ConnectionError("llm unavailable"),
+                    LLMResponse(content="recovered"),
+                ]
+            )
+            loop, manager = build_loop(llm, _registry(_EchoTool()), Path(tmpdir))
+            loop.llm_max_retries = 0
+            events: list[RuntimeEvent] = []
+
+            with self.assertRaisesRegex(ConnectionError, "llm unavailable"):
+                run_turn(loop, manager, "say hi", events=events)
+
+            self.assertNotIn("message.completed", [e.type for e in events])
+            session = manager.load("s_test")
+            assert session is not None
+            closing = _closing_replies(session)
+            self.assertEqual(len(closing), 1)
+            self.assertIn("ConnectionError", closing[0].content)
+            self.assertNotIn("llm unavailable", closing[0].content)
+
+            outcome, _ = run_turn(loop, manager, "again")
+
+            self.assertEqual(outcome.reply, "recovered")
+            request = llm.calls[2]
+            self.assertEqual(
+                [message.role for message in request],
+                ["system", "user", "assistant", "tool", "assistant", "user"],
+            )
+            self.assertEqual(json.loads(request[3].content)["code"], "success")
+            self.assertEqual(request[4].content, closing[0].content)
+
+    def test_cancel_before_user_message_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cancel_event = threading.Event()
+            cancel_event.set()
+            loop, manager = build_loop(_SequenceLLM([]), _registry(), Path(tmpdir))
+
+            with self.assertRaises(RunCancelled):
+                run_turn(loop, manager, "hello", cancel_event=cancel_event)
+
+            session = manager.load("s_test")
+            assert session is not None
+            self.assertEqual(session.entries, [])
+
+    def test_failure_after_final_reply_does_not_add_closing_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop, manager = build_loop(
+                _SequenceLLM([LLMResponse(content="hi there")]),
+                _registry(),
+                Path(tmpdir),
+            )
+            session = manager.create_session("s_test")
+
+            def _handler(event: RuntimeEvent) -> None:
+                if event.type == "message.completed":
+                    raise RuntimeError("subscriber broke")
+
+            from minibot.runtime.events import RuntimeEventEmitter
+
+            emitter = RuntimeEventEmitter(
+                run_id="r_test", session_id="s_test", handler=_handler
+            )
+            with self.assertRaisesRegex(RuntimeError, "subscriber broke"):
+                loop.run_turn(session, "hello", emitter=emitter)
+
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual(
+                [(m.role, m.content) for m in reloaded.messages],
+                [("user", "hello"), ("assistant", "hi there")],
+            )
+
+    def test_closing_write_failure_keeps_original_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop, manager = build_loop(
+                _SequenceLLM([ValueError("llm broke")]), _registry(), Path(tmpdir)
+            )
+            original_append = manager.append_entries
+
+            def _append_entries(session_id, entries):
+                if any(
+                    entry.message is not None and entry.message.role == "assistant"
+                    for entry in entries
+                ):
+                    raise OSError("disk full")
+                return original_append(session_id, entries)
+
+            manager.append_entries = _append_entries  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(ValueError, "llm broke") as ctx:
+                run_turn(loop, manager, "hello")
+
+            self.assertTrue(
+                any("disk full" in note for note in ctx.exception.__notes__)
+            )
+            manager.append_entries = original_append  # type: ignore[method-assign]
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual([m.role for m in reloaded.messages], ["user"])
+
+
+class TurnIndexTests(unittest.TestCase):
+    def test_turn_index_keeps_increasing_across_compaction(self) -> None:
+        from minibot.runtime.agent_session import AgentSession
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            llm = _SequenceLLM([LLMResponse(content=f"reply {i}") for i in range(4)])
+            loop, manager = build_loop(llm, _registry(), Path(tmpdir))
+            manager.create_session("s_test")
+            events: list[RuntimeEvent] = []
+            agent_session = AgentSession(
+                agent_loop=loop,
+                session_manager=manager,
+                base_event_handler=events.append,
+            )
+
+            for text in ("one", "two", "three"):
+                agent_session.prompt("s_test", text)
+
+            # Compact everything before the last turn away from the projection.
+            session = manager.load("s_test")
+            assert session is not None
+            last_user = [m for m in session.messages if m.role == "user"][-1]
+            entry = session.compact_with_summary(
+                "earlier turns", first_kept_entry_id=last_user.id
+            )
+            manager.append_entries("s_test", [entry])
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual(reloaded.turn_count(), 1)
+            self.assertEqual(reloaded.total_turn_count(), 3)
+
+            agent_session.prompt("s_test", "four")
+
+            self.assertEqual(
+                [e.payload["turn_index"] for e in events if e.type == "run.started"],
+                [1, 2, 3, 4],
             )
 
 

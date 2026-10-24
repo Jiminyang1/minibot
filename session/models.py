@@ -430,6 +430,18 @@ class Session:
         _, turns = self._split_preamble_and_turns()
         return len(turns)
 
+    def total_turn_count(self) -> int:
+        """Count user turns across all entries, compacted ones included.
+
+        ``turn_count`` sees only the projection, so it drops after a
+        compaction; this count only grows, which a turn index needs.
+        """
+        return sum(
+            1
+            for entry in self.entries
+            if entry.message is not None and entry.message.role == "user"
+        )
+
     def compact_with_summary(
         self,
         summary_text: str,

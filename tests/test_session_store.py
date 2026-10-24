@@ -186,6 +186,46 @@ class SessionStoreTests(unittest.TestCase):
             ).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(raw_lines), 4)
 
+    def test_closing_assistant_reply_completes_dangling_tool_block(self) -> None:
+        # A cancelled/failed turn is closed by an assistant reply right after
+        # its unanswered tool-call block; that reply must end the block too.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            session = manager.create_session("s_test")
+            session.add_message(MessageEvent.create(role="user", content="run tools"))
+            session.add_message(_tool_call_message("call_1", "call_2"))
+            session.add_message(
+                MessageEvent.create(role="assistant", content="本轮已被用户取消，请求未完成。")
+            )
+            manager.save(session)
+
+            reloaded = manager.load("s_test")
+
+            assert reloaded is not None
+            self.assertEqual(
+                [message.role for message in reloaded.messages],
+                ["user", "assistant", "tool", "tool", "assistant"],
+            )
+            for message, call_id in zip(reloaded.messages[2:4], ["call_1", "call_2"]):
+                self.assertEqual(message.tool_call_id, call_id)
+                self.assertEqual(json.loads(message.content)["code"], "interrupted")
+
+    def test_total_turn_count_includes_compacted_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            session = manager.create_session("s_test")
+            for text in ("one", "two", "three"):
+                session.add_message(MessageEvent.create(role="user", content=text))
+                session.add_message(
+                    MessageEvent.create(role="assistant", content=f"re: {text}")
+                )
+            last_user = session.messages[4]
+            session.compact_with_summary("earlier", first_kept_entry_id=last_user.id)
+
+            # The projection only shows the kept turn; the total does not shrink.
+            self.assertEqual(session.turn_count(), 1)
+            self.assertEqual(session.total_turn_count(), 3)
+
 
 def _tool_call_message(*call_ids: str) -> MessageEvent:
     return MessageEvent.create(
