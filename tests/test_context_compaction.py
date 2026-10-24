@@ -23,7 +23,12 @@ from minibot.runtime.messages import (
     session_message_to_model,
 )
 from minibot.runtime.token_budget import estimate_messages_tokens
-from minibot.session import MessageEvent, Session, SessionManager
+from minibot.session import (
+    MessageEvent,
+    Session,
+    SessionContextProjector,
+    SessionManager,
+)
 from minibot.tools.base import Tool, ToolExecutionContext
 from minibot.tools.registry import ToolRegistry
 from minibot.tools.result import ToolOutput
@@ -35,6 +40,10 @@ def _tool_call(name: str = "echo", arguments: str = "{}") -> dict[str, object]:
         "type": "function",
         "function": {"name": name, "arguments": arguments},
     }
+
+
+def _tokens(message: MessageEvent) -> int:
+    return estimate_messages_tokens([session_message_to_model(message)])
 
 
 class _DummyTool(Tool):
@@ -179,6 +188,35 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(preparation.turn_prefix_messages, [current_user])
         self.assertEqual(messages[preparation.first_kept_message_index], current_answer)
 
+    def test_cut_point_never_selects_projected_summary(self) -> None:
+        session = Session("s_test")
+        old_user = MessageEvent.create(role="user", content="old question")
+        old_answer = MessageEvent.create(role="assistant", content="a" * 400)
+        recent_user = MessageEvent.create(role="user", content="recent question")
+        recent_answer = MessageEvent.create(role="assistant", content="recent answer")
+        for message in (old_user, old_answer, recent_user, recent_answer):
+            session.add_message(message)
+        session.compact_with_summary("s " * 400, first_kept_entry_id=old_answer.id)
+        messages = list(session.messages)
+        self.assertTrue(SessionContextProjector.is_summary_message(messages[0]))
+        self.assertEqual(messages[1], old_answer)
+
+        # Planned from index 0 the summary, as a user message, would be the
+        # nearest turn start for the kept assistant reply.
+        keep_recent_tokens = sum(_tokens(message) for message in messages[1:])
+        preparation = prepare_compaction(messages, keep_recent_tokens)
+
+        assert preparation is not None
+        self.assertEqual(preparation.first_kept_message_index, 1)
+        self.assertFalse(preparation.is_split_turn)
+        self.assertEqual(preparation.turn_prefix_messages, [])
+
+        # Even with the whole projection over the target the summary is skipped.
+        everything = sum(_tokens(message) for message in messages)
+        cut = find_cut_point(messages, everything)
+        self.assertGreater(cut, 0)
+        self.assertFalse(SessionContextProjector.is_summary_message(messages[cut]))
+
     def test_summary_serialization_truncates_tool_results(self) -> None:
         message = MessageEvent.create(
             role="tool",
@@ -275,7 +313,7 @@ class ContextCompactionTests(unittest.TestCase):
             self.assertEqual(harness.session.entries[-1].type, "compaction")
             self.assertIsNotNone(harness.session.entries[-1].first_kept_entry_id)
             self.assertIn(
-                "[Summary of earlier conversation]\nsummary",
+                "<conversation-summary>\nsummary\n</conversation-summary>",
                 [msg.content for msg in harness.session.messages],
             )
             # Persistence happens inside reduce — no pending state to flush.
@@ -410,6 +448,45 @@ class ContextCompactionTests(unittest.TestCase):
                 "<modified-files>\na.py\nb.py\n</modified-files>", latest.summary or ""
             )
 
+    def test_second_compaction_merges_previous_summary_not_its_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seen_requests: list[SummaryRequest] = []
+            summaries = iter(["first summary", "second summary"])
+            harness = _Harness(
+                Path(tmpdir),
+                summarizer=lambda request: seen_requests.append(request)
+                or next(summaries),
+            )
+            harness.add(
+                MessageEvent.create(role="user", content="one " * 2000),
+                MessageEvent.create(role="assistant", content="answer one"),
+                MessageEvent.create(role="user", content="two " * 2000),
+                MessageEvent.create(role="assistant", content="answer two"),
+                MessageEvent.create(role="user", content="three"),
+            )
+            harness.compactor.reduce(harness.session, tokens_before=10000)
+            harness.add(
+                MessageEvent.create(role="assistant", content="answer three"),
+                MessageEvent.create(role="user", content="four"),
+            )
+
+            harness.compactor.compact_now(harness.session)
+
+            self.assertEqual(len(seen_requests), 2)
+            self.assertEqual(seen_requests[1].previous_summary, "first summary")
+            self.assertNotIn(
+                "<conversation-summary>",
+                "\n".join(message.content for message in seen_requests[1].messages),
+            )
+            latest = harness.session.entries[-1]
+            self.assertEqual(latest.type, "compaction")
+            entry_ids = {entry.id for entry in harness.session.entries}
+            self.assertIn(latest.first_kept_entry_id, entry_ids)
+            head = harness.session.messages[0]
+            self.assertTrue(SessionContextProjector.is_summary_message(head))
+            self.assertIn("second summary", head.content)
+            self.assertEqual(harness.session.messages[1].role, "user")
+
     def test_read_artifact_file_result_updates_read_file_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             harness = _Harness(Path(tmpdir))
@@ -476,7 +553,7 @@ class ContextCompactionTests(unittest.TestCase):
                 ["new prefix"],
             )
             self.assertNotIn(
-                "Summary of earlier conversation",
+                "<conversation-summary>",
                 seen_requests[0].messages[0].content,
             )
             self.assertIn("updated summary", summary)

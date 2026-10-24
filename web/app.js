@@ -155,7 +155,16 @@ function renderEmptyConversation(text = "empty") {
 }
 
 function messageLabel(message) {
-  return message.role;
+  return isSummaryMessage(message) ? "summary" : message.role;
+}
+
+// The projection injects the compaction summary as a synthetic user message.
+function isSummaryMessage(message) {
+  return (
+    message.role === "user" &&
+    String(message.id || "").endsWith("_summary") &&
+    messageContent(message).startsWith("<conversation-summary>\n")
+  );
 }
 
 function messageContent(message) {
@@ -194,7 +203,19 @@ function appendMessage(message) {
   const content = document.createElement("div");
   content.className = "message-content";
   const text = messageContent(message);
-  if (message.role === "assistant") {
+  if (isSummaryMessage(message)) {
+    row.className = "message summary";
+    const details = document.createElement("details");
+    const label = document.createElement("summary");
+    label.textContent = "earlier conversation (compacted)";
+    const body = document.createElement("div");
+    body.className = "markdown";
+    body.innerHTML = renderMarkdown(
+      text.replace(/^<conversation-summary>\n/, "").replace(/\n<\/conversation-summary>$/, ""),
+    );
+    details.append(label, body);
+    content.append(details);
+  } else if (message.role === "assistant") {
     content.classList.add("markdown");
     content.innerHTML = renderMarkdown(text);
 

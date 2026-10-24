@@ -142,6 +142,25 @@ class SkillCatalogTests(unittest.TestCase):
             )
             self.assertEqual(session.messages[-1].content, "now?")
 
+    def test_time_stamp_skips_the_projected_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            builder = _make_context_builder(
+                registry=SkillRegistry.from_directory(Path(tmpdir)),
+                tool_registry=ToolRegistry(),
+                now_provider=lambda: datetime(2026, 4, 23, 13, 2, tzinfo=timezone.utc),
+            )
+            session = Session("s_test")
+            session.add_message(MessageEvent.create(role="user", content="old"))
+            session.add_message(MessageEvent.create(role="assistant", content="ok"))
+            # Keep nothing: the summary becomes the only user message.
+            session.compact_with_summary("earlier work", first_kept_entry_id=None)
+
+            messages = builder.build(session.messages).messages
+
+            self.assertEqual(messages[1].role, "user")
+            self.assertTrue(messages[1].content.startswith("<conversation-summary>\n"))
+            self.assertNotIn("当前本地时间", messages[1].content)
+
     def test_memory_context_uses_date_free_ids_after_time_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)

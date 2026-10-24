@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..prompts import MEMORY_INSTRUCTIONS
+from ..session.models import SessionContextProjector
 from ..skills import SkillRegistry
 from ..tools.definitions import ModelToolDefinition
 from ..tools.registry import ToolRegistry
@@ -166,9 +167,14 @@ class ContextBuilder:
         tail sits after the stamp, so a changing clock costs at most one
         turn of prompt cache instead of the whole conversation.
         """
+        summary_head = SessionContextProjector.SUMMARY_OPEN_TAG + "\n"
         for index in range(len(history) - 1, -1, -1):
             message = history[index]
             if message.role != "user":
+                continue
+            # The projected summary is not a user turn; stamping it would
+            # change the request's first message every minute.
+            if message.content.startswith(summary_head):
                 continue
             weekday = self._WEEKDAY_NAMES[current.weekday()]
             stamp = (

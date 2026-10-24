@@ -8,7 +8,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.session import MessageEvent, SessionEntry, SessionManager
+from minibot.session import (
+    MessageEvent,
+    Session,
+    SessionContextProjector,
+    SessionEntry,
+    SessionManager,
+)
 from minibot.runtime.messages import model_message_to_openai, session_message_to_model
 
 
@@ -102,8 +108,13 @@ class SessionStoreTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(
                 [message.content for message in reloaded.messages],
-                ["[Summary of earlier conversation]\nold summary"],
+                ["<conversation-summary>\nold summary\n</conversation-summary>"],
             )
+            summary = reloaded.messages[0]
+            self.assertEqual(summary.role, "user")
+            self.assertEqual(summary.id, f"{compaction.id}_summary")
+            self.assertEqual(summary.created_at, compaction.created_at)
+            self.assertTrue(SessionContextProjector.is_summary_message(summary))
             raw_lines = (
                 workspace / "sessions" / "s_test" / "messages.jsonl"
             ).read_text(encoding="utf-8").splitlines()
@@ -225,6 +236,41 @@ class SessionStoreTests(unittest.TestCase):
             # The projection only shows the kept turn; the total does not shrink.
             self.assertEqual(session.turn_count(), 1)
             self.assertEqual(session.total_turn_count(), 3)
+
+    def test_projected_summary_is_preamble_not_a_turn(self) -> None:
+        session = Session("s_test")
+        for text in ("one", "two"):
+            session.add_message(MessageEvent.create(role="user", content=text))
+            session.add_message(
+                MessageEvent.create(role="assistant", content=f"re: {text}")
+            )
+        last_user = session.messages[2]
+        session.compact_with_summary("earlier", first_kept_entry_id=last_user.id)
+
+        preamble, turns = session._split_preamble_and_turns()
+
+        # Summary then the kept user message: two user messages in a row.
+        self.assertEqual(
+            [message.role for message in session.messages],
+            ["user", "user", "assistant"],
+        )
+        self.assertEqual([m.id for m in preamble], [session.messages[0].id])
+        self.assertEqual(len(turns), 1)
+        self.assertIs(turns[0][0], last_user)
+        self.assertEqual(session.turn_count(), 1)
+
+        # A summary with nothing kept leaves no turn at all.
+        session.compact_with_summary("everything", first_kept_entry_id=None)
+        self.assertEqual(len(session.messages), 1)
+        self.assertEqual(session.turn_count(), 0)
+        self.assertEqual(session.total_turn_count(), 2)
+
+    def test_real_user_message_is_not_mistaken_for_summary(self) -> None:
+        tagged = MessageEvent.create(
+            role="user",
+            content="<conversation-summary>\npasted\n</conversation-summary>",
+        )
+        self.assertFalse(SessionContextProjector.is_summary_message(tagged))
 
 
 def _tool_call_message(*call_ids: str) -> MessageEvent:

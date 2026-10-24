@@ -242,6 +242,10 @@ class SessionEntry:
 class SessionContextProjector:
     """Project append-only session entries into model-visible messages."""
 
+    SUMMARY_ID_SUFFIX = "_summary"
+    SUMMARY_OPEN_TAG = "<conversation-summary>"
+    SUMMARY_CLOSE_TAG = "</conversation-summary>"
+
     @classmethod
     def project_messages(cls, entries: list[SessionEntry]) -> list[MessageEvent]:
         latest_compaction_index = cls._latest_compaction_index(entries)
@@ -251,15 +255,7 @@ class SessionContextProjector:
             )
 
         compaction = entries[latest_compaction_index]
-        projected: list[MessageEvent] = [
-            MessageEvent(
-                id=f"{compaction.id}_summary",
-                role="assistant",
-                content="[Summary of earlier conversation]\n"
-                + (compaction.summary or "").strip(),
-                created_at=compaction.created_at,
-            )
-        ]
+        projected: list[MessageEvent] = [cls._summary_message(compaction)]
         projected.extend(cls._kept_messages_before(entries, latest_compaction_index))
         projected.extend(
             entry.message
@@ -267,6 +263,31 @@ class SessionContextProjector:
             if entry.message is not None
         )
         return cls._filter_incomplete_tool_transactions(projected)
+
+    @classmethod
+    def is_summary_message(cls, message: MessageEvent) -> bool:
+        """True for the synthetic summary message that heads a compacted projection."""
+        return (
+            message.role == "user"
+            and str(message.id).endswith(cls.SUMMARY_ID_SUFFIX)
+            and message.content.startswith(cls.SUMMARY_OPEN_TAG + "\n")
+        )
+
+    @classmethod
+    def _summary_message(cls, compaction: SessionEntry) -> MessageEvent:
+        # A user message, not an assistant one: the summary quotes tool output
+        # and earlier turns, and the model must not read it as its own words.
+        # It is context, not a turn; see is_summary_message.
+        return MessageEvent(
+            id=f"{compaction.id}{cls.SUMMARY_ID_SUFFIX}",
+            role="user",
+            content=(
+                f"{cls.SUMMARY_OPEN_TAG}\n"
+                f"{(compaction.summary or '').strip()}\n"
+                f"{cls.SUMMARY_CLOSE_TAG}"
+            ),
+            created_at=compaction.created_at,
+        )
 
     @staticmethod
     def _latest_compaction_index(entries: list[SessionEntry]) -> int | None:
@@ -465,12 +486,19 @@ class Session:
     def _split_preamble_and_turns(
         self,
     ) -> tuple[list[MessageEvent], list[list[MessageEvent]]]:
-        """Split leading non-user context from user-anchored turns."""
+        """Split leading non-user context from user-anchored turns.
+
+        The compaction summary is a user message but not a user turn, so it
+        stays in the preamble.
+        """
         preamble: list[MessageEvent] = []
         turns: list[list[MessageEvent]] = []
         current_turn: list[MessageEvent] | None = None
 
         for message in self.messages:
+            if SessionContextProjector.is_summary_message(message):
+                preamble.append(message)
+                continue
             if message.role == "user":
                 if current_turn:
                     turns.append(current_turn)
