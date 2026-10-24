@@ -53,6 +53,7 @@ class Config:
     compact_token_threshold: int | None = None
     compact_keep_recent_tokens: int = 16000
     llm_max_retries: int = 3
+    fetch_via_jina: bool = False
 
     def __post_init__(self) -> None:
         if self.approval_mode not in {"ask", "always"}:
@@ -158,7 +159,20 @@ class Config:
                 cls.compact_keep_recent_tokens,
             ),
             llm_max_retries=_get_int("MINIBOT_LLM_MAX_RETRIES", cls.llm_max_retries),
+            fetch_via_jina=_get_flag("MINIBOT_FETCH_VIA_JINA", cls.fetch_via_jina),
         )
+
+
+def _get_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 1/0、true/false、yes/no 或 on/off。")
 
 
 def _get_approval_mode() -> ApprovalMode:

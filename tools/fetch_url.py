@@ -224,10 +224,18 @@ class FetchUrlTool(Tool):
         "text/plain",
     }
 
-    def __init__(self, *, allow_private_hosts: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_private_hosts: bool = False,
+        use_jina: bool = False,
+    ) -> None:
         super().__init__(workspace=None)
         # Only tests that serve pages from a local HTTP server turn this on.
         self._allow_private_hosts = allow_private_hosts
+        # Opt-in: the Jina reader extracts text better, but it sends every
+        # fetched URL to a third party (r.jina.ai).
+        self._use_jina = use_jina
 
     @property
     def name(self) -> str:
@@ -287,7 +295,7 @@ class FetchUrlTool(Tool):
             return self._blocked_output(normalized, exc)
 
         page = self._fetch_google_news_rss(normalized)
-        if page is None:
+        if page is None and self._use_jina:
             page = self._fetch_via_jina(normalized)
         if page is None:
             try:

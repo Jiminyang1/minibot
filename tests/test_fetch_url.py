@@ -139,8 +139,8 @@ class FetchUrlPublicHostTests(unittest.TestCase):
         self._assert_blocked(result, url)
         self.assertEqual(result.data["blocked_url"], target)
         self.assertNotIn(target, web.requests)
-        # Jina was tried (and failed), then exactly one direct hop.
-        self.assertEqual(web.requests[-1], url)
+        # Exactly one direct hop; the redirect target is never requested.
+        self.assertEqual(web.requests, [url])
 
     def test_redirect_to_hostname_resolving_privately_is_rejected(self) -> None:
         url = "http://public.example/start"
@@ -167,7 +167,7 @@ class FetchUrlPublicHostTests(unittest.TestCase):
             },
         )
 
-        result = self._run(web, url)
+        result = self._run(web, url, tool=FetchUrlTool(use_jina=True))
 
         self.assertTrue(result.ok, result.summary)
         self.assertEqual(result.data["final_url"], final)
@@ -177,6 +177,20 @@ class FetchUrlPublicHostTests(unittest.TestCase):
         self.assertIn("hello world", result.content or "")
         self.assertTrue(web.requests[0].startswith("https://r.jina.ai/"))
         self.assertEqual(web.requests[1:], [url, final])
+
+    def test_jina_is_off_by_default(self) -> None:
+        url = "http://public.example/article"
+        html = b"<html><head><title>Public Page</title></head><body><p>hello</p></body></html>"
+        web = _FakeWeb(
+            dns={"public.example": ["93.184.216.34"]},
+            pages={url: lambda u: _response(u, 200, {"Content-Type": "text/html"}, html)},
+        )
+
+        result = self._run(web, url)
+
+        self.assertTrue(result.ok, result.summary)
+        # The URL never leaves for the third-party reader.
+        self.assertEqual(web.requests, [url])
 
     def test_unresolvable_host_fails_before_direct_fetch(self) -> None:
         url = "http://nowhere.example/"
