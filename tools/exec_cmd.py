@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import signal
 import subprocess
+import time
 from typing import Any
 
 from .base import Tool, ToolExecutionContext
@@ -34,6 +36,10 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _BASH = shutil.which("bash")
 # Under pipefail, `producer | head` exits 128+SIGPIPE once head stops reading.
 _SIGPIPE_EXIT = 128 + signal.SIGPIPE
+# How often the wait loop wakes up to check cancel and the deadline.
+_POLL_INTERVAL = 0.1
+# Time the process group gets between SIGTERM and SIGKILL.
+_KILL_GRACE = 0.5
 
 
 def _check_dangerous(command: str) -> str | None:
@@ -42,6 +48,32 @@ def _check_dangerous(command: str) -> str | None:
         if pattern.search(command):
             return label
     return None
+
+
+def _stop_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the command and everything it spawned (SIGTERM, then SIGKILL)."""
+    if not hasattr(os, "killpg"):
+        proc.kill()
+        return
+    # start_new_session made bash a group leader, so its pid is the pgid.
+    pgid = proc.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + _KILL_GRACE
+    while time.monotonic() < deadline:
+        # Reap bash so its zombie does not keep the group alive.
+        proc.poll()
+        try:
+            os.killpg(pgid, 0)
+        except OSError:
+            return
+        time.sleep(0.02)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def _preview_text(text: str, limit: int) -> tuple[str, bool]:
@@ -98,7 +130,6 @@ class ExecTool(Tool):
         command: str,
         **kwargs: Any,
     ) -> ToolOutput:
-        del context
         danger = _check_dangerous(command)
         if danger:
             return ToolOutput.failure(
@@ -106,29 +137,69 @@ class ExecTool(Tool):
                 "命令被安全策略拒绝执行。",
                 data={"command": command, "reason": danger},
             )
-        try:
-            result = subprocess.run(
-                [_BASH, "-o", "pipefail", "-c", command] if _BASH else command,
-                shell=_BASH is None, capture_output=True, text=True,
-                timeout=self._TIMEOUT,
-                cwd=self._workspace,
-            )
-        except subprocess.TimeoutExpired:
+        # Own session/process group: on timeout or cancel we kill the whole
+        # group, not just bash, so `sleep 100; echo x` leaves nothing behind.
+        proc = subprocess.Popen(
+            [_BASH, "-o", "pipefail", "-c", command] if _BASH else command,
+            shell=_BASH is None, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=self._workspace,
+            start_new_session=True,
+        )
+        cancel_event = context.cancel_event
+        deadline = time.monotonic() + self._TIMEOUT
+        stopped: str | None = None
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=_POLL_INTERVAL)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if cancel_event is not None and cancel_event.is_set():
+                stopped = "interrupted"
+                break
+            if time.monotonic() >= deadline:
+                stopped = "timeout"
+                break
+
+        if stopped is not None:
+            _stop_process_group(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                # Something outside the group still holds the pipes.
+                proc.kill()
+                proc.wait()
+                stdout, stderr = "", ""
+            data: dict[str, Any] = {"command": command}
+            if stopped == "timeout":
+                data["timeout_seconds"] = self._TIMEOUT
+            if stdout:
+                data["stdout_preview"] = _preview_text(stdout, self._PREVIEW_CHARS)[0]
+            if stderr:
+                data["stderr_preview"] = _preview_text(stderr, self._PREVIEW_CHARS)[0]
+            if stopped == "timeout":
+                return ToolOutput.failure(
+                    "timeout",
+                    f"命令执行超过 {self._TIMEOUT} 秒，已终止。",
+                    data=data,
+                )
             return ToolOutput.failure(
-                "timeout",
-                f"命令执行超过 {self._TIMEOUT} 秒，已终止。",
-                data={"command": command, "timeout_seconds": self._TIMEOUT},
+                "interrupted",
+                "命令已被用户中断。",
+                data=data,
             )
 
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
+        returncode = proc.returncode
+        stdout = stdout or ""
+        stderr = stderr or ""
         stdout_preview, stdout_truncated = _preview_text(stdout, self._PREVIEW_CHARS)
         stderr_preview, stderr_truncated = _preview_text(stderr, self._PREVIEW_CHARS)
         truncated = stdout_truncated or stderr_truncated
 
         data: dict[str, Any] = {
             "command": command,
-            "exit_code": result.returncode,
+            "exit_code": returncode,
         }
         if stdout_truncated:
             data["stdout_preview"] = stdout_preview
@@ -143,16 +214,16 @@ class ExecTool(Tool):
         if truncated:
             full_output = (
                 f"$ {command}\n"
-                f"[exit_code] {result.returncode}\n\n"
+                f"[exit_code] {returncode}\n\n"
                 "[stdout]\n"
                 f"{stdout}\n\n"
                 "[stderr]\n"
                 f"{stderr}"
             )
 
-        if result.returncode == _SIGPIPE_EXIT:
+        if returncode == _SIGPIPE_EXIT:
             return ToolOutput.success(
-                f"命令已执行，退出码 {result.returncode}"
+                f"命令已执行，退出码 {returncode}"
                 "（管道下游提前停止读取，上游收到 SIGPIPE，通常无害）。",
                 data=data,
                 truncated=truncated,
@@ -161,10 +232,10 @@ class ExecTool(Tool):
                 content_name="exec_output",
             )
 
-        if result.returncode != 0:
+        if returncode != 0:
             return ToolOutput.failure(
                 "error",
-                f"命令执行失败，退出码 {result.returncode}。",
+                f"命令执行失败，退出码 {returncode}。",
                 data=data,
                 truncated=truncated,
                 content=full_output,
@@ -173,7 +244,7 @@ class ExecTool(Tool):
             )
 
         return ToolOutput.success(
-            f"命令已执行，退出码 {result.returncode}。",
+            f"命令已执行，退出码 {returncode}。",
             data=data,
             truncated=truncated,
             content=full_output,
