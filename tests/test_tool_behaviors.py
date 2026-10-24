@@ -207,7 +207,7 @@ class ToolBehaviorTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                tool = FetchUrlTool()
+                tool = FetchUrlTool(allow_private_hosts=True)
                 result = self._materialize(
                     workspace,
                     context,
@@ -327,7 +327,7 @@ class ToolBehaviorTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                tool = FetchUrlTool()
+                tool = FetchUrlTool(allow_private_hosts=True)
                 result = self._materialize(
                     workspace,
                     context,
