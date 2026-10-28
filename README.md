@@ -16,6 +16,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
 - Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
 - Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint). Once web pages, search results or MCP output are in a session, `remember` and `fetch_url` to a URL nobody showed also ask, so injected text cannot quietly persist or send data out
+- Quality loop: golden evals scored per stage (pytest, Langfuse dataset replay, LLM-as-judge) and a lessons loop that mines failures, drafts fixes for human review and retrieves approved ones
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
 
@@ -132,6 +133,8 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `mcp_servers/` | Bundled SQLite / macOS MCP servers |
 | `skills/` | Skill metadata and Markdown bodies |
 | `user_memory.py` | Global long-term memory |
+| `evals/` | Golden evals: sandbox, per-stage scoring, Langfuse dataset, pytest suite, trace promotion |
+| `lessons/` | Lessons loop: mining, clustering, drafting, review, retrieval |
 | `cli.py` / `server.py` | CLI and Web entry points |
 
 ## Configuration
@@ -156,6 +159,8 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | reasoning-field passthrough (DeepSeek etc.) |
 | `MINIBOT_STREAMING` | `auto` | set `0`/`off` to disable streaming (for endpoints with broken SSE) |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
+| `MINIBOT_LESSONS` | `auto` | `auto` (on when fastembed is installed and a lesson is approved) / `on` / `off` |
+| `MINIBOT_LESSONS_TOP_K` / `MINIBOT_LESSONS_MIN_SCORE` | `3` / `0.55` | most lessons per request / cosine floor |
 | `MINIBOT_FETCH_VIA_JINA` | `0` | `1` lets `fetch_url` try the Jina reader (`r.jina.ai`) first; better text extraction, but every fetched URL goes to that third party |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | setting both enables Langfuse tracing (one trace per turn: full requests, tools, approvals, compaction) |
 | `LANGFUSE_BASE_URL` | EU cloud | Langfuse endpoint: your signup region, or a self-hosted URL |
@@ -200,6 +205,33 @@ uv run minibot-daemon    # resident process; single-instance lock
 - Manage with `/tasks`, `/tasks cancel <id>`, or plain natural language
 
 **Heartbeat**: cron executes a fixed instruction on time; heartbeat wakes up and decides for itself. Say "patrol every 30 minutes" to create one (`schedule_task` with `heartbeat` mode): on each beat it reviews the `~/.minibot/HEARTBEAT.md` checklist (inlined into the prompt) inside **one persistent session**, does what needs doing, and replies `HEARTBEAT_OK` to stay silent when nothing needs you — notifications fire only when something does. The checklist is plain Markdown (`#` lines are comments); the ever-growing session is kept in check by automatic compaction.
+
+## Quality loop: evals and lessons
+
+Two halves that check each other. Evals measure the agent; lessons change it; evals then measure whether the lessons helped.
+
+**Golden evals** (`evals/`). Cases live in `evals/cases.json`, mirrored to the Langfuse dataset `minibot-golden`. Each case runs one sandboxed turn and is scored per stage: skill selection → tool selection → tool arguments → answer (LLM-as-judge) → outcome.
+
+```bash
+uv run python -m minibot.evals run                    # every case; prints the first failing stage per case + trace URL
+uv run python -m minibot.evals pytest -k tool_args    # pytest, one test per (case, stage); replays the Langfuse dataset
+uv run python -m minibot.evals traces --failed        # recent real runs that went wrong
+uv run python -m minibot.evals promote <trace_id>     # turn a real run into a case: recorded tool outputs replay in the sandbox
+uv run python -m minibot.evals run --lessons compare  # same cases with lessons off and on: pass rates, flips, calls/tokens/latency
+```
+
+The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.
+
+**Lessons** (`lessons/`, needs `uv sync --extra lessons`). A lesson is a human-approved rule: *when* <trigger>, *do* <guidance>.
+
+```bash
+uv run python -m minibot.lessons mine --dry-run   # failures found in sessions and runs.jsonl, clustered
+uv run python -m minibot.lessons mine             # the LLM drafts one lesson per cluster
+uv run python -m minibot.lessons review           # approve / edit / reject each draft
+uv run python -m minibot.lessons list --status approved
+```
+
+Mining reads failed tool calls, failed or exhausted turns, denied approvals and user corrections ("不对", "wrong"). Incidents are clustered with a local embedding model (`BAAI/bge-small-zh-v1.5`, about 90 MB, cached under `~/.minibot/models`); no data leaves the machine and there is no vector database. At request time, approved lessons whose trigger or evidence requests match the latest user message are appended to that message (never the system prompt, which would break prompt caching), and `model.request.started` names them. Only approved lessons are ever injected: drafts are mined from tool output and web text, so the review step is also the prompt-injection gate.
 
 ## CLI commands
 
