@@ -15,7 +15,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Progressive skill disclosure (L1 metadata resident in the system prompt, L2 body on demand via `read_skill`)
 - Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
 - Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
-- Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint). Once web pages, search results or MCP output are in a session, `remember` and `fetch_url` to a URL nobody showed also ask, so injected text cannot quietly persist or send data out
+- Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint). Once web pages, search results or MCP output are in a session, `remember` and `fetch_url` to a URL that no user message or untrusted tool result showed also ask, so injected text cannot quietly persist or send data out
 - Quality loop: golden evals scored per stage (pytest, Langfuse dataset replay, LLM-as-judge) and an experimental lessons loop that mines failures, drafts fixes for human review and retrieves approved ones
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config

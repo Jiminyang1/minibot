@@ -258,7 +258,7 @@ class DraftFromTraceTests(unittest.TestCase):
             )
 
         system = "当前工作目录: /work/proj\n- id: mem_3; fact: 喜欢咖啡\n- id: mem_7; fact: 住在上海"
-        request = [{"role": "system", "content": system}, {"role": "user", "content": "q\n[当前本地时间 2026-10-01 10:00 星期四]"}]
+        request = [{"role": "system", "content": system}, {"role": "user", "content": "q\n\n[发送时间 2026-10-01 10:00 星期四 UTC+08:00]"}]
         envelope = {"ok": True, "code": "success", "summary": "", "data": {"content": "x"}, "truncated": False}
         rows = [
             obs("a", "AGENT", "minibot.turn", parent=None, input="q", level="ERROR"),
@@ -345,6 +345,15 @@ class PromoteCommandTests(unittest.TestCase):
         # The real cases.json is untouched.
         self.assertNotIn("mom-call", {c["id"] for c in load_cases()})
 
+
+
+class RunDateLabelTests(unittest.TestCase):
+    def test_both_stamp_labels_give_the_run_day(self) -> None:
+        from minibot.evals.promote import _LOCAL_DATE_RE
+
+        for text in ("q\n\n[发送时间 2026-10-01 10:00 星期四 UTC+08:00]", "q\n\n[当前本地时间 2026-10-01 10:00 星期四]"):
+            with self.subTest(text=text):
+                self.assertEqual(_LOCAL_DATE_RE.search(text).group(1), "2026-10-01")
 
 if __name__ == "__main__":
     unittest.main()

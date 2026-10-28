@@ -40,7 +40,9 @@ _REPLAYED = {"exec", "web_search", "fetch_url"}
 _NOT_REQUIRED = {"read_skill", "read_artifact"}
 _MEMORY_RE = re.compile(r"^- id: (mem_(\d+)); fact: (.*)$", re.MULTILINE)
 _WORKSPACE_RE = re.compile(r"当前工作目录:\s*(\S+)")
-_LOCAL_DATE_RE = re.compile(r"当前本地时间\D*(\d{4}-\d{2}-\d{2})")
+# "[发送时间 …]" on every user message; older traces have "[当前本地时间 …]"
+# on the latest one only. Either way the latest user message holds the day.
+_LOCAL_DATE_RE = re.compile(r"(?:发送时间|当前本地时间)\D*(\d{4}-\d{2}-\d{2})")
 _ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}):(\d{2}))?")
 _MAX_CONTAINS_CHARS = 40
 _NEVER = datetime.min.replace(tzinfo=UTC)

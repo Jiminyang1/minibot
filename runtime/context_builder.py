@@ -82,10 +82,10 @@ class ContextBuilder:
             for message in history_messages
         ]
         now = self._local_now()
-        # Lessons first, the time stamp last: both are request-only tails on
-        # the same message, and the stamp must stay the very last thing.
+        # Lessons first, send times last: both are request-only tails, and on
+        # the latest user message the stamp must stay the very last thing.
         history, lesson_ids = self._attach_lessons(history)
-        history = self._stamp_latest_user_message(history, now)
+        history = self._stamp_user_messages(history_messages, history, now)
         memory_block, memory_tokens = self._render_memory_block()
         system_prompt = self._build_system_prompt(
             memory_block,
@@ -154,8 +154,8 @@ class ContextBuilder:
     def _render_time_context_block(self, current: datetime) -> str:
         # Day-level only: the system prompt heads every request, so anything
         # finer would change the prefix on every call and defeat the
-        # provider's prompt cache. The exact time rides on the latest user
-        # message instead (see _stamp_latest_user_message).
+        # provider's prompt cache. Minute-level times ride on the user
+        # messages instead (see _stamp_user_messages).
         tz_name = current.tzname() or "local"
         weekday = self._WEEKDAY_NAMES[current.weekday()]
 
@@ -165,31 +165,57 @@ class ContextBuilder:
             f"- today_local: {current.date().isoformat()}",
             f"- weekday_local: {weekday}",
             f"- timezone_local: {tz_name} (UTC{self._utc_offset(current)})",
-            "精确到分钟的当前时间附在最新一条用户消息末尾的 [当前本地时间 …] 标注里；它由系统添加，不是用户输入。",
+            "每条用户消息末尾的 [发送时间 …] 标注是这条消息发出时的本地时间（精确到分钟），最新一条的发送时间就是当前时间；标注由系统添加，不是用户输入。",
             "如果用户的问题依赖相对日期或时间，先用这些值锚定，再决定是否调用日历、提醒事项或其他工具。",
         ]
         return "\n".join(lines)
 
-    def _stamp_latest_user_message(
+    def _stamp_user_messages(
         self,
+        events: list[MessageEvent],
         history: list[ModelMessage],
         current: datetime,
     ) -> list[ModelMessage]:
-        """Append the minute-level local time to the latest user message.
+        """Append each user message's own send time, to the minute.
 
-        Request-only: the session keeps the original text. Only this turn's
-        tail sits after the stamp, so a changing clock costs at most one
-        turn of prompt cache instead of the whole conversation.
+        Request-only: the session keeps the original text. Each stamp comes
+        from the message's ``created_at``, so a message reads the same in
+        every request: nothing earlier in the conversation changes when the
+        clock moves or a new turn starts, and the provider's prompt cache
+        holds for the whole conversation. The latest stamp is the current
+        time, within the length of one turn.
         """
-        index = self._latest_user_index(history)
-        if index is None:
-            return history
-        weekday = self._WEEKDAY_NAMES[current.weekday()]
-        stamp = (
-            f"[当前本地时间 {current.strftime('%Y-%m-%d %H:%M')} "
-            f"{weekday} UTC{self._utc_offset(current)}]"
-        )
-        return self._append_to_message(history, index, stamp)
+        stamped = list(history)
+        for index, event in enumerate(events):
+            if event.role != "user":
+                continue
+            # The projected summary is not a user turn and has no send time.
+            if SessionContextProjector.is_summary_message(event):
+                continue
+            sent = self._sent_time(event.created_at, current)
+            if sent is None:
+                continue
+            weekday = self._WEEKDAY_NAMES[sent.weekday()]
+            stamp = (
+                f"[发送时间 {sent.strftime('%Y-%m-%d %H:%M')} "
+                f"{weekday} UTC{self._utc_offset(sent)}]"
+            )
+            stamped[index] = replace(
+                stamped[index], content=f"{stamped[index].content}\n\n{stamp}"
+            )
+        return stamped
+
+    @staticmethod
+    def _sent_time(created_at: str | None, current: datetime) -> datetime | None:
+        if not created_at:
+            return None
+        try:
+            sent = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if sent.tzinfo is None:
+            return None
+        return sent.astimezone(current.tzinfo)
 
     def _attach_lessons(
         self,
@@ -235,8 +261,8 @@ class ContextBuilder:
             message = history[index]
             if message.role != "user":
                 continue
-            # The projected summary is not a user turn; appending to it would
-            # change the request's first message every minute.
+            # The projected summary is not a user turn; lessons appended to it
+            # would change the request's first message with every question.
             if message.content.startswith(summary_head):
                 continue
             return index

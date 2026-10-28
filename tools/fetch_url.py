@@ -7,7 +7,13 @@ from html.parser import HTMLParser
 import ipaddress
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 import json
 import re
 import socket
@@ -309,6 +315,13 @@ class FetchUrlTool(Tool):
                 "抓取失败: 请输入有效的 http/https URL。",
                 data={"url": normalized},
             )
+        if parsed.username is not None or parsed.password is not None:
+            # A URL is the one thing a fetcher sends out; credentials in it
+            # are either a mistake or someone exporting them.
+            return ToolOutput.failure(
+                "permission_denied",
+                "[安全拦截] URL 里带有账号或密码，已拒绝抓取。",
+            )
 
         # fetch_url needs no approval, so a prompt-injected URL must not reach
         # loopback, the LAN or cloud metadata. Check before any request.
@@ -502,7 +515,9 @@ class FetchUrlTool(Tool):
                 "Accept": "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.1",
             },
         )
-        opener = build_opener(_GuardedRedirectHandler(self))
+        # ProxyHandler({}): no system proxy. A proxy resolves the host itself,
+        # so the address checked above would not be the one connected to.
+        opener = build_opener(ProxyHandler({}), _GuardedRedirectHandler(self))
         with opener.open(request, timeout=self._TIMEOUT) as response:
             status_code = getattr(response, "status", None) or response.getcode()
             final_url = response.geturl()

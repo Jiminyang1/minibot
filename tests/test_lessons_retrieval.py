@@ -162,16 +162,22 @@ class ContextInjectionTests(unittest.TestCase):
             MessageEvent.create(role="assistant", content="好的"),
             MessageEvent.create(role="user", content="读取文件内容 a.txt"),
         ]
+        history[0].created_at = "2026-10-27T01:20:00Z"
+        history[2].created_at = "2026-10-27T01:30:00Z"
         built = self._builder(self.retriever).build(history)
         file_id = next(item.id for item in self.store.list() if item.trigger == _FILE_TRIGGER)
         self.assertEqual(built.lesson_ids, (file_id,))
         latest = built.messages[-1].content
         self.assertTrue(latest.startswith("读取文件内容 a.txt\n\n[相关经验"))
         self.assertIn(f"- {file_id} 情境: {_FILE_TRIGGER}；做法: 先确认路径", latest)
-        self.assertTrue(latest.endswith("[当前本地时间 2026-10-27 09:30 星期二 UTC+08:00]"))
-        self.assertLess(latest.index("[相关经验"), latest.index("[当前本地时间"))
-        # Request-only: earlier turns, the system prompt and the session stay clean.
-        self.assertEqual(built.messages[1].content, "发送邮件给小王")
+        self.assertTrue(latest.endswith("[发送时间 2026-10-27 09:30 星期二 UTC+08:00]"))
+        self.assertLess(latest.index("[相关经验"), latest.index("[发送时间"))
+        # Request-only: earlier turns get only their own send time, the system
+        # prompt and the session stay clean.
+        self.assertEqual(
+            built.messages[1].content,
+            "发送邮件给小王\n\n[发送时间 2026-10-27 09:20 星期二 UTC+08:00]",
+        )
         self.assertNotIn("相关经验", built.messages[0].content)
         self.assertEqual(history[-1].content, "读取文件内容 a.txt")
 
