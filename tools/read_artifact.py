@@ -37,6 +37,11 @@ class ReadArtifactTool(Tool):
         return True
 
     @property
+    def untrusted_output(self) -> bool:
+        # Artifacts hold large tool outputs, fetched pages included.
+        return True
+
+    @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",

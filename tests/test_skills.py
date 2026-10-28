@@ -123,9 +123,13 @@ class SkillCatalogTests(unittest.TestCase):
             )
 
             session = Session("s_test")
-            session.add_message(MessageEvent.create(role="user", content="earlier"))
+            session.add_message(
+                MessageEvent.create(role="user", content="earlier")
+            )
+            session.messages[-1].created_at = "2026-04-22T23:59:30Z"
             session.add_message(MessageEvent.create(role="assistant", content="ok"))
             session.add_message(MessageEvent.create(role="user", content="now?"))
+            session.messages[-1].created_at = "2026-04-23T05:02:05Z"
             messages = builder.build(session.messages).messages
             prompt = messages[0].content
 
@@ -134,13 +138,38 @@ class SkillCatalogTests(unittest.TestCase):
             self.assertIn("timezone_local:", prompt)
             # Nothing finer than the day in the cached prefix.
             self.assertNotIn("13:02", prompt)
-            # The exact time rides on the latest user message only.
-            self.assertEqual(messages[1].content, "earlier")
+            # Each user message carries its own send time, in local time.
+            self.assertEqual(
+                messages[1].content,
+                "earlier\n\n[发送时间 2026-04-23 07:59 星期四 UTC+08:00]",
+            )
             self.assertEqual(
                 messages[3].content,
-                "now?\n\n[当前本地时间 2026-04-23 13:02 星期四 UTC+08:00]",
+                "now?\n\n[发送时间 2026-04-23 13:02 星期四 UTC+08:00]",
             )
             self.assertEqual(session.messages[-1].content, "now?")
+
+    def test_earlier_messages_read_the_same_as_time_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clock = [datetime(2026, 4, 23, 13, 2, tzinfo=timezone.utc)]
+            builder = _make_context_builder(
+                registry=SkillRegistry.from_directory(Path(tmpdir)),
+                tool_registry=ToolRegistry(),
+                now_provider=lambda: clock[0],
+            )
+            session = Session("s_test")
+            session.add_message(MessageEvent.create(role="user", content="first"))
+            session.add_message(MessageEvent.create(role="assistant", content="ok"))
+            before = builder.build(session.messages).messages
+
+            # Minutes pass and a new turn starts.
+            clock[0] = datetime(2026, 4, 23, 13, 47, tzinfo=timezone.utc)
+            session.add_message(MessageEvent.create(role="user", content="second"))
+            after = builder.build(session.messages).messages
+
+            # Every message of the earlier request is an unchanged prefix of
+            # the new one, so the provider's prompt cache still applies.
+            self.assertEqual(after[: len(before)], before)
 
     def test_time_stamp_skips_the_projected_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -159,7 +188,7 @@ class SkillCatalogTests(unittest.TestCase):
 
             self.assertEqual(messages[1].role, "user")
             self.assertTrue(messages[1].content.startswith("<conversation-summary>\n"))
-            self.assertNotIn("当前本地时间", messages[1].content)
+            self.assertNotIn("发送时间", messages[1].content)
 
     def test_memory_context_uses_date_free_ids_after_time_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

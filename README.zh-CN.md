@@ -15,7 +15,7 @@
 - Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
 - 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
 - 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
-- 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）。会话里一旦出现网页、搜索结果或 MCP 输出，`remember` 和 `fetch_url`（URL 没有在对话里出现过时）也要审批，被注入的文字没法悄悄写进记忆或把数据带出去
+- 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）。会话里一旦出现网页、搜索结果或 MCP 输出，`remember` 和 `fetch_url`（URL 没有在用户消息或不可信工具的结果里出现过时）也要审批，被注入的文字没法悄悄写进记忆或把数据带出去
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
 

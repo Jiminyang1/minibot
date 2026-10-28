@@ -178,6 +178,40 @@ class FetchUrlPublicHostTests(unittest.TestCase):
         self.assertTrue(web.requests[0].startswith("https://r.jina.ai/"))
         self.assertEqual(web.requests[1:], [url, final])
 
+    def test_urls_with_credentials_are_refused_without_requests(self) -> None:
+        for url in ("https://user:pass@public.example/", "https://token@public.example/x"):
+            with self.subTest(url=url):
+                web = _FakeWeb(dns={"public.example": ["93.184.216.34"]}, pages={})
+                result = self._run(web, url)
+                self.assertEqual(result.code, "permission_denied")
+                # The refusal must not echo the credentials back to the model.
+                self.assertNotIn("pass", result.summary)
+                self.assertEqual(web.requests, [])
+
+    def test_direct_fetch_ignores_the_system_proxy(self) -> None:
+        url = "http://public.example/article"
+        web = _FakeWeb(
+            dns={"public.example": ["93.184.216.34"]},
+            pages={url: lambda u: _response(u, 200, {"Content-Type": "text/plain"}, b"ok")},
+        )
+        hosts: list[str] = []
+
+        def record_host(request: Request):
+            hosts.append(request.host)
+            return web.open(request)
+
+        tool = FetchUrlTool()
+        with (
+            patch("urllib.request.getproxies", return_value={"http": "http://127.0.0.1:6152"}),
+            patch("minibot.tools.fetch_url.socket.getaddrinfo", side_effect=web.getaddrinfo),
+            patch.object(HTTPHandler, "http_open", side_effect=record_host),
+        ):
+            result = tool.execute(context=self.context, url=url)
+
+        self.assertTrue(result.ok, result.summary)
+        # Connected to the checked host, not to a proxy (e.g. Surge on :6152).
+        self.assertEqual(hosts, ["public.example"])
+
     def test_jina_is_off_by_default(self) -> None:
         url = "http://public.example/article"
         html = b"<html><head><title>Public Page</title></head><body><p>hello</p></body></html>"
