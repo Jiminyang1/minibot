@@ -13,10 +13,11 @@ import numpy as np
 
 from .embed import normalize_rows
 
-# Measured with bge-small-zh-v1.5 on ``Incident.embed_text``: failures of the
-# same tool with the same kind of cause score 0.84–0.90, failures of
-# different tools 0.61–0.76. 0.8 sits in the gap; a reviewer would rather
-# merge two drafts than untangle one that mixes causes.
+# Measured with bge-small-zh-v1.5 on ``Incident.embed_text`` for the small
+# hand-written set in benchmark_zh.json: same-cause incidents score >= 0.82,
+# different causes <= 0.77. 0.8 sits in that narrow gap; a reviewer would
+# rather merge two drafts than untangle one that mixes causes.
+# Re-measure: python -m minibot.lessons.benchmark
 DEFAULT_CLUSTER_THRESHOLD = 0.8
 
 

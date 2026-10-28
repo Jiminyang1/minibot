@@ -16,7 +16,7 @@
 - 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
 - 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
 - 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）。会话里一旦出现网页、搜索结果或 MCP 输出，`remember` 和 `fetch_url`（URL 没有在对话里出现过时）也要审批，被注入的文字没法悄悄写进记忆或把数据带出去
-- 质量闭环：按阶段打分的黄金评测（pytest、回放 Langfuse dataset、LLM-as-judge），以及挖掘失败 → 起草修复 → 人工审核 → 检索已批准 lesson 的闭环
+- 质量闭环：按阶段打分的黄金评测（pytest、回放 Langfuse dataset、LLM-as-judge），以及（实验性的）挖掘失败 → 起草修复 → 人工审核 → 检索已批准 lesson 的闭环
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
 
@@ -208,7 +208,7 @@ uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
 
 ## 质量闭环：评测与 lesson
 
-两半互相检验：评测衡量 agent，lesson 改进 agent，评测再衡量 lesson 有没有用。
+评测衡量 agent。lesson 闭环（**实验性**）把过去的失败整理成规则，由人批准。`run --lessons compare` 用来检查已批准的 lesson 有没有用；但 10 个用例各跑一次，结果只能当参考，不能当证据（用例还没有重复运行，一个用例翻转就是 10 个百分点的噪声）。
 
 **黄金评测**（`evals/`）。用例在 `evals/cases.json`，同步到 Langfuse dataset `minibot-golden`。每个用例在沙箱里跑一轮，按阶段打分：skill 选择 → 工具选择 → 工具参数 → 回答（LLM-as-judge）→ 结果状态。
 
@@ -222,7 +222,7 @@ uv run python -m minibot.evals run --lessons compare  # 同一批用例分别关
 
 pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。
 
-**lesson**（`lessons/`，需要 `uv sync --extra lessons`）。一条 lesson 是经人工批准的规则：*在* <trigger> *时*，*做* <guidance>。
+**lesson**（`lessons/`，需要 `uv sync --extra lessons`）——**实验性**。一条 lesson 是经人工批准的规则：*在* <trigger> *时*，*做* <guidance>。它还没在真实的失败数据上跑过，阈值来自一小份手写数据；`uv run python -m minibot.lessons.benchmark` 可以重新测量。
 
 ```bash
 uv run python -m minibot.lessons mine --dry-run   # 从会话和 runs.jsonl 里找出失败并聚类

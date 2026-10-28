@@ -22,9 +22,12 @@ from .mine import Incident
 from .store import Lesson, LessonStore
 
 # Two triggers this close describe the same situation, so the new cluster is
-# more evidence for the existing lesson, not a second lesson. Measured with
-# bge-small-zh-v1.5: paraphrased triggers ~0.85, related but different
-# situations (file not found vs. file outside the workspace) ~0.76–0.77.
+# more evidence for the existing lesson, not a second lesson. On the small
+# hand-written set in benchmark_zh.json (bge-small-zh-v1.5): two paraphrase
+# pairs score 0.87–0.89, but a third scores 0.66, as low as a pair of
+# different situations — so 0.82 misses some paraphrases. A miss costs one
+# extra draft to review; a false merge would hide a distinct rule.
+# Re-measure: python -m minibot.lessons.benchmark
 DEFAULT_DEDUPE_THRESHOLD = 0.82
 MAX_INCIDENTS_PER_PROMPT = 8
 _MAX_TRIGGER_CHARS = 200

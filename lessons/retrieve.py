@@ -26,7 +26,9 @@ from .store import Lesson, LessonStore
 # (min 0.41) overlapped unrelated tasks (max 0.46). Ranking by trigger and
 # evidence got 10/10, correct hits min 0.58 vs unrelated tasks max 0.51 and
 # chit-chat max 0.49. 0.55 sits in that gap. A lesson approved without
-# evidence falls back to its trigger and needs a closer match.
+# evidence falls back to its trigger and needs a closer match. The set is
+# small and hand-written (benchmark_zh.json); re-measure with
+# python -m minibot.lessons.benchmark
 DEFAULT_MIN_SCORE = 0.55
 _MAX_EVIDENCE_KEYS = 8
 DEFAULT_TOP_K = 3

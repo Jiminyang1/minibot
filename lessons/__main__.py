@@ -36,7 +36,10 @@ _ACTION_LABELS = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m minibot.lessons")
+    parser = argparse.ArgumentParser(
+        prog="python -m minibot.lessons",
+        description="lesson 闭环（实验性）：挖掘失败、起草经验、人工审核、检索。",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     mine = sub.add_parser("mine", help="挖掘失败记录并起草经验")
     mine.add_argument("--dry-run", action="store_true", help="只展示事件和聚类，不调用模型、不写入")

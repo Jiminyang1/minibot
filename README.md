@@ -16,7 +16,7 @@ A local command-line AI agent runtime built on OpenAI-compatible `chat.completio
 - Cross-session user memory (`remember` / `forget`) plus episodic memory (`search_history` searches raw messages and compaction summaries across all past sessions)
 - Scheduled tasks and reminders: created in natural language (cron routines / one-shots), fired unattended by `minibot-daemon`, delivered via macOS notifications and stored as searchable sessions
 - Sensitive-tool approval (`ask` / `always`; CLI prompt or Web approval endpoint). Once web pages, search results or MCP output are in a session, `remember` and `fetch_url` to a URL nobody showed also ask, so injected text cannot quietly persist or send data out
-- Quality loop: golden evals scored per stage (pytest, Langfuse dataset replay, LLM-as-judge) and a lessons loop that mines failures, drafts fixes for human review and retrieves approved ones
+- Quality loop: golden evals scored per stage (pytest, Langfuse dataset replay, LLM-as-judge) and an experimental lessons loop that mines failures, drafts fixes for human review and retrieves approved ones
 - Reliability: exponential-backoff retries for transient LLM errors (never after the first delta), summariser failures degrade to truncation, tool args pre-validated against their JSON Schema
 - MCP over `stdio` / `streamable_http`; bundled SQLite demo and macOS system servers, draw.io MCP in the default config
 
@@ -208,7 +208,7 @@ uv run minibot-daemon    # resident process; single-instance lock
 
 ## Quality loop: evals and lessons
 
-Two halves that check each other. Evals measure the agent; lessons change it; evals then measure whether the lessons helped.
+Evals measure the agent. The lessons loop (**experimental**) turns past failures into rules that a human approves. `run --lessons compare` is how to check whether approved lessons help; with ten cases run once each, its result is a hint, not evidence (cases are not yet repeated, so one flip is ten points of noise).
 
 **Golden evals** (`evals/`). Cases live in `evals/cases.json`, mirrored to the Langfuse dataset `minibot-golden`. Each case runs one sandboxed turn and is scored per stage: skill selection → tool selection → tool arguments → answer (LLM-as-judge) → outcome.
 
@@ -222,7 +222,7 @@ uv run python -m minibot.evals run --lessons compare  # same cases with lessons 
 
 The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.
 
-**Lessons** (`lessons/`, needs `uv sync --extra lessons`). A lesson is a human-approved rule: *when* <trigger>, *do* <guidance>.
+**Lessons** (`lessons/`, needs `uv sync --extra lessons`) — **experimental**. A lesson is a human-approved rule: *when* <trigger>, *do* <guidance>. It has not run on real failures yet, and its thresholds come from a small hand-written set; `uv run python -m minibot.lessons.benchmark` re-measures them.
 
 ```bash
 uv run python -m minibot.lessons mine --dry-run   # failures found in sessions and runs.jsonl, clustered
