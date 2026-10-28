@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactStore
 from .config import Config, resolve_state_home
@@ -42,6 +43,9 @@ from .tools import (
 )
 from .user_memory import UserMemoryStore
 
+if TYPE_CHECKING:
+    from .lessons.retrieve import LessonRetriever
+
 _GLOBAL_MCP_CONFIG_ENV = "MINIBOT_MCP_CONFIG_PATH"
 
 
@@ -64,6 +68,7 @@ class MiniBotRuntime:
     approval_policy: ApprovalPolicy
     approval_broker: ApprovalBroker | None = None
     langfuse: LangfuseFold | None = None
+    lesson_retriever: LessonRetriever | None = None
 
     def close(self) -> None:
         self.mcp_host.close()
@@ -147,6 +152,7 @@ def build_runtime(
         tool_registry.register(tool)
 
     include_reasoning = llm_profile.compat.include_reasoning_content
+    lesson_retriever = _build_lesson_retriever(config, state_home)
     context_builder = ContextBuilder(
         base_system_prompt=SYSTEM_PROMPT,
         memory_store=memory_store,
@@ -154,6 +160,7 @@ def build_runtime(
         tool_registry=tool_registry,
         include_reasoning_content=include_reasoning,
         workspace=resolved_workspace,
+        lesson_retriever=lesson_retriever,
     )
     capabilities = llm_profile.capabilities
     if capabilities is None:  # Defensive: build_llm_profile always resolves it.
@@ -229,6 +236,43 @@ def build_runtime(
         approval_policy=approval_policy,
         approval_broker=approval_broker,
         langfuse=langfuse,
+        lesson_retriever=lesson_retriever,
+    )
+
+
+def _build_lesson_retriever(
+    config: Config, state_home: Path
+) -> LessonRetriever | None:
+    """Retriever for approved lessons, or ``None`` when lessons are off.
+
+    ``auto`` turns on only when fastembed is installed and the store already
+    holds an approved lesson, and then fails open (an embedding error
+    disables retrieval instead of failing turns). ``on`` insists. Imports are
+    local so ``off`` never imports numpy or the lessons package.
+    """
+    if config.lessons_mode == "off":
+        return None
+    from .lessons.embed import FastEmbedEmbedder, fastembed_available
+
+    if not fastembed_available():
+        if config.lessons_mode == "on":
+            raise RuntimeError(
+                "MINIBOT_LESSONS=on 需要 fastembed，但当前环境没有安装："
+                "请运行 uv sync --extra lessons，或改成 auto / off。"
+            )
+        return None
+    from .lessons.retrieve import LessonRetriever
+    from .lessons.store import LessonStore
+
+    store = LessonStore(config.resolve_lessons_path(state_home))
+    if config.lessons_mode == "auto" and not store.list(status="approved"):
+        return None
+    return LessonRetriever(
+        store,
+        FastEmbedEmbedder(),
+        top_k=config.lessons_top_k,
+        min_score=config.lessons_min_score,
+        fail_open=config.lessons_mode == "auto",
     )
 
 

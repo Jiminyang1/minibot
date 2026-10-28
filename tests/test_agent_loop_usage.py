@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from minibot.artifacts import ArtifactStore
-from minibot.runtime.agent_loop import _CANCELLED_TURN_REPLY
+from minibot.runtime.agent_loop import CANCELLED_TURN_REPLY
 from minibot.llm import LLMClient, LLMResponse, TokenUsage, ToolCall
 from minibot.runtime.approval import ApprovalPolicy
 from minibot.runtime.cancel import RunCancelled
@@ -253,7 +253,7 @@ class AgentLoopUsageTests(unittest.TestCase):
             self.assertEqual(request[3].tool_call_id, "call_1")
             payload = json.loads(request[3].content)
             self.assertEqual(payload["code"], "interrupted")
-            self.assertEqual(request[4].content, _CANCELLED_TURN_REPLY)
+            self.assertEqual(request[4].content, CANCELLED_TURN_REPLY)
 
     def test_fails_fast_when_model_returns_empty_final_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -917,7 +917,7 @@ class UnfinishedTurnClosureTests(unittest.TestCase):
             tail = [entry.message for entry in session.entries[-2:]]
             self.assertTrue(tail[0].tool_calls)
             self.assertEqual(tail[1].role, "assistant")
-            self.assertEqual(tail[1].content, _CANCELLED_TURN_REPLY)
+            self.assertEqual(tail[1].content, CANCELLED_TURN_REPLY)
             self.assertEqual(len(_closing_replies(session)), 1)
 
             outcome, _ = run_turn(loop, manager, "did it run?")
@@ -934,7 +934,7 @@ class UnfinishedTurnClosureTests(unittest.TestCase):
             )
             for message in request[3:5]:
                 self.assertEqual(json.loads(message.content)["code"], "interrupted")
-            self.assertEqual(request[5].content, _CANCELLED_TURN_REPLY)
+            self.assertEqual(request[5].content, CANCELLED_TURN_REPLY)
 
     def test_failed_turn_is_closed_once_and_next_request_is_well_formed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

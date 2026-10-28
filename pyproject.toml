@@ -29,6 +29,10 @@ data = [
     "pandas>=3.0.3",
     "tabulate>=0.10.0",
 ]
+# Local embeddings for the lessons loop (retrieval and clustering).
+lessons = [
+    "fastembed>=0.7",
+]
 
 [project.scripts]
 minibot = "minibot.__main__:main"
@@ -40,6 +44,7 @@ packages = [
     "minibot",
     "minibot.evals",
     "minibot.interaction",
+    "minibot.lessons",
     "minibot.llm_providers",
     "minibot.mcp_host",
     "minibot.mcp_host.transport",
@@ -55,6 +60,7 @@ packages = [
 [tool.setuptools.package-dir]
 "minibot" = "."
 "minibot.interaction" = "interaction"
+"minibot.lessons" = "lessons"
 "minibot.llm_providers" = "llm_providers"
 "minibot.mcp_host" = "mcp_host"
 "minibot.mcp_host.transport" = "mcp_host/transport"
@@ -73,6 +79,7 @@ packages = [
 
 [dependency-groups]
 dev = [
+    "pytest>=8",
     "ruff>=0.17.2",
 ]
 
@@ -85,3 +92,10 @@ extend-exclude = ["examples"]
 select = ["E4", "E7", "E9", "F", "B"]
 # FastAPI's `Body(...)` defaults are the framework idiom.
 ignore = ["B008"]
+
+[tool.pytest.ini_options]
+# Golden evals call the real model; they are collected only with `-m golden`
+# (see evals/test_golden.py). The unit suite runs with unittest from tests/.
+markers = [
+    "golden: real-model golden evals, opt in with -m golden",
+]
