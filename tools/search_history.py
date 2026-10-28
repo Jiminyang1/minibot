@@ -81,6 +81,11 @@ class SearchHistoryTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    @property
+    def untrusted_output(self) -> bool:
+        # Past sessions include fetched pages and other tool output.
+        return True
+
     def execute(
         self,
         *,
