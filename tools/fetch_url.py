@@ -7,12 +7,13 @@ from html.parser import HTMLParser
 import ipaddress
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 import json
 import re
+import socket
 import xml.etree.ElementTree as ET
 
-from .base import Tool, ToolExecutionContext
+from .base import Tool, ToolExecutionContext, UntrustedExposure
 from .result import ToolOutput
 
 
@@ -26,6 +27,32 @@ class _FetchedPage:
     published_at: str | None = None
     extractor: str = "direct"
     byte_truncated: bool = False
+
+
+class _BlockedUrlError(ValueError):
+    """Raised when a URL (or one of its redirect hops) points at a non-public host."""
+
+    def __init__(self, url: str, reason: str) -> None:
+        super().__init__(reason)
+        self.url = url
+        self.reason = reason
+
+
+class _GuardedRedirectHandler(HTTPRedirectHandler):
+    """Check every redirect hop before urllib follows it.
+
+    urllib caps the chain at ``max_redirections`` (10) on its own; this handler
+    only adds the public-host check so a public page cannot bounce the direct
+    fetch onto loopback or the LAN.
+    """
+
+    def __init__(self, tool: "FetchUrlTool") -> None:
+        super().__init__()
+        self._tool = tool
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        self._tool._ensure_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class _ReadableHtmlParser(HTMLParser):
@@ -197,8 +224,18 @@ class FetchUrlTool(Tool):
         "text/plain",
     }
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        allow_private_hosts: bool = False,
+        use_jina: bool = False,
+    ) -> None:
         super().__init__(workspace=None)
+        # Only tests that serve pages from a local HTTP server turn this on.
+        self._allow_private_hosts = allow_private_hosts
+        # Opt-in: the Jina reader extracts text better, but it sends every
+        # fetched URL to a third party (r.jina.ai).
+        self._use_jina = use_jina
 
     @property
     def name(self) -> str:
@@ -207,6 +244,29 @@ class FetchUrlTool(Tool):
     @property
     def read_only(self) -> bool:
         return True
+
+    @property
+    def untrusted_output(self) -> bool:
+        return True
+
+    def approval_reason(
+        self,
+        args: dict[str, Any],
+        exposure: UntrustedExposure,
+    ) -> str | None:
+        # A URL is also an outbound channel: injected text can make the model
+        # put private data into one. Links the user or a tool result showed
+        # are followed freely; a URL the model assembled itself is asked.
+        # Residual: choosing among shown links still leaks a few bits.
+        if not exposure.tainted:
+            return None
+        url = str(args.get("url", "")).strip()
+        if exposure.mentions(url) or exposure.mentions(url.rstrip("/")):
+            return None
+        return (
+            "会话里已经有网页、搜索结果或 MCP 返回的内容，其中可能夹带针对模型的指令。这个 URL 没有在对话或工具结果里出现过，"
+            "可能是模型自己拼出来的；请确认它不会带出隐私数据。"
+        )
 
     @property
     def exclusive(self) -> bool:
@@ -250,12 +310,21 @@ class FetchUrlTool(Tool):
                 data={"url": normalized},
             )
 
+        # fetch_url needs no approval, so a prompt-injected URL must not reach
+        # loopback, the LAN or cloud metadata. Check before any request.
+        try:
+            self._ensure_public_url(normalized, strict=False)
+        except _BlockedUrlError as exc:
+            return self._blocked_output(normalized, exc)
+
         page = self._fetch_google_news_rss(normalized)
-        if page is None:
+        if page is None and self._use_jina:
             page = self._fetch_via_jina(normalized)
         if page is None:
             try:
                 page = self._fetch_direct(normalized)
+            except _BlockedUrlError as exc:
+                return self._blocked_output(normalized, exc)
             except Exception as exc:
                 return ToolOutput.failure(
                     "error",
@@ -423,6 +492,9 @@ class FetchUrlTool(Tool):
         )
 
     def _fetch_direct(self, url: str) -> _FetchedPage:
+        # Re-check here in strict mode: execute() lets an unresolvable host
+        # through for Jina, but a direct fetch must resolve to public addresses.
+        self._ensure_public_url(url)
         request = Request(
             url,
             headers={
@@ -430,7 +502,8 @@ class FetchUrlTool(Tool):
                 "Accept": "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.1",
             },
         )
-        with urlopen(request, timeout=self._TIMEOUT) as response:
+        opener = build_opener(_GuardedRedirectHandler(self))
+        with opener.open(request, timeout=self._TIMEOUT) as response:
             status_code = getattr(response, "status", None) or response.getcode()
             final_url = response.geturl()
             content_type = response.headers.get_content_type()
@@ -530,17 +603,94 @@ class FetchUrlTool(Tool):
 
     @staticmethod
     def _can_use_jina(url: str) -> bool:
-        host = (urlparse(url).hostname or "").strip().lower()
-        if not host or host in {"localhost"} or host.endswith(".local"):
+        host = FetchUrlTool._normalize_host(urlparse(url).hostname)
+        if not host or FetchUrlTool._is_local_hostname(host):
             return False
         try:
             ip = ipaddress.ip_address(host)
         except ValueError:
             return True
-        return not (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_unspecified
+        return FetchUrlTool._is_public_ip(ip)
+
+    def _blocked_output(self, url: str, exc: _BlockedUrlError) -> ToolOutput:
+        data: dict[str, Any] = {"url": url}
+        if exc.url != url:
+            data["blocked_url"] = exc.url
+        return ToolOutput.failure(
+            "permission_denied",
+            f"[安全拦截] 只能抓取公网地址: {exc.reason}",
+            data=data,
         )
+
+    def _ensure_public_url(self, url: str, *, strict: bool = True) -> None:
+        """Raise ``_BlockedUrlError`` unless every address of the URL's host is public.
+
+        A host that fails to resolve raises ``ValueError`` in strict mode;
+        ``strict=False`` lets it pass (Jina resolves it remotely, so it cannot
+        reach local services). ``_fetch_direct`` always checks again strictly.
+
+        Known gap: this resolves the name, then urllib resolves it again when
+        connecting. A DNS-rebinding host can answer public here and private on
+        the second lookup (time-of-check/time-of-use). Closing that needs
+        connecting to the checked IP directly (IP pinning), which we don't do.
+        """
+        if self._allow_private_hosts:
+            return
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise _BlockedUrlError(url, f"不支持的协议 {parsed.scheme or '(空)'}")
+        host = self._normalize_host(parsed.hostname)
+        if not host:
+            raise _BlockedUrlError(url, "缺少主机名")
+        if self._is_local_hostname(host):
+            raise _BlockedUrlError(url, f"{host} 是本地主机名")
+
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except (socket.gaierror, UnicodeError) as exc:
+                # Not a security block, just a failed lookup; still no request.
+                if strict:
+                    raise ValueError(f"无法解析主机 {host}") from exc
+                return
+            addresses = []
+            for info in infos:
+                # IPv6 link-local results may carry a scope suffix such as "%en0".
+                raw = str(info[4][0]).split("%", 1)[0]
+                try:
+                    addresses.append(ipaddress.ip_address(raw))
+                except ValueError:
+                    continue
+            if not addresses:
+                if strict:
+                    raise ValueError(f"无法解析主机 {host}") from None
+                return
+
+        for ip in addresses:
+            if not self._is_public_ip(ip):
+                raise _BlockedUrlError(url, f"{host} 指向非公网地址 {ip}")
+
+    @staticmethod
+    def _normalize_host(host: str | None) -> str:
+        host = (host or "").strip().lower().rstrip(".")
+        # ip_address() accepts "fe80::1%en0" but the scope is noise for the check.
+        return host.split("%", 1)[0]
+
+    @staticmethod
+    def _is_local_hostname(host: str) -> bool:
+        return (
+            host == "localhost"
+            or host.endswith(".localhost")
+            or host.endswith(".local")
+        )
+
+    @staticmethod
+    def _is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        # "::ffff:127.0.0.1" must be judged as the IPv4 address it wraps.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        # is_global, not "not is_private": shared space 100.64.0.0/10 (CGNAT,
+        # Tailscale) is neither private nor reserved, yet not public either.
+        return ip.is_global and not ip.is_multicast

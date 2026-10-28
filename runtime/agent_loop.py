@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING, Any
 
 from ..llm import LLMClient, LLMResponse, TokenUsage, ToolCall, is_retryable_llm_error
 from ..session import MessageEvent, SessionEntry
-from ..tools.base import Tool, ToolExecutionContext
+from ..tools.base import Tool, ToolExecutionContext, UntrustedExposure
 from ..tools.registry import PreparedToolCall, ToolRegistry
 from ..tools.result import ToolOutput
-from .approval import ToolApprovalGate
+from .approval import ToolApprovalGate, untrusted_exposure
 from .budget import TokenBudget
 from .cancel import RunCancelled
 from .compactor import Compactor
@@ -39,6 +39,13 @@ from .tool_output_materializer import ToolOutputMaterializer
 
 if TYPE_CHECKING:
     from ..session import Session, SessionManager
+
+
+# Closing replies for a turn that ends without a final answer. They are
+# written to the session so the next turn's model sees the request as
+# answered (not completed) instead of unanswered — and does not redo it.
+_CANCELLED_TURN_REPLY = "本轮已被用户取消，请求未完成。"
+_FAILED_TURN_REPLY = "本轮因错误中止（{error_type}），请求未完成。"
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,12 @@ class _PlannedToolCall:
     tool_call: ToolCall
     args: dict[str, Any]
     tool: Tool | None
+    # Why the raw arguments are unusable (not JSON / not an object); such a
+    # call is answered with ``invalid_args`` and never approved or executed.
+    args_error: str | None = None
+    # What the session had shown the model when the call was planned; the
+    # approval gate uses it to ask once untrusted content is in play.
+    exposure: UntrustedExposure = UntrustedExposure()
 
 
 class AgentLoop:
@@ -117,6 +130,8 @@ class AgentLoop:
         self._emit_context_usage(session, emitter)
         self._append(session, MessageEvent.create(role="user", content=user_input))
 
+        # From here on the user message is persisted: every exit must leave
+        # the turn answered, by a final reply or by a closing message.
         try:
             for iteration in range(1, self.max_iterations + 1):
                 self._check_cancel(cancel_event)
@@ -196,7 +211,11 @@ class AgentLoop:
                 emitter.emit("model.request.completed", completed_payload)
                 self._append(session, _response_to_message_event(resp))
 
-                planned_tool_calls = self._plan_tool_calls(resp.tool_calls, emitter)
+                planned_tool_calls = self._plan_tool_calls(
+                    resp.tool_calls,
+                    emitter,
+                    untrusted_exposure(session, self.tool_registry),
+                )
                 self._check_cancel(cancel_event)
                 if executor is None and self._wants_executor(planned_tool_calls):
                     executor = ThreadPoolExecutor(
@@ -210,7 +229,7 @@ class AgentLoop:
                     executor,
                 )
 
-                for planned, output in zip(planned_tool_calls, tool_outputs):
+                for planned, output in zip(planned_tool_calls, tool_outputs, strict=True):
                     self._check_cancel(cancel_event)
                     result = self.materializer.materialize(output, context=tool_context)
                     emitter.emit(
@@ -256,6 +275,9 @@ class AgentLoop:
                 },
             )
             return self._outcome(final_message.content, usage, compact_messages)
+        except (Exception, KeyboardInterrupt) as exc:
+            self._close_unfinished_turn(session, exc)
+            raise
         finally:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -394,6 +416,26 @@ class AgentLoop:
         self.session_manager.update_metadata(session)
         return message
 
+    def _close_unfinished_turn(self, session: Session, exc: BaseException) -> None:
+        """Persist a closing reply for a turn that ends by cancel or error.
+
+        Session only, no ``message.completed``: ``run.cancelled`` /
+        ``run.failed`` from ``AgentSession`` stay the terminal events. A
+        dangling tool-call block before it is completed by the projector with
+        ``interrupted`` results. Best-effort: a write failure here must never
+        replace the exception that ended the turn.
+        """
+        if _ends_with_final_reply(session):
+            return
+        if isinstance(exc, (RunCancelled, KeyboardInterrupt)):
+            content = _CANCELLED_TURN_REPLY
+        else:
+            content = _FAILED_TURN_REPLY.format(error_type=type(exc).__name__)
+        try:
+            self._append(session, MessageEvent.create(role="assistant", content=content))
+        except Exception as close_exc:
+            exc.add_note(f"收尾消息写入失败: {close_exc!r}")
+
     def _emit_context_usage(
         self,
         session: Session,
@@ -439,23 +481,36 @@ class AgentLoop:
         self,
         tool_calls: list[ToolCall],
         emitter: RuntimeEventEmitter,
+        exposure: UntrustedExposure,
     ) -> list[_PlannedToolCall]:
         planned: list[_PlannedToolCall] = []
         for tool_call in tool_calls:
-            args = _parse_args(tool_call.arguments)
+            args, args_error = _parse_args(tool_call.arguments)
             tool = self.tool_registry.get(tool_call.name)
-            emitter.emit(
-                "tool_call.started",
-                {
-                    "tool_call_id": tool_call.id,
-                    "tool": tool_call.name,
-                    "display_name": _tool_label(tool, tool_call.name),
-                    "source": None if tool is None else tool.source,
-                    "args": args,
-                    "requires_approval": bool(tool and tool.requires_approval),
-                },
+            payload: dict[str, Any] = {
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "display_name": _tool_label(tool, tool_call.name),
+                "source": None if tool is None else tool.source,
+                "args": args,
+                "requires_approval": bool(
+                    tool
+                    and args_error is None
+                    and tool.approval_reason(args, exposure) is not None
+                ),
+            }
+            if args_error is not None:
+                payload["args_error"] = args_error
+            emitter.emit("tool_call.started", payload)
+            planned.append(
+                _PlannedToolCall(
+                    tool_call=tool_call,
+                    args=args,
+                    tool=tool,
+                    args_error=args_error,
+                    exposure=exposure,
+                )
             )
-            planned.append(_PlannedToolCall(tool_call=tool_call, args=args, tool=tool))
         return planned
 
     def _wants_executor(self, planned_tool_calls: list[_PlannedToolCall]) -> bool:
@@ -556,7 +611,7 @@ class AgentLoop:
                 f"工具 {planned.tool_call.name} 未返回结果。",
                 data={"tool": planned.tool_call.name},
             )
-            for planned, output in zip(batch, outputs)
+            for planned, output in zip(batch, outputs, strict=True)
         ]
 
     def _execute_single(
@@ -583,6 +638,8 @@ class AgentLoop:
         cancel_event: threading.Event | None,
     ) -> PreparedToolCall | ToolOutput:
         self._check_cancel(cancel_event)
+        if planned.args_error is not None:
+            return _invalid_args_output(planned.tool_call, planned.args_error)
         prepared = self.tool_registry.prepare(
             planned.tool_call.name,
             planned.args,
@@ -606,6 +663,7 @@ class AgentLoop:
                 session_id=context.session_id,
                 emitter=emitter,
                 cancel_event=cancel_event,
+                exposure=planned.exposure,
             )
         except RunCancelled:
             raise
@@ -643,15 +701,7 @@ def _response_to_message_event(resp: LLMResponse) -> MessageEvent:
         role="assistant",
         content=resp.content or "",
         reasoning_content=resp.reasoning_content,
-        tool_calls=[
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.name, "arguments": tc.arguments},
-            }
-            for tc in resp.tool_calls
-        ]
-        or None,
+        tool_calls=list(resp.tool_calls) or None,
     )
 
 
@@ -671,14 +721,49 @@ def _preview(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def _parse_args(raw: str | None) -> dict:
-    if not raw:
-        return {}
+def _parse_args(raw: str | None) -> tuple[dict[str, Any], str | None]:
+    """Decode tool-call arguments into ``(args, error)``.
+
+    Empty arguments mean "no arguments". Anything else must decode to a JSON
+    object; otherwise the error is returned instead of a silent ``{}``, which
+    would run the tool with defaults (``list_dir`` would list the root).
+    """
+    if raw is None or not raw.strip():
+        return {}, None
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        return {}, f"JSON 解析失败: {exc}"
+    if not isinstance(parsed, dict):
+        return {}, f"需要 JSON 对象，实际是 {type(parsed).__name__}"
+    return parsed, None
+
+
+def _invalid_args_output(tool_call: ToolCall, error: str) -> ToolOutput:
+    raw = tool_call.arguments or ""
+    raw_preview = raw if len(raw) <= 200 else raw[:200] + "..."
+    return ToolOutput.failure(
+        "invalid_args",
+        f"工具 {tool_call.name} 的参数不是合法的 JSON 对象，未执行（{error}）。"
+        f"原始参数: {raw_preview}。请改为合法的 JSON 对象后重试。",
+        data={
+            "tool": tool_call.name,
+            "parse_error": error,
+            "raw_arguments_preview": raw_preview,
+        },
+    )
+
+
+def _ends_with_final_reply(session: Session) -> bool:
+    """True when the session's last entry is an assistant reply without tool calls."""
+    if not session.entries:
+        return False
+    message = session.entries[-1].message
+    return (
+        message is not None
+        and message.role == "assistant"
+        and not message.tool_calls
+    )
 
 
 def _normalized_reply(content: Any) -> str:

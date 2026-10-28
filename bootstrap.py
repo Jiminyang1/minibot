@@ -113,7 +113,7 @@ def build_runtime(
     tool_registry = ToolRegistry()
     tool_registry.register_all(filesystem_toolset(resolved_workspace, artifact_store))
     tool_registry.register_all(shell_toolset(resolved_workspace))
-    tool_registry.register_all(network_toolset())
+    tool_registry.register_all(network_toolset(fetch_via_jina=config.fetch_via_jina))
     tool_registry.register_all(memory_toolset(memory_store))
     tool_registry.register_all(skill_toolset(skill_registry))
     tool_registry.register_all(history_toolset(manager))

@@ -11,7 +11,7 @@ with OR when both are restricted (vixie-cron semantics).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import fcntl
 import json
@@ -39,7 +39,7 @@ def parse_cron(expr: str) -> list[set[int]]:
     if len(fields) != 5:
         raise ValueError(f"cron 表达式必须是 5 个字段: {expr!r}")
     parsed: list[set[int]] = []
-    for raw, (low, high) in zip(fields, _FIELD_BOUNDS):
+    for raw, (low, high) in zip(fields, _FIELD_BOUNDS, strict=True):
         values: set[int] = set()
         for part in raw.split(","):
             values |= _parse_part(part, low, high, expr)

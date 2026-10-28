@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from minibot.cli import CliRenderer
 from minibot.llm import LLMClient, LLMResponse, LLMStreamEvent, TokenUsage, ToolCall
 from minibot.llm_profile import LLMProfile, OpenAICompatibleCompat
+from minibot.runtime.agent_loop import _CANCELLED_TURN_REPLY
 from minibot.runtime.cancel import RunCancelled
 from minibot.runtime.events import RuntimeEvent, RuntimeEventEmitter
 from minibot.runtime.messages import ModelMessage
@@ -380,11 +381,12 @@ class LoopStreamingTests(unittest.TestCase):
                     cancel_event=cancel_event,
                 )
 
+            # Half-streamed text never persists; only the fixed closing reply.
             session = manager.load("s_test")
             assert session is not None
             self.assertEqual(
-                [message.role for message in session.messages],
-                ["user"],
+                [(message.role, message.content) for message in session.messages],
+                [("user", "hello"), ("assistant", _CANCELLED_TURN_REPLY)],
             )
             self.assertEqual(llm.closed_streams, 1)
 

@@ -7,6 +7,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from ..llm import ToolCall
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -38,6 +40,34 @@ def _interrupted_tool_content(tool_name: str | None) -> str:
     )
 
 
+def coerce_tool_calls(raw: list[Any] | None) -> list[ToolCall] | None:
+    """Normalize stored tool calls to provider-neutral ``ToolCall`` values.
+
+    Sessions persist ``{"id", "name", "arguments"}``. Sessions written before
+    that stored the OpenAI wire shape (``{"type": "function", "function":
+    {...}}``); both still load.
+    """
+    if not raw:
+        return None
+    calls: list[ToolCall] = []
+    for item in raw:
+        if isinstance(item, ToolCall):
+            calls.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        source = function if isinstance(function, dict) else item
+        calls.append(
+            ToolCall(
+                id=str(item.get("id", "")),
+                name=str(source.get("name", "")),
+                arguments=str(source.get("arguments") or "{}"),
+            )
+        )
+    return calls or None
+
+
 class MessageEvent:
     """One message in a conversation."""
 
@@ -59,7 +89,7 @@ class MessageEvent:
         content: str,
         id: str | None = None,
         created_at: str | None = None,
-        tool_calls: list[dict[str, Any]] | None = None,
+        tool_calls: list[ToolCall] | list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
         reasoning_content: str | None = None,
@@ -68,7 +98,7 @@ class MessageEvent:
         self.role = role
         self.content = content
         self.created_at = created_at or utc_now()
-        self.tool_calls = tool_calls
+        self.tool_calls = coerce_tool_calls(tool_calls)
         self.tool_call_id = tool_call_id
         self.name = name
         self.reasoning_content = reasoning_content
@@ -79,7 +109,7 @@ class MessageEvent:
         *,
         role: str,
         content: str,
-        tool_calls: list[dict[str, Any]] | None = None,
+        tool_calls: list[ToolCall] | list[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         name: str | None = None,
         reasoning_content: str | None = None,
@@ -101,7 +131,10 @@ class MessageEvent:
             "created_at": self.created_at,
         }
         if self.tool_calls:
-            data["tool_calls"] = self.tool_calls
+            data["tool_calls"] = [
+                {"id": call.id, "name": call.name, "arguments": call.arguments}
+                for call in self.tool_calls
+            ]
         if self.tool_call_id:
             data["tool_call_id"] = self.tool_call_id
         if self.name:
@@ -242,6 +275,10 @@ class SessionEntry:
 class SessionContextProjector:
     """Project append-only session entries into model-visible messages."""
 
+    SUMMARY_ID_SUFFIX = "_summary"
+    SUMMARY_OPEN_TAG = "<conversation-summary>"
+    SUMMARY_CLOSE_TAG = "</conversation-summary>"
+
     @classmethod
     def project_messages(cls, entries: list[SessionEntry]) -> list[MessageEvent]:
         latest_compaction_index = cls._latest_compaction_index(entries)
@@ -251,15 +288,7 @@ class SessionContextProjector:
             )
 
         compaction = entries[latest_compaction_index]
-        projected: list[MessageEvent] = [
-            MessageEvent(
-                id=f"{compaction.id}_summary",
-                role="assistant",
-                content="[Summary of earlier conversation]\n"
-                + (compaction.summary or "").strip(),
-                created_at=compaction.created_at,
-            )
-        ]
+        projected: list[MessageEvent] = [cls._summary_message(compaction)]
         projected.extend(cls._kept_messages_before(entries, latest_compaction_index))
         projected.extend(
             entry.message
@@ -267,6 +296,31 @@ class SessionContextProjector:
             if entry.message is not None
         )
         return cls._filter_incomplete_tool_transactions(projected)
+
+    @classmethod
+    def is_summary_message(cls, message: MessageEvent) -> bool:
+        """True for the synthetic summary message that heads a compacted projection."""
+        return (
+            message.role == "user"
+            and str(message.id).endswith(cls.SUMMARY_ID_SUFFIX)
+            and message.content.startswith(cls.SUMMARY_OPEN_TAG + "\n")
+        )
+
+    @classmethod
+    def _summary_message(cls, compaction: SessionEntry) -> MessageEvent:
+        # A user message, not an assistant one: the summary quotes tool output
+        # and earlier turns, and the model must not read it as its own words.
+        # It is context, not a turn; see is_summary_message.
+        return MessageEvent(
+            id=f"{compaction.id}{cls.SUMMARY_ID_SUFFIX}",
+            role="user",
+            content=(
+                f"{cls.SUMMARY_OPEN_TAG}\n"
+                f"{(compaction.summary or '').strip()}\n"
+                f"{cls.SUMMARY_CLOSE_TAG}"
+            ),
+            created_at=compaction.created_at,
+        )
 
     @staticmethod
     def _latest_compaction_index(entries: list[SessionEntry]) -> int | None:
@@ -323,7 +377,7 @@ class SessionContextProjector:
                     tool_messages.append(messages[cursor])
                     cursor += 1
 
-                expected_ids = [str(call.get("id", "")) for call in message.tool_calls]
+                expected_ids = [call.id for call in message.tool_calls]
                 actual_ids = [
                     str(tool_message.tool_call_id)
                     for tool_message in tool_messages
@@ -358,13 +412,12 @@ class SessionContextProjector:
         }
         results: list[MessageEvent] = []
         for call in message.tool_calls or []:
-            call_id = str(call.get("id", ""))
+            call_id = call.id
             existing = recorded.get(call_id)
             if existing is not None:
                 results.append(existing)
                 continue
-            function = call.get("function")
-            name = function.get("name") if isinstance(function, dict) else None
+            name = call.name or None
             results.append(
                 MessageEvent(
                     id=f"{message.id}_{call_id}_interrupted",
@@ -430,6 +483,18 @@ class Session:
         _, turns = self._split_preamble_and_turns()
         return len(turns)
 
+    def total_turn_count(self) -> int:
+        """Count user turns across all entries, compacted ones included.
+
+        ``turn_count`` sees only the projection, so it drops after a
+        compaction; this count only grows, which a turn index needs.
+        """
+        return sum(
+            1
+            for entry in self.entries
+            if entry.message is not None and entry.message.role == "user"
+        )
+
     def compact_with_summary(
         self,
         summary_text: str,
@@ -453,12 +518,19 @@ class Session:
     def _split_preamble_and_turns(
         self,
     ) -> tuple[list[MessageEvent], list[list[MessageEvent]]]:
-        """Split leading non-user context from user-anchored turns."""
+        """Split leading non-user context from user-anchored turns.
+
+        The compaction summary is a user message but not a user turn, so it
+        stays in the preamble.
+        """
         preamble: list[MessageEvent] = []
         turns: list[list[MessageEvent]] = []
         current_turn: list[MessageEvent] | None = None
 
         for message in self.messages:
+            if SessionContextProjector.is_summary_message(message):
+                preamble.append(message)
+                continue
             if message.role == "user":
                 if current_turn:
                     turns.append(current_turn)

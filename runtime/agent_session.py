@@ -75,7 +75,7 @@ class AgentSession:
                     "input": user_input,
                     "source": source,
                     "model": self.agent_loop.model,
-                    "turn_index": session.turn_count() + 1,
+                    "turn_index": session.total_turn_count() + 1,
                 },
             )
             outcome = self.agent_loop.run_turn(

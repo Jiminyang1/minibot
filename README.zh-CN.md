@@ -15,7 +15,7 @@
 - Skills 渐进披露（L1 元数据常驻 system prompt，L2 正文按需 `read_skill`）
 - 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
 - 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
-- 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）
+- 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）。会话里一旦出现网页、搜索结果或 MCP 输出，`remember` 和 `fetch_url`（URL 没有在对话里出现过时）也要审批，被注入的文字没法悄悄写进记忆或把数据带出去
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
 
@@ -29,12 +29,16 @@ uv sync
 uv run minibot
 ```
 
+`uv sync --extra data` 会额外安装 pandas、matplotlib、openpyxl 和 tabulate，供 `exec` 工具运行的脚本分析 artifact。MiniBot 本身不 import 它们；再执行一次普通的 `uv sync` 会把它们删掉。
+
 Web UI：
 
 ```bash
 uv run minibot-server --host 127.0.0.1 --port 8765
 # 打开 http://127.0.0.1:8765/
 ```
+
+服务端没有认证。它只接受回环地址的 `Host`（`localhost`、`127.0.0.1`、`[::1]`），以此挡住 DNS rebinding；带外部 `Origin` 的写请求会被拒绝。`--host` 设成非回环地址时会打印警告；远程客户端用的主机名要用 `--allowed-host` 加上。
 
 `minibot` 默认进入**全屏 TUI**（Textual）：可滚动对话区、Markdown 渲染回复、流式打字、思考过程与工具调用折叠成单行（点击展开）、底部固定输入框、审批弹模态框（y/n），`Esc` 取消运行、`Ctrl+N` 新会话。斜杠命令照常可用。
 
@@ -152,6 +156,7 @@ flowchart TB
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
+| `MINIBOT_FETCH_VIA_JINA` | `0` | 设为 `1` 时 `fetch_url` 先走 Jina 阅读器（`r.jina.ai`），正文抽取更好，但每个抓取的 URL 都会发给这个第三方 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | 两个都设置即开启 Langfuse 追踪（每个 turn 一条 trace，含完整请求、工具、审批、压缩） |
 | `LANGFUSE_BASE_URL` | EU 云 | Langfuse 地址：按注册区域填，或自部署地址 |
 | `MINIBOT_LANGFUSE` | `1` | 设为 `0` 保留 key 但关闭追踪 |
@@ -176,7 +181,7 @@ uv run minibot --migrate <目录1> <目录2> ...
 查找顺序：`MINIBOT_MCP_CONFIG_PATH` → `~/.minibot/mcp.json` → 包内 `mcp.json`。
 
 - `enabled: true` 的 server 启动时连接并发现工具；单 server 失败不阻塞整体启动
-- `trusted: true` 免审批
+- `trusted: true` 免审批；但 MCP 的输出在上面的审批规则里仍然算不可信内容
 - transport 支持 `${ENV_VAR}`、`${MINIBOT_PYTHON}`、`${MINIBOT_PACKAGE_DIR}`
 - 包内默认配置包含 `sqlite`、`macos_system`，以及通过 `npx -y @drawio/mcp` 启动的外部 draw.io MCP server
 
@@ -220,6 +225,7 @@ SSE 断开只取消订阅，不取消后台 run。
 
 ```bash
 uv run python -m unittest discover -s tests
+uv run ruff check .
 ```
 
 事件名与 payload 是 CLI / SSE / run log 共同依赖的稳定契约，改动时先看 [docs/architecture.md](docs/architecture.md) 的事件目录。

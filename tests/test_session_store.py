@@ -8,7 +8,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from minibot.session import MessageEvent, SessionEntry, SessionManager
+from minibot.session import (
+    MessageEvent,
+    Session,
+    SessionContextProjector,
+    SessionEntry,
+    SessionManager,
+)
 from minibot.runtime.messages import model_message_to_openai, session_message_to_model
 
 
@@ -54,6 +60,24 @@ class SessionStoreTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(reloaded.message_count, 1)
             self.assertEqual(reloaded.messages[0].content, "hello")
+
+    def test_sessions_written_by_minibot_ts_are_ignored_not_touched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            foreign = workspace / "sessions" / "s_20261003_002929"
+            foreign.mkdir(parents=True)
+            meta = {"id": foreign.name, "title": "ts", "createdAt": "x", "updatedAt": "y",
+                    "workspace": "/w", "messageCount": 2}
+            (foreign / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            (foreign / "entries.jsonl").write_text("{}\n", encoding="utf-8")
+            manager.create_session("s_native")
+
+            self.assertEqual([s.session_id for s in manager.list_sessions()], ["s_native"])
+            self.assertIsNone(manager.load(foreign.name))
+            self.assertEqual(manager.latest_session().session_id, "s_native")
+            self.assertEqual(json.loads((foreign / "meta.json").read_text()), meta)
+            self.assertFalse((foreign / "messages.jsonl").exists())
 
     def test_session_id_validation_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,8 +126,13 @@ class SessionStoreTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(
                 [message.content for message in reloaded.messages],
-                ["[Summary of earlier conversation]\nold summary"],
+                ["<conversation-summary>\nold summary\n</conversation-summary>"],
             )
+            summary = reloaded.messages[0]
+            self.assertEqual(summary.role, "user")
+            self.assertEqual(summary.id, f"{compaction.id}_summary")
+            self.assertEqual(summary.created_at, compaction.created_at)
+            self.assertTrue(SessionContextProjector.is_summary_message(summary))
             raw_lines = (
                 workspace / "sessions" / "s_test" / "messages.jsonl"
             ).read_text(encoding="utf-8").splitlines()
@@ -185,6 +214,81 @@ class SessionStoreTests(unittest.TestCase):
                 workspace / "sessions" / "s_test" / "messages.jsonl"
             ).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(raw_lines), 4)
+
+    def test_closing_assistant_reply_completes_dangling_tool_block(self) -> None:
+        # A cancelled/failed turn is closed by an assistant reply right after
+        # its unanswered tool-call block; that reply must end the block too.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            session = manager.create_session("s_test")
+            session.add_message(MessageEvent.create(role="user", content="run tools"))
+            session.add_message(_tool_call_message("call_1", "call_2"))
+            session.add_message(
+                MessageEvent.create(role="assistant", content="本轮已被用户取消，请求未完成。")
+            )
+            manager.save(session)
+
+            reloaded = manager.load("s_test")
+
+            assert reloaded is not None
+            self.assertEqual(
+                [message.role for message in reloaded.messages],
+                ["user", "assistant", "tool", "tool", "assistant"],
+            )
+            for message, call_id in zip(reloaded.messages[2:4], ["call_1", "call_2"], strict=True):
+                self.assertEqual(message.tool_call_id, call_id)
+                self.assertEqual(json.loads(message.content)["code"], "interrupted")
+
+    def test_total_turn_count_includes_compacted_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            session = manager.create_session("s_test")
+            for text in ("one", "two", "three"):
+                session.add_message(MessageEvent.create(role="user", content=text))
+                session.add_message(
+                    MessageEvent.create(role="assistant", content=f"re: {text}")
+                )
+            last_user = session.messages[4]
+            session.compact_with_summary("earlier", first_kept_entry_id=last_user.id)
+
+            # The projection only shows the kept turn; the total does not shrink.
+            self.assertEqual(session.turn_count(), 1)
+            self.assertEqual(session.total_turn_count(), 3)
+
+    def test_projected_summary_is_preamble_not_a_turn(self) -> None:
+        session = Session("s_test")
+        for text in ("one", "two"):
+            session.add_message(MessageEvent.create(role="user", content=text))
+            session.add_message(
+                MessageEvent.create(role="assistant", content=f"re: {text}")
+            )
+        last_user = session.messages[2]
+        session.compact_with_summary("earlier", first_kept_entry_id=last_user.id)
+
+        preamble, turns = session._split_preamble_and_turns()
+
+        # Summary then the kept user message: two user messages in a row.
+        self.assertEqual(
+            [message.role for message in session.messages],
+            ["user", "user", "assistant"],
+        )
+        self.assertEqual([m.id for m in preamble], [session.messages[0].id])
+        self.assertEqual(len(turns), 1)
+        self.assertIs(turns[0][0], last_user)
+        self.assertEqual(session.turn_count(), 1)
+
+        # A summary with nothing kept leaves no turn at all.
+        session.compact_with_summary("everything", first_kept_entry_id=None)
+        self.assertEqual(len(session.messages), 1)
+        self.assertEqual(session.turn_count(), 0)
+        self.assertEqual(session.total_turn_count(), 2)
+
+    def test_real_user_message_is_not_mistaken_for_summary(self) -> None:
+        tagged = MessageEvent.create(
+            role="user",
+            content="<conversation-summary>\npasted\n</conversation-summary>",
+        )
+        self.assertFalse(SessionContextProjector.is_summary_message(tagged))
 
 
 def _tool_call_message(*call_ids: str) -> MessageEvent:

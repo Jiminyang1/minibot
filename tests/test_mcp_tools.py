@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcp.types import CallToolResult, TextContent
 
-from minibot.artifacts import ArtifactStore
 from minibot.llm import LLMClient, LLMResponse, ToolCall
 from minibot.mcp_host.client import MCPClientTimeoutError
 from minibot.mcp_host.models import MCPToolSpec

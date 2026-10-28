@@ -14,15 +14,20 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.20",
     "langfuse>=4.16,<5",
-    "matplotlib>=3.10.9",
     "mcp>=1.27,<2",
     "openai>=1.0",
-    "openpyxl>=3.1.5",
-    "pandas>=3.0.3",
-    "tabulate>=0.10.0",
     "textual>=8.2.8",
     "tiktoken>=0.7",
     "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# Not imported by MiniBot; installed so `exec` scripts can analyse artifacts.
+data = [
+    "matplotlib>=3.10.9",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.3",
+    "tabulate>=0.10.0",
 ]
 
 [project.scripts]
@@ -65,3 +70,18 @@ packages = [
 "minibot" = ["mcp.json", "web/*"]
 "minibot.skills" = ["*.md"]
 "minibot.evals" = ["*.json"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+# Bug-finding rules only: pyflakes, pycodestyle errors, bugbear.
+select = ["E4", "E7", "E9", "F", "B"]
+# FastAPI's `Body(...)` defaults are the framework idiom.
+ignore = ["B008"]

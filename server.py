@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from dataclasses import replace
+import ipaddress
 import json
 from pathlib import Path
 from queue import Empty, Queue
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .bootstrap import MiniBotRuntime, build_runtime
 from .config import Config, load_env
@@ -37,6 +42,81 @@ _WIRE_STRIPPED_KEYS = {
     "model.request.started": ("messages",),
     "compaction.request.started": ("messages",),
 }
+
+
+# The server has no authentication. Pinning the Host header to loopback names
+# blocks DNS rebinding: a page whose domain rebinds to 127.0.0.1 still sends
+# its own name as Host, so it never reaches the routes.
+DEFAULT_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+# Cross-site form posts can't carry JSON, but an Origin check on writes keeps
+# a foreign page from starting runs or approving tools even if that changes.
+_STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _normalize_host(host: str) -> str:
+    """Lowercase a host name; bracket bare IPv6 literals ("::1" -> "[::1]")."""
+    host = host.strip().lower()
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _host_from_netloc(netloc: str) -> str:
+    """Strip the port from a Host header or URL netloc, keeping IPv6 brackets."""
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        return netloc[: end + 1] if end != -1 else ""
+    return netloc.split(":", 1)[0]
+
+
+def is_loopback_host(host: str) -> bool:
+    host = host.strip().lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class LocalOnlyMiddleware:
+    """Reject requests whose Host, or whose Origin on writes, isn't allowed."""
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Iterable[str]) -> None:
+        self.app = app
+        self.allowed_hosts = {_normalize_host(host) for host in allowed_hosts}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        host = _host_from_netloc(headers.get("host", ""))
+        if host not in self.allowed_hosts:
+            response = JSONResponse(
+                {"detail": "invalid host header"}, status_code=400
+            )
+            await response(scope, receive, send)
+            return
+
+        origin = headers.get("origin")
+        if origin is not None and scope.get("method") in _STATE_CHANGING_METHODS:
+            # "null" (sandboxed frames, file://) has no netloc and is rejected.
+            origin_host = _host_from_netloc(urlsplit(origin).netloc)
+            if origin_host not in self.allowed_hosts:
+                response = JSONResponse(
+                    {"detail": "cross-origin request rejected"}, status_code=403
+                )
+                await response(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
 
 
 def _for_wire(event: RuntimeEvent) -> RuntimeEvent:
@@ -224,12 +304,17 @@ def _resolve_session(runtime: MiniBotRuntime, session_id: str) -> Session | None
     return runtime.manager.load(session_id)
 
 
-def create_app(runtime: MiniBotRuntime):
+def create_app(
+    runtime: MiniBotRuntime,
+    *,
+    allowed_hosts: Iterable[str] = DEFAULT_ALLOWED_HOSTS,
+):
     from fastapi import Body, FastAPI, HTTPException
-    from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+    from starlette.responses import FileResponse, StreamingResponse
     from starlette.staticfiles import StaticFiles
 
     app = FastAPI(title="MiniBot", version="0.1.0")
+    app.add_middleware(LocalOnlyMiddleware, allowed_hosts=allowed_hosts)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="static")
     event_store = RunEventStore()
 
@@ -425,7 +510,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the MiniBot SSE server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="extra Host name to accept (repeatable); loopback names are always allowed",
+    )
     args = parser.parse_args()
+
+    allowed_hosts = [*DEFAULT_ALLOWED_HOSTS, *args.allowed_host]
+    if not is_loopback_host(args.host):
+        allowed_hosts.append(args.host)
+        print(
+            f"警告: 服务器监听在非回环地址 {args.host}，且没有任何认证。"
+            "能访问该地址的人都可以启动运行并批准工具调用（包括 exec）。"
+        )
+        print("  从其他机器访问时，用 --allowed-host 加上客户端使用的主机名或 IP。")
 
     load_env()
     config = Config.from_env()
@@ -440,7 +541,7 @@ def main() -> None:
     except RuntimeError as exc:
         print(f"配置错误: {exc}")
         return
-    app = create_app(runtime)
+    app = create_app(runtime, allowed_hosts=allowed_hosts)
 
     import uvicorn
 

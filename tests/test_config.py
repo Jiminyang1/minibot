@@ -11,6 +11,15 @@ from minibot.config import Config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_fetch_via_jina_is_off_unless_enabled(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(Config.from_env().fetch_via_jina)
+        with patch.dict("os.environ", {"MINIBOT_FETCH_VIA_JINA": "1"}, clear=True):
+            self.assertTrue(Config.from_env().fetch_via_jina)
+        with patch.dict("os.environ", {"MINIBOT_FETCH_VIA_JINA": "maybe"}, clear=True):
+            with self.assertRaises(ValueError):
+                Config.from_env()
+
     def test_from_env_reads_max_parallel_tools(self) -> None:
         with patch.dict(
             "os.environ",

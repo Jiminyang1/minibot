@@ -55,11 +55,11 @@ def shell_toolset(workspace: Path) -> list[Tool]:
     return [ExecTool(workspace=workspace)]
 
 
-def network_toolset() -> list[Tool]:
+def network_toolset(*, fetch_via_jina: bool = False) -> list[Tool]:
     """Network-facing tools such as search and webpage fetching."""
     return [
         WebSearchTool(workspace=None),
-        FetchUrlTool(),
+        FetchUrlTool(use_jina=fetch_via_jina),
     ]
 
 

@@ -451,7 +451,7 @@ class Compactor:
         if assistant.role != "assistant" or not assistant.tool_calls:
             return None
 
-        expected_ids = [str(call.get("id", "")) for call in assistant.tool_calls]
+        expected_ids = [call.id for call in assistant.tool_calls]
         actual_ids = [
             str(message.tool_call_id)
             for message in messages[cursor + 1 :]
@@ -462,10 +462,8 @@ class Compactor:
 
         names: list[str] = []
         for call in assistant.tool_calls:
-            function = call.get("function") or {}
-            name = str(function.get("name", ""))
-            if name:
-                names.append(name)
+            if call.name:
+                names.append(call.name)
         return (cursor, names) if names else None
 
     def _all_tools_read_only(self, tool_names: list[str]) -> bool:

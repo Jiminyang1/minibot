@@ -232,10 +232,14 @@ class RunLogFoldTests(unittest.TestCase):
             self.assertEqual(log["tools_used"], [])
             self.assertIsNone(log["final_reply_preview"])
 
+            # The failed turn is closed with a fixed reply, not left unanswered.
             reloaded = manager.load("s_test")
             assert reloaded is not None
-            self.assertEqual(reloaded.message_count, 1)
-            self.assertEqual(reloaded.messages[0].role, "user")
+            self.assertEqual(
+                [message.role for message in reloaded.messages],
+                ["user", "assistant"],
+            )
+            self.assertIn("RuntimeError", reloaded.messages[1].content)
 
     def test_partial_failure_keeps_usage_from_completed_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -296,7 +300,7 @@ class RunLogFoldTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(
                 [message.role for message in reloaded.messages],
-                ["user", "assistant", "tool"],
+                ["user", "assistant", "tool", "assistant"],
             )
             self.assertEqual(reloaded.messages[2].name, "read_file")
 

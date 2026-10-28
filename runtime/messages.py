@@ -65,7 +65,11 @@ def session_message_to_model(
     return ModelMessage.create(
         role=message.role,
         content=message.content,
-        tool_calls=_model_tool_calls_from_openai(message.tool_calls),
+        tool_calls=[
+            ModelToolCall(id=call.id, name=call.name, arguments=call.arguments)
+            for call in message.tool_calls or []
+        ]
+        or None,
         tool_call_id=message.tool_call_id,
         tool_name=message.name,
         reasoning_content=reasoning_content,
@@ -138,24 +142,6 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
         return content
     omitted = len(content) - max_chars
     return f"{content[:max_chars]}\n\n[... {omitted} characters truncated for summary]"
-
-
-def _model_tool_calls_from_openai(
-    tool_calls: list[dict[str, Any]] | None,
-) -> list[ModelToolCall] | None:
-    if not tool_calls:
-        return None
-    converted: list[ModelToolCall] = []
-    for call in tool_calls:
-        function = call.get("function") or {}
-        converted.append(
-            ModelToolCall(
-                id=str(call.get("id", "")),
-                name=str(function.get("name", "")),
-                arguments=str(function.get("arguments", "{}")),
-            )
-        )
-    return converted
 
 
 def _openai_tool_calls_from_model(

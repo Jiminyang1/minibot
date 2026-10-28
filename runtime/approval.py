@@ -10,14 +10,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import uuid
 
 from ..config import ApprovalMode
-from ..tools.registry import PreparedToolCall
+from ..tools.base import UntrustedExposure
+from ..tools.registry import PreparedToolCall, ToolRegistry
 from ..tools.result import ToolOutput
 from .cancel import RunCancelled
 from .events import RuntimeEventEmitter
+
+if TYPE_CHECKING:
+    from ..session import Session
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,34 @@ class ApprovalRequest:
     tool_call_id: str
     tool_name: str
     args: dict[str, Any]
+    reason: str | None = None
+
+
+def untrusted_exposure(session: Session, registry: ToolRegistry) -> UntrustedExposure:
+    """Fold the whole session (compacted entries included) into an exposure.
+
+    Sticky by design: injected text may survive in a summary or act turns
+    later, so once an untrusted tool has answered, the session stays tainted.
+    """
+    tainted = False
+    seen: list[str] = []
+    for entry in session.entries:
+        message = entry.message
+        if message is None:
+            if entry.summary:
+                seen.append(entry.summary)
+            continue
+        if message.role == "user":
+            seen.append(message.content)
+        elif message.role == "tool":
+            seen.append(message.content)
+            tool = registry.get(message.name or "")
+            if tool is None:
+                # An MCP server that is gone now still answered back then.
+                tainted = tainted or (message.name or "").startswith("mcp__")
+            else:
+                tainted = tainted or tool.untrusted_output
+    return UntrustedExposure(tainted=tainted, seen_text="\n".join(seen))
 
 
 class ApprovalPolicy:
@@ -70,7 +102,7 @@ class ApprovalPolicy:
 
 
 class ToolApprovalGate:
-    """Gate tools that declare ``requires_approval`` before execution."""
+    """Gate calls whose tool gives an ``approval_reason`` before execution."""
 
     def __init__(self, policy: ApprovalPolicy) -> None:
         self.policy = policy
@@ -83,9 +115,11 @@ class ToolApprovalGate:
         session_id: str,
         emitter: RuntimeEventEmitter | None,
         cancel_event: threading.Event | None,
+        exposure: UntrustedExposure | None = None,
     ) -> ToolOutput | None:
         """Return ``None`` when the call may run, or a denial ``ToolOutput``."""
-        if not call.tool.requires_approval:
+        reason = call.tool.approval_reason(call.args, exposure or UntrustedExposure())
+        if reason is None:
             return None
 
         if cancel_event is not None and cancel_event.is_set():
@@ -120,7 +154,7 @@ class ToolApprovalGate:
             return ToolOutput.failure(
                 "denied",
                 f"工具 {call.tool.name} 需要审批，但当前没有可用的审批渠道，已拒绝执行。",
-                data={"tool": call.tool.name, "args": call.args},
+                data={"tool": call.tool.name, "args": call.args, "reason": reason},
             )
 
         approval_id = "ap_" + uuid.uuid4().hex[:12]
@@ -131,6 +165,7 @@ class ToolApprovalGate:
             tool_call_id=call.tool_call_id or "",
             tool_name=call.tool.name,
             args=call.args,
+            reason=reason,
         )
         _emit(
             emitter,
@@ -140,6 +175,7 @@ class ToolApprovalGate:
                 "tool_call_id": call.tool_call_id,
                 "tool": call.tool.name,
                 "args": call.args,
+                "reason": reason,
             },
         )
         approved = self.policy.request(request, cancel_event=cancel_event)

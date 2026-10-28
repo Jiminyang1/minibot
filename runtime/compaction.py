@@ -7,6 +7,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from ..session import SessionContextProjector
 from .messages import (
     ModelMessage,
     format_model_messages_for_summary,
@@ -153,7 +154,7 @@ def prepare_compaction(
 
     turn_start = _turn_start_index(messages, first_kept, start_index=start_index)
     if (
-        messages[first_kept].role != "user"
+        not _is_turn_start(messages[first_kept])
         and turn_start is not None
         and _turn_tokens(
             messages,
@@ -165,7 +166,7 @@ def prepare_compaction(
         first_kept = turn_start
         turn_start = first_kept
 
-    is_user_boundary = messages[first_kept].role == "user"
+    is_user_boundary = _is_turn_start(messages[first_kept])
     is_split_turn = not is_user_boundary and turn_start is not None
     history_end = turn_start if is_split_turn and turn_start is not None else first_kept
     if history_end <= start_index and not is_split_turn:
@@ -190,12 +191,7 @@ def drop_projected_summary_message(
     """Drop the synthetic projector summary when previous_summary is explicit."""
     if not previous_summary or not messages:
         return messages
-    first = messages[0]
-    if first.role != "assistant":
-        return messages
-    if not str(first.id).endswith("_summary"):
-        return messages
-    if not first.content.startswith("[Summary of earlier conversation]\n"):
+    if not SessionContextProjector.is_summary_message(messages[0]):
         return messages
     return messages[1:]
 
@@ -235,15 +231,14 @@ def extract_compaction_details(
             cursor += 1
 
         for call in message.tool_calls:
-            function = call.get("function") or {}
-            name = str(function.get("name", ""))
-            call_id = str(call.get("id", ""))
+            name = call.name
+            call_id = call.id
             if name in {"write_file", "edit_file"}:
-                path = _tool_path_argument(function.get("arguments"))
+                path = _tool_path_argument(call.arguments)
                 if path:
                     modified_files.add(path)
             elif name == "read_file":
-                path = _tool_path_argument(function.get("arguments"))
+                path = _tool_path_argument(call.arguments)
                 if path:
                     read_files.add(path)
             elif name == "read_artifact":
@@ -301,6 +296,10 @@ def _first_valid_cut_at_or_after(
     for index in range(threshold_index, len(messages)):
         if messages[index].role == "tool":
             continue
+        # The projected summary is rebuilt from the compaction entry and has
+        # no entry of its own, so it can never be the first kept message.
+        if SessionContextProjector.is_summary_message(messages[index]):
+            continue
         if not _starts_with_incomplete_tool_transaction(messages, index):
             return index
     return None
@@ -313,7 +312,7 @@ def _starts_with_incomplete_tool_transaction(
     message = messages[index]
     if message.role != "assistant" or not message.tool_calls:
         return False
-    expected_ids = [str(call.get("id", "")) for call in message.tool_calls]
+    expected_ids = [call.id for call in message.tool_calls]
     if not expected_ids:
         return True
     cursor = index + 1
@@ -332,9 +331,16 @@ def _turn_start_index(
     start_index: int = 0,
 ) -> int | None:
     for cursor in range(index, start_index - 1, -1):
-        if messages[cursor].role == "user":
+        if _is_turn_start(messages[cursor]):
             return cursor
     return None
+
+
+def _is_turn_start(message: MessageEvent) -> bool:
+    """A real user message; the projected summary is a user message but no turn."""
+    return message.role == "user" and not SessionContextProjector.is_summary_message(
+        message
+    )
 
 
 def _turn_tokens(
@@ -345,7 +351,7 @@ def _turn_tokens(
 ) -> int:
     turn_end = len(messages)
     for cursor in range(turn_start + 1, len(messages)):
-        if messages[cursor].role == "user":
+        if _is_turn_start(messages[cursor]):
             turn_end = cursor
             break
     return estimate_messages_tokens(

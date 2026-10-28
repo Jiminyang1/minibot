@@ -95,13 +95,18 @@ def estimate_request_token_breakdown(
     )
     tool_definition_tokens = 0
     if tools:
-        from ..llm_providers.openai_compatible import (
-            model_tool_definitions_to_openai,
-        )
-
+        # Provider-neutral rendering; provider wrappers add only a few tokens
+        # per tool, which is below the noise of a local tiktoken estimate.
         tool_definition_tokens = estimate_text_tokens(
             json.dumps(
-                model_tool_definitions_to_openai(tools),
+                [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                    for tool in tools
+                ],
                 ensure_ascii=False,
             )
         )

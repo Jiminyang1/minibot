@@ -22,6 +22,7 @@ from minibot.server import create_app
 class _FakeAgentSession:
     def __init__(self) -> None:
         self.cancelled = None
+        self.prompts: list[str] = []
 
     def prompt(
         self,
@@ -32,6 +33,7 @@ class _FakeAgentSession:
         run_id=None,
         source=None,
     ):
+        self.prompts.append(user_input)
         emitter = RuntimeEventEmitter(
             run_id=run_id or "r_test",
             session_id=session_id or "s_test",
@@ -72,11 +74,16 @@ def _runtime(
     )
 
 
+def _client(app, host: str = "127.0.0.1"):
+    # TestClient defaults to Host "testserver", which the server rejects.
+    return TestClient(app, base_url=f"http://{host}")
+
+
 @unittest.skipIf(TestClient is None, "fastapi is not installed")
 class ServerSSETests(unittest.TestCase):
     def test_index_serves_browser_ui(self) -> None:
         runtime = _runtime()
-        client = TestClient(create_app(runtime))
+        client = _client(create_app(runtime))
 
         response = client.get("/")
 
@@ -95,7 +102,7 @@ class ServerSSETests(unittest.TestCase):
             session.add_message(assistant)
             manager.save(session)
             manager.set_current_session("s_test")
-            client = TestClient(create_app(_runtime(manager=manager)))
+            client = _client(create_app(_runtime(manager=manager)))
 
             response = client.get("/sessions/current/messages")
 
@@ -110,7 +117,7 @@ class ServerSSETests(unittest.TestCase):
 
     def test_create_run_returns_id_and_events_endpoint_replays_backlog(self) -> None:
         runtime = _runtime()
-        client = TestClient(create_app(runtime))
+        client = _client(create_app(runtime))
 
         created = client.post("/runs", json={"input": "hi"})
 
@@ -128,7 +135,7 @@ class ServerSSETests(unittest.TestCase):
 
     def test_events_endpoint_honors_last_event_id(self) -> None:
         runtime = _runtime()
-        client = TestClient(create_app(runtime))
+        client = _client(create_app(runtime))
         run_id = client.post("/runs", json={"input": "hi"}).json()["run_id"]
 
         response = client.get(
@@ -144,7 +151,7 @@ class ServerSSETests(unittest.TestCase):
     def test_cancel_endpoint_forwards_run_id_to_agent_session(self) -> None:
         agent_session = _FakeAgentSession()
         runtime = _runtime(agent_session=agent_session)
-        client = TestClient(create_app(runtime))
+        client = _client(create_app(runtime))
 
         response = client.post("/runs/r_test/cancel")
 
@@ -155,7 +162,7 @@ class ServerSSETests(unittest.TestCase):
     def test_approval_endpoint_forwards_decision_to_broker(self) -> None:
         broker = _FakeApprovalBroker()
         runtime = _runtime(approval_broker=broker)
-        client = TestClient(create_app(runtime))
+        client = _client(create_app(runtime))
 
         response = client.post(
             "/runs/r_test/approvals/ap_test",
@@ -165,6 +172,92 @@ class ServerSSETests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True, "matched_pending": True})
         self.assertEqual(broker.resolved, ("r_test", "ap_test", False))
+
+
+
+@unittest.skipIf(TestClient is None, "fastapi is not installed")
+class ServerHostOriginTests(unittest.TestCase):
+    def test_foreign_host_is_rejected_and_no_run_starts(self) -> None:
+        agent_session = _FakeAgentSession()
+        client = _client(create_app(_runtime(agent_session=agent_session)))
+
+        created = client.post(
+            "/runs", json={"input": "hi"}, headers={"Host": "evil.test"}
+        )
+        listed = client.get("/sessions", headers={"Host": "evil.test:8765"})
+
+        self.assertEqual(created.status_code, 400)
+        self.assertEqual(listed.status_code, 400)
+        self.assertEqual(agent_session.prompts, [])
+
+    def test_loopback_hosts_with_and_without_port_are_accepted(self) -> None:
+        client = _client(create_app(_runtime()))
+
+        for host in ("localhost:8765", "127.0.0.1", "127.0.0.1:8765", "[::1]:8765"):
+            with self.subTest(host=host):
+                response = client.get("/sessions", headers={"Host": host})
+                self.assertEqual(response.status_code, 200)
+
+    def test_testserver_host_is_not_allowed_by_default(self) -> None:
+        client = TestClient(create_app(_runtime()))
+
+        self.assertEqual(client.get("/sessions").status_code, 400)
+
+    def test_extra_allowed_host_is_accepted(self) -> None:
+        app = create_app(
+            _runtime(), allowed_hosts=["127.0.0.1", "minibot.lan"]
+        )
+
+        self.assertEqual(_client(app, "minibot.lan:8765").get("/").status_code, 200)
+        self.assertEqual(_client(app, "localhost").get("/").status_code, 400)
+
+    def test_post_with_foreign_origin_is_rejected(self) -> None:
+        broker = _FakeApprovalBroker()
+        agent_session = _FakeAgentSession()
+        client = _client(
+            create_app(_runtime(agent_session=agent_session, approval_broker=broker))
+        )
+
+        created = client.post(
+            "/runs",
+            json={"input": "hi"},
+            headers={"Origin": "http://evil.test"},
+        )
+        approved = client.post(
+            "/runs/r_test/approvals/ap_test",
+            json={"approved": True},
+            headers={"Origin": "http://evil.test"},
+        )
+        null_origin = client.post(
+            "/runs/r_test/cancel", headers={"Origin": "null"}
+        )
+
+        self.assertEqual(created.status_code, 403)
+        self.assertEqual(approved.status_code, 403)
+        self.assertEqual(null_origin.status_code, 403)
+        self.assertEqual(agent_session.prompts, [])
+        self.assertIsNone(broker.resolved)
+        self.assertIsNone(agent_session.cancelled)
+
+    def test_post_without_origin_or_with_loopback_origin_is_accepted(self) -> None:
+        client = _client(create_app(_runtime()))
+
+        for headers in (
+            {},
+            {"Origin": "http://127.0.0.1:8765"},
+            {"Origin": "http://localhost:8765"},
+        ):
+            with self.subTest(headers=headers):
+                created = client.post("/runs", json={"input": "hi"}, headers=headers)
+                self.assertEqual(created.status_code, 202)
+
+    def test_get_with_foreign_origin_is_not_origin_checked(self) -> None:
+        # Reads are protected by the Host check; Origin only gates writes.
+        client = _client(create_app(_runtime()))
+
+        response = client.get("/sessions", headers={"Origin": "http://evil.test"})
+
+        self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

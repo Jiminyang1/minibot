@@ -13,6 +13,7 @@ from minibot.runtime.messages import (
     model_message_to_openai,
     session_message_to_model,
 )
+from minibot.llm import ToolCall
 from minibot.session import MessageEvent
 
 
@@ -76,29 +77,36 @@ class RuntimeMessageConversionTests(unittest.TestCase):
             "thinking",
         )
 
-    def test_message_event_persists_openai_compatible_tool_call_shape(self) -> None:
+    def test_message_event_persists_provider_neutral_tool_calls(self) -> None:
         event = MessageEvent.create(
             role="assistant",
             content="",
-            tool_calls=[
-                model_message_to_openai(
-                    ModelMessage.create(
-                        role="assistant",
-                        content="",
-                        tool_calls=[
-                            ModelToolCall(
-                                id="call_1",
-                                name="search_files",
-                                arguments='{"query":"needle"}',
-                            )
-                        ],
-                    )
-                )["tool_calls"][0]
-            ],
+            tool_calls=[ToolCall(id="call_1", name="search_files", arguments='{"query":"needle"}')],
         )
 
-        self.assertEqual(event.tool_calls[0]["type"], "function")
-        self.assertEqual(event.tool_calls[0]["function"]["name"], "search_files")
+        self.assertEqual(
+            event.to_dict()["tool_calls"],
+            [{"id": "call_1", "name": "search_files", "arguments": '{"query":"needle"}'}],
+        )
+        self.assertEqual(MessageEvent.from_dict(event.to_dict()).tool_calls, event.tool_calls)
+
+    def test_message_event_still_loads_the_old_openai_shape(self) -> None:
+        legacy = model_message_to_openai(
+            ModelMessage.create(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ModelToolCall(id="call_1", name="search_files", arguments='{"query":"needle"}')
+                ],
+            )
+        )
+
+        event = MessageEvent.from_dict({"role": "assistant", "content": "", **legacy})
+
+        self.assertEqual(
+            event.tool_calls,
+            [ToolCall(id="call_1", name="search_files", arguments='{"query":"needle"}')],
+        )
 
     def test_summary_formatter_handles_user_assistant_tool_and_call(self) -> None:
         formatted = format_model_messages_for_summary(

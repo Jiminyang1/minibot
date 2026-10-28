@@ -126,8 +126,10 @@ class ApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         args = json.dumps(self._request.args, ensure_ascii=False, indent=2)
+        reason = f"{escape(self._request.reason)}\n\n" if self._request.reason else ""
         yield Static(
-            f"批准执行 [b]{self._request.tool_name}[/b] ?\n\n{preview_text(args, 600)}",
+            f"批准执行 [b]{self._request.tool_name}[/b] ?\n\n"
+            f"{reason}{preview_text(args, 600)}",
             id="approval-text",
         )
         with Horizontal(id="approval-actions"):

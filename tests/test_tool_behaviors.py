@@ -207,7 +207,7 @@ class ToolBehaviorTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                tool = FetchUrlTool()
+                tool = FetchUrlTool(allow_private_hosts=True)
                 result = self._materialize(
                     workspace,
                     context,
@@ -238,7 +238,7 @@ class ToolBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             context = ToolExecutionContext(session_id="s_test")
-            tool = FetchUrlTool()
+            tool = FetchUrlTool(use_jina=True)
 
             with (
                 patch.object(
@@ -327,7 +327,7 @@ class ToolBehaviorTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                tool = FetchUrlTool()
+                tool = FetchUrlTool(allow_private_hosts=True)
                 result = self._materialize(
                     workspace,
                     context,
