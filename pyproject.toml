@@ -76,6 +76,7 @@ packages = [
 "minibot" = ["mcp.json", "web/*"]
 "minibot.skills" = ["*.md"]
 "minibot.evals" = ["*.json"]
+"minibot.lessons" = ["*.json"]
 
 [dependency-groups]
 dev = [
