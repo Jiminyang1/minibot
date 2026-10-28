@@ -3,6 +3,10 @@
 ``ContextBuilder.build`` is a projection: session messages in, request payload
 out. It never mutates the session, never calls a model, and never touches disk
 — compaction and budgeting live elsewhere.
+
+The one read beyond the session is optional lesson retrieval: a local
+embedding of the latest user message (memoised, so repeated builds in a turn
+cost nothing) against the approved lessons on disk. It writes nothing.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from .messages import ModelMessage, session_message_to_model
 from .token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
+    from ..lessons.retrieve import LessonRetriever
     from ..session import MessageEvent
     from ..user_memory import UserMemoryStore
 
@@ -33,6 +38,8 @@ class BuiltRequest:
     messages: list[ModelMessage]
     tool_definitions: list[ModelToolDefinition]
     memory_tokens: int
+    # Approved lessons appended to the latest user message, best first.
+    lesson_ids: tuple[str, ...] = ()
 
 
 class ContextBuilder:
@@ -40,6 +47,7 @@ class ContextBuilder:
 
     _DEFAULT_MAX_INLINE_MEMORY_TOKENS = 1200
     _MAX_MEMORY_FACT_CHARS = 240
+    _MAX_LESSON_CHARS = 300
     _WEEKDAY_NAMES = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 
     def __init__(
@@ -53,6 +61,7 @@ class ContextBuilder:
         now_provider: Callable[[], datetime] | None = None,
         include_reasoning_content: bool = False,
         workspace: Path | None = None,
+        lesson_retriever: LessonRetriever | None = None,
     ) -> None:
         self.base_system_prompt = base_system_prompt
         self.memory_store = memory_store
@@ -62,6 +71,7 @@ class ContextBuilder:
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
         self.include_reasoning_content = include_reasoning_content
         self.workspace = workspace
+        self.lesson_retriever = lesson_retriever
 
     def build(self, history_messages: list[MessageEvent]) -> BuiltRequest:
         history = [
@@ -72,6 +82,9 @@ class ContextBuilder:
             for message in history_messages
         ]
         now = self._local_now()
+        # Lessons first, send times last: both are request-only tails, and on
+        # the latest user message the stamp must stay the very last thing.
+        history, lesson_ids = self._attach_lessons(history)
         history = self._stamp_user_messages(history_messages, history, now)
         memory_block, memory_tokens = self._render_memory_block()
         system_prompt = self._build_system_prompt(
@@ -87,6 +100,7 @@ class ContextBuilder:
             ],
             tool_definitions=self.tool_registry.get_definitions(),
             memory_tokens=memory_tokens,
+            lesson_ids=lesson_ids,
         )
 
     def list_available_skills(self) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -203,6 +217,67 @@ class ContextBuilder:
             return None
         return sent.astimezone(current.tzinfo)
 
+    def _attach_lessons(
+        self,
+        history: list[ModelMessage],
+    ) -> tuple[list[ModelMessage], tuple[str, ...]]:
+        """Append approved lessons relevant to the latest user message.
+
+        Request-only, like the time stamp, and kept out of the system prompt:
+        the block changes with every question, and in the system prompt it
+        would break the provider's prompt cache for the whole conversation.
+        Retrieval is keyed on the user's own words (read before the stamp is
+        added), so every build within one turn yields the same block.
+        """
+        if self.lesson_retriever is None:
+            return history, ()
+        index = self._latest_user_index(history)
+        if index is None:
+            return history, ()
+        scored = self.lesson_retriever.retrieve(history[index].content)
+        if not scored:
+            return history, ()
+        lines = [
+            "[相关经验：系统根据以往的失败整理、经用户审核后附加，不是用户输入；"
+            "与本次请求无关时忽略]"
+        ]
+        for item in scored:
+            lesson = item.lesson
+            rule = self._sanitize(
+                f"情境: {lesson.trigger}；做法: {lesson.guidance}",
+                self._MAX_LESSON_CHARS,
+            )
+            lines.append(f"- {lesson.id} {rule}")
+        block = "\n".join(lines)
+        return (
+            self._append_to_message(history, index, block),
+            tuple(item.lesson.id for item in scored),
+        )
+
+    @staticmethod
+    def _latest_user_index(history: list[ModelMessage]) -> int | None:
+        summary_head = SessionContextProjector.SUMMARY_OPEN_TAG + "\n"
+        for index in range(len(history) - 1, -1, -1):
+            message = history[index]
+            if message.role != "user":
+                continue
+            # The projected summary is not a user turn; lessons appended to it
+            # would change the request's first message with every question.
+            if message.content.startswith(summary_head):
+                continue
+            return index
+        return None
+
+    @staticmethod
+    def _append_to_message(
+        history: list[ModelMessage], index: int, tail: str
+    ) -> list[ModelMessage]:
+        updated = list(history)
+        updated[index] = replace(
+            history[index], content=f"{history[index].content}\n\n{tail}"
+        )
+        return updated
+
     def _render_skill_catalog_block(self) -> str:
         skills = self.list_available_skills()
         if not skills:
@@ -260,10 +335,14 @@ class ContextBuilder:
         return "\n".join(lines), used_tokens
 
     def _sanitize_fact(self, content: str) -> str:
+        return self._sanitize(content, self._MAX_MEMORY_FACT_CHARS)
+
+    @staticmethod
+    def _sanitize(content: str, limit: int) -> str:
         compact = " ".join(content.split())
-        if len(compact) <= self._MAX_MEMORY_FACT_CHARS:
+        if len(compact) <= limit:
             return compact
-        return compact[: self._MAX_MEMORY_FACT_CHARS - 3] + "..."
+        return compact[: limit - 3] + "..."
 
     @staticmethod
     def _truncate_to_tokens(text: str, max_tokens: int) -> str:

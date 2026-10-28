@@ -44,8 +44,9 @@ if TYPE_CHECKING:
 # Closing replies for a turn that ends without a final answer. They are
 # written to the session so the next turn's model sees the request as
 # answered (not completed) instead of unanswered — and does not redo it.
-_CANCELLED_TURN_REPLY = "本轮已被用户取消，请求未完成。"
-_FAILED_TURN_REPLY = "本轮因错误中止（{error_type}），请求未完成。"
+CANCELLED_TURN_REPLY = "本轮已被用户取消，请求未完成。"
+FAILED_TURN_REPLY = "本轮因错误中止（{error_type}），请求未完成。"
+MAX_ITERATIONS_REPLY = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
 
 
 @dataclass(frozen=True)
@@ -150,21 +151,22 @@ class AgentLoop:
                         {"iteration": iteration, "message": compact_message},
                     )
 
-                emitter.emit(
-                    "model.request.started",
-                    {
-                        "iteration": iteration,
-                        "model": self.model,
-                        "input_preview": _preview(user_input),
-                        # The exact request, for tracing subscribers. Heavy:
-                        # wire-facing subscribers (SSE) strip it.
-                        "messages": model_messages_to_openai(
-                            built.messages,
-                            include_reasoning_content=True,
-                        ),
-                        "tools": [tool.name for tool in built.tool_definitions],
-                    },
-                )
+                request_payload: dict[str, Any] = {
+                    "iteration": iteration,
+                    "model": self.model,
+                    "input_preview": _preview(user_input),
+                    # The exact request, for tracing subscribers. Heavy:
+                    # wire-facing subscribers (SSE) strip it.
+                    "messages": model_messages_to_openai(
+                        built.messages,
+                        include_reasoning_content=True,
+                    ),
+                    "tools": [tool.name for tool in built.tool_definitions],
+                }
+                if built.lesson_ids:
+                    # Approved lessons appended to the latest user message.
+                    request_payload["lessons"] = list(built.lesson_ids)
+                emitter.emit("model.request.started", request_payload)
                 resp = self._stream_model_response(
                     built,
                     emitter,
@@ -262,7 +264,7 @@ class AgentLoop:
                         ),
                     )
 
-            reply = "抱歉，工具调用轮次已达上限，请简化问题后重试。"
+            reply = MAX_ITERATIONS_REPLY
             final_message = self._append(
                 session, MessageEvent.create(role="assistant", content=reply)
             )
@@ -428,9 +430,9 @@ class AgentLoop:
         if _ends_with_final_reply(session):
             return
         if isinstance(exc, (RunCancelled, KeyboardInterrupt)):
-            content = _CANCELLED_TURN_REPLY
+            content = CANCELLED_TURN_REPLY
         else:
-            content = _FAILED_TURN_REPLY.format(error_type=type(exc).__name__)
+            content = FAILED_TURN_REPLY.format(error_type=type(exc).__name__)
         try:
             self._append(session, MessageEvent.create(role="assistant", content=content))
         except Exception as close_exc:

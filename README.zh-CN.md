@@ -16,6 +16,7 @@
 - 跨会话用户长期记忆（`remember` / `forget`）+ 情景记忆（`search_history` 跨全部历史会话检索原文与压缩摘要）
 - 定时任务与提醒：自然语言创建（cron 周期 / 一次性），`minibot-daemon` 到点无人值守执行，结果经 macOS 通知投递并存为可检索的会话
 - 敏感工具审批（`ask` / `always`，CLI 问答或 Web 审批端点）。会话里一旦出现网页、搜索结果或 MCP 输出，`remember` 和 `fetch_url`（URL 没有在用户消息或不可信工具的结果里出现过时）也要审批，被注入的文字没法悄悄写进记忆或把数据带出去
+- 质量闭环：按阶段打分的黄金评测（pytest、回放 Langfuse dataset、LLM-as-judge），以及（实验性的）挖掘失败 → 起草修复 → 人工审核 → 检索已批准 lesson 的闭环
 - 可靠性：LLM 瞬时错误指数退避重试（首个 delta 后不重试）、摘要失败降级为截断、工具参数 JSON Schema 预校验
 - MCP：`stdio` / `streamable_http`；内置 SQLite demo、macOS system server，默认配置可接 draw.io MCP
 
@@ -131,6 +132,8 @@ flowchart TB
 | `mcp_host/` | MCP 客户端、transport、`MCPToolProxy` |
 | `mcp_servers/` | 内置 SQLite / macOS MCP server |
 | `skills/` | Skill 元数据与 Markdown 正文 |
+| `evals/` | 黄金评测：沙箱、逐阶段打分、Langfuse dataset、pytest 套件、trace 转用例 |
+| `lessons/` | lesson 闭环：挖掘、聚类、起草、审核、检索 |
 | `user_memory.py` | 全局长期记忆 |
 | `cli.py` / `server.py` | CLI 与 Web 入口 |
 
@@ -156,6 +159,8 @@ flowchart TB
 | `MINIBOT_INCLUDE_REASONING_CONTENT` | `auto` | DeepSeek 等 reasoning 字段回传策略 |
 | `MINIBOT_STREAMING` | `auto` | 设为 `0`/`off` 可关闭流式（SSE 实现有问题的端点用） |
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
+| `MINIBOT_LESSONS` | `auto` | `auto`（装了 fastembed 且有已批准的 lesson 时开启）/ `on` / `off` |
+| `MINIBOT_LESSONS_TOP_K` / `MINIBOT_LESSONS_MIN_SCORE` | `3` / `0.55` | 每次请求最多几条 / 余弦相似度下限 |
 | `MINIBOT_FETCH_VIA_JINA` | `0` | 设为 `1` 时 `fetch_url` 先走 Jina 阅读器（`r.jina.ai`），正文抽取更好，但每个抓取的 URL 都会发给这个第三方 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | 两个都设置即开启 Langfuse 追踪（每个 turn 一条 trace，含完整请求、工具、审批、压缩） |
 | `LANGFUSE_BASE_URL` | EU 云 | Langfuse 地址：按注册区域填，或自部署地址 |
@@ -200,6 +205,33 @@ uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
 - `/tasks` 查看、`/tasks cancel <id>` 取消，或直接用自然语言管理
 
 **Heartbeat（心跳巡逻）**：cron 是"到点执行写死的指令"，heartbeat 是"到点醒来自己判断"。对话里说「每 30 分钟帮我巡逻一次」即可创建（`schedule_task` 的 `heartbeat` 模式）：按周期在**同一个持久会话**里读 `~/.minibot/HEARTBEAT.md` 巡逻清单（内容内联进 prompt），逐项检查、该做的做；没有需要注意的事就回 `HEARTBEAT_OK` **保持静默**，只有真有情况才弹通知。清单是纯 Markdown，`#` 行为注释，直接编辑即可；会话上下文连续增长由自动 compaction 兜底。
+
+## 质量闭环：评测与 lesson
+
+评测衡量 agent。lesson 闭环（**实验性**）把过去的失败整理成规则，由人批准。`run --lessons compare` 用来检查已批准的 lesson 有没有用；但 10 个用例各跑一次，结果只能当参考，不能当证据（用例还没有重复运行，一个用例翻转就是 10 个百分点的噪声）。
+
+**黄金评测**（`evals/`）。用例在 `evals/cases.json`，同步到 Langfuse dataset `minibot-golden`。每个用例在沙箱里跑一轮，按阶段打分：skill 选择 → 工具选择 → 工具参数 → 回答（LLM-as-judge）→ 结果状态。
+
+```bash
+uv run python -m minibot.evals run                    # 全部用例；逐个指出第一个失败的阶段和 trace 链接
+uv run python -m minibot.evals pytest -k tool_args    # pytest，每个（用例, 阶段）一个测试；回放 Langfuse dataset
+uv run python -m minibot.evals traces --failed        # 最近出问题的真实运行
+uv run python -m minibot.evals promote <trace_id>     # 把一次真实运行变成用例：记录下的工具输出在沙箱里回放
+uv run python -m minibot.evals run --lessons compare  # 同一批用例分别关、开 lesson：通过率、翻转、调用/token/耗时
+```
+
+pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。
+
+**lesson**（`lessons/`，需要 `uv sync --extra lessons`）——**实验性**。一条 lesson 是经人工批准的规则：*在* <trigger> *时*，*做* <guidance>。它还没在真实的失败数据上跑过，阈值来自一小份手写数据；`uv run python -m minibot.lessons.benchmark` 可以重新测量。
+
+```bash
+uv run python -m minibot.lessons mine --dry-run   # 从会话和 runs.jsonl 里找出失败并聚类
+uv run python -m minibot.lessons mine             # LLM 为每一类起草一条 lesson
+uv run python -m minibot.lessons review           # 逐条批准 / 修改 / 拒绝
+uv run python -m minibot.lessons list --status approved
+```
+
+挖掘的信号包括：失败的工具调用、失败或轮次耗尽的一轮、被拒绝的审批、用户纠正（"不对""wrong"）。聚类用本地 embedding 模型（`BAAI/bge-small-zh-v1.5`，约 90 MB，缓存在 `~/.minibot/models`），数据不出本机，也没有向量数据库。请求时，trigger 或证据原话与最新用户消息匹配的已批准 lesson 会追加到这条消息末尾（不进系统提示词，否则会破坏 prompt cache），`model.request.started` 会列出它们。只有批准过的 lesson 才会注入：草稿来自工具输出和网页文本，所以审核这一步同时也是防提示注入的关口。
 
 ## CLI 命令
 

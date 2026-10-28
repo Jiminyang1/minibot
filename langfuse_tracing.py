@@ -109,6 +109,8 @@ class LangfuseFold:
                 metadata={
                     "iteration": payload.get("iteration"),
                     "tools": payload.get("tools"),
+                    # Approved lessons appended to this request, if any.
+                    "lessons": payload.get("lessons"),
                 },
             )
         elif kind == "message.delta":
