@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Model output must not load remote images (zero-click exfiltration). -->
+  <meta http-equiv="Content-Security-Policy" content="img-src 'self' data:" />
   <title>MiniBot</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
