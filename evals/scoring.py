@@ -133,15 +133,16 @@ def score_deterministic(
     return scores
 
 
+def stage_passed(stage: str, value: float) -> bool:
+    """The answer stage passes at ½ (judge says "mostly"); others need 1.0."""
+    return value >= (ANSWER_PASS if stage == "answer" else 1.0)
+
+
 def end_to_end(scores: list[StageScore], *, error: str | None) -> StageScore:
     """Pass only if the run finished and every scored stage passed."""
     if error:
         return StageScore("end_to_end", 0.0, f"运行失败: {error}")
-    failed = [
-        score.name
-        for score in scores
-        if score.value < (ANSWER_PASS if score.name == "answer" else 1.0)
-    ]
+    failed = [s.name for s in scores if not stage_passed(s.name, s.value)]
     return StageScore(
         "end_to_end",
         float(not failed),
