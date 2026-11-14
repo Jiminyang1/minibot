@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import threading
 from typing import Any, Literal, TypeAlias
+from urllib.parse import unquote_plus
 
 from .definitions import ModelToolDefinition
 from .result import ToolOutput
@@ -25,22 +26,65 @@ class ToolExecutionContext:
     cancel_event: threading.Event | None = None
 
 
+def written_forms(text: str) -> tuple[str, ...]:
+    """The forms in which model-written text is compared with a later echo.
+
+    A tool rarely echoes its input byte for byte: ``web_search`` collapses
+    whitespace, others trim, change case or percent-decode. Whitespace and
+    case are dropped and the percent-decoded form is added, so those echoes
+    still match what the model wrote.
+    """
+    squashed = "".join(text.split()).casefold()
+    decoded = "".join(unquote_plus(text).split()).casefold()
+    return (squashed,) if decoded == squashed else (squashed, decoded)
+
+
+@dataclass(frozen=True)
+class ShownText:
+    """One successful result of an untrusted tool, in session order."""
+
+    text: str
+    # How much of ``UntrustedExposure.written`` the model had produced when
+    # this result arrived.
+    written_before: int
+
+
 @dataclass(frozen=True)
 class UntrustedExposure:
     """What the session has already shown the model from untrusted sources.
 
     ``tainted``: a tool whose output may carry third-party text (web pages,
     search results, MCP servers) has returned into this session, so the
-    model may be following injected instructions. ``seen_text`` is what the
-    user and tools have put in front of the model; a URL found there was
-    followed, a URL missing from it was built by the model itself.
+    model may be following injected instructions.
+
+    ``mentions`` answers "did someone other than the model put this text in
+    front of the model?". ``seen_text`` is what the user wrote and always
+    counts. ``shown`` holds untrusted tool results; one counts only if the
+    model had not written the text before that result arrived (``written``:
+    replies, tool-call arguments and summaries, in ``written_forms``).
+    Otherwise the result is an echo of the model's own words, and a URL in
+    it was built by the model, not found by it.
     """
 
     tainted: bool = False
     seen_text: str = ""
+    shown: tuple[ShownText, ...] = ()
+    written: str = ""
 
     def mentions(self, text: str) -> bool:
-        return bool(text) and text in self.seen_text
+        if not text:
+            return False
+        if text in self.seen_text:
+            return True
+        forms = written_forms(text)
+        return any(
+            text in item.text
+            and all(
+                self.written.find(form, 0, item.written_before) == -1
+                for form in forms
+            )
+            for item in self.shown
+        )
 
 
 class Tool(ABC):

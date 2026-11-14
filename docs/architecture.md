@@ -293,9 +293,9 @@ flowchart TD
 
 MiniBot 在用户自己的权限下运行,没有沙箱。下面几条边界防的是提示注入和本机服务被滥用:
 
-- **审批规则是按调用算的。** `Tool.approval_reason(args, exposure)` 返回审批原因,`None` 表示直接放行;默认实现跟随静态的 `requires_approval`。`exposure` 由 `untrusted_exposure(session, registry)` 从整个会话(包括被压缩的记录)折叠出来:`tainted` 表示 `untrusted_output` 的工具(`fetch_url`、`web_search`、`read_artifact`、`search_history`、所有 MCP 工具)已经返回过内容,一旦变脏整个会话都保持脏。`seen_text` 只收模型没写过的文字:用户消息,以及不可信工具**成功**的结果,并且把这次调用自己传进去的参数从结果里剪掉。模型自己写的文字(压缩摘要、回显参数的报错和拒绝结果、被原样带回的搜索词)都不算,否则模型拼出来的 URL 可以借它们"洗白"。这和 Anthropic `web_fetch` 工具的 `url_sources` 规则一致。拒绝结果里也不再带调用参数。
+- **审批规则是按调用算的。** `Tool.approval_reason(args, exposure)` 返回审批原因,`None` 表示直接放行;默认实现跟随静态的 `requires_approval`。`exposure` 由 `untrusted_exposure(session, registry)` 从整个会话(包括被压缩的记录)折叠出来:`tainted` 表示 `untrusted_output` 的工具(`fetch_url`、`web_search`、`read_artifact`、`search_history`、所有 MCP 工具)已经返回过内容,一旦变脏整个会话都保持脏。`mentions(text)` 回答的是"这段文字是不是模型以外的人给模型看的"。用户消息(`seen_text`)一律算数。不可信工具**成功**的结果(`shown`)只在一种情况下算数:这条结果到达之前,模型没有写过这段文字。模型写过的文字(`written`)包括助手回复、工具调用的参数(键和值)、压缩摘要,按会话顺序累积。所以模型先写出一个 URL、再让工具把它带回来,不能给这个 URL"洗白":被回显的搜索词、一次调用存进去下一次调用读出来的值、`search_history` 搜到的本会话助手回复都属于这种情况。比较前去掉空白、忽略大小写,并且加上百分号解码后的形式,因为工具很少原样回显(`web_search` 会折叠空白)。失败的结果不算数:报错和拒绝会重复调用参数,拒绝结果里也不带参数。思路和 Anthropic `web_fetch` 工具的 `url_sources` 规则一致。
   - `remember`:会话变脏以后要审批。记忆会进入以后每个会话的 prompt。
-  - `fetch_url`:会话变脏以后,URL 没有在 `seen_text` 里出现过(也就是模型自己拼出来的)就要审批,因为 URL 本身就能把数据带出去。用户或工具结果里出现过的链接照常放行。剩余风险:从已出现的链接里挑一个仍能泄露信息,而且每抓一页都会带来一批新链接,所以泄露量没有固定上限;`search_history` 的结果里有过去的助手回复,也就是模型写过的文字。
+  - `fetch_url`:会话变脏以后,`mentions(url)` 为假(也就是模型自己拼出来的)就要审批,因为 URL 本身就能把数据带出去。用户或工具结果里出现过的链接照常放行。剩余风险:从已出现的链接里挑一个仍能泄露信息,而且每抓一页都会带来一批新链接,所以泄露量没有固定上限;会计算输出的工具(拼接不相邻的字符串、解码 base64 的 MCP 工具)能返回模型从未完整写出过的 URL;`search_history` 搜到的**其他会话**的助手回复不在本会话的 `written` 里。
   - 没有审批渠道的运行(daemon、heartbeat)在这些情况下一律拒绝;`always` 模式全部放行。
 - **`fetch_url` 只访问公网。** 请求前检查主机名、DNS 解析出的每个地址和每一跳重定向,要求都是 `is_global`(所以 `100.64.0.0/10` 也会被拦)。直连时不走系统代理(`ProxyHandler({})`):代理会自己解析域名,检查过的地址就不再是实际连接的地址。URL 里带账号或密码的一律拒绝。检查时间和连接时间之间的 DNS rebinding 空档没有处理(没有固定 IP)。Jina 阅读器默认关闭,`MINIBOT_FETCH_VIA_JINA=1` 才会把 URL 发给 `r.jina.ai`。
 - **服务端只认回环地址。** `LocalOnlyMiddleware` 只接受 `localhost`、`127.0.0.1`、`[::1]` 的 `Host`(挡 DNS rebinding),写请求带外部 `Origin` 时返回 403。服务端没有认证;`--host` 设成非回环地址会打印警告,远程访问的主机名用 `--allowed-host` 加。
