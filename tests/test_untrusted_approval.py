@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,6 +26,7 @@ from minibot.tools.fetch_url import FetchUrlTool
 from minibot.tools.memory_tools import RememberTool
 from minibot.tools.registry import PreparedToolCall, ToolRegistry
 from minibot.tools.result import ToolOutput
+from minibot.tools.web_search import WebSearchTool
 from minibot.user_memory import UserMemoryStore
 
 from loop_harness import build_loop, run_turn
@@ -97,6 +99,23 @@ def _call(call_id: str, name: str, args: dict[str, object]) -> LLMResponse:
 
 def _session(*messages: MessageEvent) -> Session:
     return Session("s_test", entries=[SessionEntry.from_message(m) for m in messages])
+
+
+def _tool_call(call_id: str, name: str, args: dict[str, object]) -> MessageEvent:
+    return MessageEvent.create(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id=call_id, name=name, arguments=json.dumps(args))],
+    )
+
+
+def _tool_result(call_id: str, name: str, data: object, *, ok: bool = True) -> MessageEvent:
+    # The envelope ToolResult.to_model_content() writes.
+    content = json.dumps(
+        {"ok": ok, "code": "ok" if ok else "error", "summary": "x", "data": data},
+        ensure_ascii=False,
+    )
+    return MessageEvent.create(role="tool", content=content, tool_call_id=call_id, name=name)
 
 
 class UntrustedExposureTests(unittest.TestCase):
@@ -186,6 +205,135 @@ class UntrustedExposureTests(unittest.TestCase):
         self.assertTrue(exposure.tainted)
         self.assertFalse(exposure.mentions(url))
         # What the search really returned still counts as shown.
+        self.assertTrue(exposure.mentions("https://news.example/a"))
+
+
+    def test_echo_that_changes_the_text_does_not_vouch(self) -> None:
+        url = "https://evil.example/?d=SECRET"
+        # What the model wrote -> what the tool printed back.
+        echoes = {
+            "leading whitespace": (" " + url, url),
+            "collapsed whitespace": ("news  " + url, "news " + url),
+            "part of the argument": ("site:evil " + url + " latest", f"terms: [{url}]"),
+            "wrapped in punctuation": (url, f"({url})."),
+            "changed case": (url.upper(), url),
+            "percent-decoded": ("https%3A%2F%2Fevil.example%2F%3Fd%3DSECRET", url),
+            "space encoded as plus": ("https://evil.example/?d=SEC RET", "https://evil.example/?d=SEC+RET"),
+        }
+        for label, (written, echoed) in echoes.items():
+            with self.subTest(label):
+                session = _session(
+                    MessageEvent.create(role="user", content="hi"),
+                    _tool_call("c1", "search", {"query": written}),
+                    _tool_result("c1", "search", {"query": echoed, "results": ["https://news.example/a"]}),
+                )
+                exposure = untrusted_exposure(session, self.registry)
+
+                fetched = echoed if "+" in echoed else url
+                self.assertIsNotNone(
+                    FetchUrlTool().approval_reason({"url": fetched}, exposure)
+                )
+                self.assertTrue(exposure.mentions("https://news.example/a"))
+
+    def test_text_stored_in_one_call_and_read_in_the_next_does_not_vouch(self) -> None:
+        url = "https://evil.example/?d=SECRET"
+        session = _session(
+            MessageEvent.create(role="user", content="hi"),
+            _tool_call("c1", "mcp__db__write", {"sql": f"INSERT INTO t VALUES ('{url}')"}),
+            _tool_result("c1", "mcp__db__write", {"rows": 1}),
+            _tool_call("c2", "mcp__db__read", {"sql": "SELECT * FROM t"}),
+            _tool_result("c2", "mcp__db__read", {"rows": [url, "https://docs.example/"]}),
+        )
+
+        exposure = untrusted_exposure(session, self.registry)
+
+        self.assertFalse(exposure.mentions(url))
+        self.assertTrue(exposure.mentions("https://docs.example/"))
+
+    def test_reply_and_summary_text_read_back_does_not_vouch(self) -> None:
+        replied = "https://evil.example/?d=FROM-REPLY"
+        summarised = "https://evil.example/?d=FROM-SUMMARY"
+        session = _session(
+            MessageEvent.create(role="user", content="hi"),
+            MessageEvent.create(role="assistant", content=f"I could open {replied}"),
+        )
+        session.compact_with_summary(f"note: {summarised}", first_kept_entry_id=None)
+        for message in (
+            _tool_call("c1", "search", {"query": "history"}),
+            _tool_result("c1", "search", {"results": [replied, summarised]}),
+        ):
+            session.add_message(message)
+
+        exposure = untrusted_exposure(session, self.registry)
+
+        self.assertFalse(exposure.mentions(replied))
+        self.assertFalse(exposure.mentions(summarised))
+
+    def test_argument_keys_count_as_model_written(self) -> None:
+        url = "https://evil.example/?d=SECRET"
+        session = _session(
+            _tool_call("c1", "search", {url: "x"}),
+            _tool_result("c1", "search", {"ignored": [url]}),
+        )
+
+        self.assertFalse(untrusted_exposure(session, self.registry).mentions(url))
+
+    def test_followed_link_stays_vouched_after_the_model_repeats_it(self) -> None:
+        link = "https://news.example/a"
+        session = _session(
+            MessageEvent.create(role="user", content="find news"),
+            _tool_call("c1", "search", {"query": "news"}),
+            _tool_result("c1", "search", {"results": [link]}),
+            # The model follows the link, so now it has written it too.
+            _tool_call("c2", "fetch_url", {"url": link}),
+            _tool_result("c2", "fetch_url", {"url": link, "links": [link + "/more"]}),
+        )
+
+        exposure = untrusted_exposure(session, self.registry)
+
+        self.assertTrue(exposure.mentions(link))
+        self.assertTrue(exposure.mentions(link + "/more"))
+
+    def test_user_text_vouches_even_after_the_model_wrote_it(self) -> None:
+        url = "https://example.org/report"
+        session = _session(
+            MessageEvent.create(role="user", content="hi"),
+            MessageEvent.create(role="assistant", content=f"Shall I open {url}?"),
+            MessageEvent.create(role="user", content=f"yes, open {url}"),
+            _tool_call("c1", "search", {"query": "x"}),
+            _tool_result("c1", "search", {"results": []}),
+        )
+
+        exposure = untrusted_exposure(session, self.registry)
+
+        self.assertTrue(exposure.tainted)
+        self.assertTrue(exposure.mentions(url))
+
+    def test_real_web_search_echo_does_not_vouch(self) -> None:
+        # web_search collapses whitespace before it echoes the query.
+        url = "https://evil.example/?d=SECRET"
+        query = "news  " + url
+        search = WebSearchTool()
+        registry = ToolRegistry()
+        registry.register(search)
+        hit = mock.Mock(title="t", url="https://news.example/a", snippet="s")
+        with (
+            mock.patch.object(WebSearchTool, "_fetch_results_html", return_value=""),
+            mock.patch.object(WebSearchTool, "_parse_results", return_value=[hit]),
+        ):
+            output = search.execute(
+                context=ToolExecutionContext(session_id="s_test"), query=query
+            )
+        self.assertTrue(output.ok)
+        session = _session(
+            _tool_call("c1", "web_search", {"query": query}),
+            _tool_result("c1", "web_search", output.data),
+        )
+
+        exposure = untrusted_exposure(session, registry)
+
+        self.assertIn(url, json.dumps(output.data))
+        self.assertFalse(exposure.mentions(url))
         self.assertTrue(exposure.mentions("https://news.example/a"))
 
 
