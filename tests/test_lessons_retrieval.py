@@ -11,6 +11,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+try:
+    import numpy  # noqa: F401
+except ImportError as exc:  # a plain `uv sync`: the lessons extra brings numpy
+    raise unittest.SkipTest("needs the lessons extra: uv sync --extra lessons") from exc
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -281,7 +286,7 @@ class BootstrapRetrieverTests(unittest.TestCase):
 
     def _build(self, mode: str, *, available: bool = True, path: Path | None = None):
         config = Config(lessons_mode=mode, lessons_path=path)  # type: ignore[arg-type]
-        with patch("minibot.lessons.embed.fastembed_available", return_value=available):
+        with patch("minibot.lessons.fastembed_available", return_value=available):
             return _build_lesson_retriever(config, self.home)
 
     def test_modes(self) -> None:

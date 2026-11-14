@@ -7,6 +7,11 @@ from pathlib import Path
 import sys
 import unittest
 
+try:
+    import numpy  # noqa: F401
+except ImportError as exc:  # a plain `uv sync`: the lessons extra brings numpy
+    raise unittest.SkipTest("needs the lessons extra: uv sync --extra lessons") from exc
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

@@ -21,8 +21,6 @@ from pathlib import Path
 import sys
 
 from ..config import Config, load_env, resolve_state_home
-from .cluster import DEFAULT_CLUSTER_THRESHOLD
-from .pipeline import DEFAULT_MAX_CLUSTERS, DEFAULT_MIN_CLUSTER_SIZE
 from .review import LessonStateError, format_lesson, format_list_row, retract, run_review
 from .store import LESSON_STATUSES, LessonStore
 
@@ -43,9 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     mine = sub.add_parser("mine", help="挖掘失败记录并起草经验")
     mine.add_argument("--dry-run", action="store_true", help="只展示事件和聚类，不调用模型、不写入")
-    mine.add_argument("--threshold", type=float, default=DEFAULT_CLUSTER_THRESHOLD, help="聚类余弦阈值")
-    mine.add_argument("--min-size", type=int, default=DEFAULT_MIN_CLUSTER_SIZE, help="起草所需的最小簇大小")
-    mine.add_argument("--limit", type=int, default=DEFAULT_MAX_CLUSTERS, help="本次最多起草的簇数")
+    # No defaults here: they live in modules that import numpy, and the
+    # review / list commands must work without the lessons extra.
+    mine.add_argument("--threshold", type=float, help="聚类余弦阈值（默认 0.8）")
+    mine.add_argument("--min-size", type=int, help="起草所需的最小簇大小（默认 1）")
+    mine.add_argument("--limit", type=int, help="本次最多起草的簇数（默认 20）")
     sub.add_parser("review", help="逐条审核草稿")
     listing = sub.add_parser("list", help="列出经验")
     listing.add_argument("--status", choices=LESSON_STATUSES, help="只看某个状态")
@@ -102,20 +102,26 @@ def main(argv: list[str] | None = None) -> int:
 def _mine(
     args: argparse.Namespace, config: Config, store: LessonStore, state_home: Path
 ) -> int:
-    from .embed import FastEmbedEmbedder, fastembed_available
-    from .pipeline import plan_mining, run_mining
+    from . import fastembed_available
 
     if not fastembed_available():
         print("挖掘需要 fastembed：请运行 uv sync --extra lessons。", file=sys.stderr)
         return 1
+    # numpy arrives with the extra, so these imports come after the check.
+    from .embed import FastEmbedEmbedder
+    from .pipeline import plan_mining, run_mining
+
     embedder = FastEmbedEmbedder()
+    chosen = {
+        "threshold": args.threshold,
+        "min_cluster_size": args.min_size,
+        "max_clusters": args.limit,
+    }
     plan = plan_mining(
         state_home,
         store,
         embedder,
-        threshold=args.threshold,
-        min_cluster_size=args.min_size,
-        max_clusters=args.limit,
+        **{name: value for name, value in chosen.items() if value is not None},
     )
     print(
         f"事件 {plan.total_incidents} 条，新增 {len(plan.new_incidents)} 条；"

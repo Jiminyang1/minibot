@@ -8,7 +8,6 @@ Vectors are unit length, so cosine similarity is a dot product.
 from __future__ import annotations
 
 from collections.abc import Sequence
-import importlib.util
 from pathlib import Path
 import threading
 from typing import Any, Protocol
@@ -27,10 +26,6 @@ class Embedder(Protocol):
     model_name: str
 
     def embed(self, texts: Sequence[str]) -> np.ndarray: ...
-
-
-def fastembed_available() -> bool:
-    return importlib.util.find_spec("fastembed") is not None
 
 
 def default_model_dir() -> Path:

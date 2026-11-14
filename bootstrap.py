@@ -248,11 +248,13 @@ def _build_lesson_retriever(
     ``auto`` turns on only when fastembed is installed and the store already
     holds an approved lesson, and then fails open (an embedding error
     disables retrieval instead of failing turns). ``on`` insists. Imports are
-    local so ``off`` never imports numpy or the lessons package.
+    local so ``off`` never imports the lessons package, and numpy (which
+    arrives only with the ``lessons`` extra) is imported only after the
+    extra is known to be installed.
     """
     if config.lessons_mode == "off":
         return None
-    from .lessons.embed import FastEmbedEmbedder, fastembed_available
+    from .lessons import fastembed_available
 
     if not fastembed_available():
         if config.lessons_mode == "on":
@@ -261,6 +263,7 @@ def _build_lesson_retriever(
                 "请运行 uv sync --extra lessons，或改成 auto / off。"
             )
         return None
+    from .lessons.embed import FastEmbedEmbedder
     from .lessons.retrieve import LessonRetriever
     from .lessons.store import LessonStore
 
