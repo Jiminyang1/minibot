@@ -231,7 +231,7 @@ uv run python -m minibot.lessons review           # 逐条批准 / 修改 / 拒�
 uv run python -m minibot.lessons list --status approved
 ```
 
-挖掘的信号包括：失败的工具调用、失败或轮次耗尽的一轮、被拒绝的审批、用户纠正（"不对""wrong"）。聚类用本地 embedding 模型（`BAAI/bge-small-zh-v1.5`，约 90 MB，缓存在 `~/.minibot/models`），数据不出本机，也没有向量数据库。请求时，trigger 或证据原话与最新用户消息匹配的已批准 lesson 会追加到这条消息末尾（不进系统提示词，否则会破坏 prompt cache），`model.request.started` 会列出它们。只有批准过的 lesson 才会注入：草稿来自工具输出和网页文本，所以审核这一步同时也是防提示注入的关口。
+挖掘的信号包括：失败的工具调用、失败或轮次耗尽的一轮、被拒绝的审批、用户纠正（"不对""wrong"）。聚类用本地 embedding 模型（`BAAI/bge-small-zh-v1.5`，约 90 MB，缓存在 `~/.minibot/models`），数据不出本机，也没有向量数据库。请求时，每条用户消息都会带上与它自己匹配（trigger 或证据原话）的已批准 lesson，追加在这条消息末尾。不进系统提示词，也不是只加在最新一条上：一条消息在每次请求里都必须一样，否则 prompt cache 会丢掉它后面的整轮内容。`model.request.started` 会列出请求里的 lesson。只有批准过的 lesson 才会注入：草稿来自工具输出和网页文本，所以审核这一步同时也是防提示注入的关口。
 
 ## CLI 命令
 

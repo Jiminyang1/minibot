@@ -7,7 +7,7 @@ alone is a description ("用户要求修改配置文件时") and scores poorly a
 concrete request ("把端口改成 8080"). Key vectors are cached per (model,
 text) and rebuilt only when the store file or the embedding model changes;
 query vectors are memoised because ``ContextBuilder.build`` runs several
-times per turn on the same latest message.
+times per turn, each time on every user message in the request.
 """
 
 from __future__ import annotations
@@ -32,7 +32,9 @@ from .store import Lesson, LessonStore
 DEFAULT_MIN_SCORE = 0.55
 _MAX_EVIDENCE_KEYS = 8
 DEFAULT_TOP_K = 3
-_QUERY_CACHE_SIZE = 64
+# Every user message in the request is a query on every build, so the cache
+# must hold a long session; a vector is about 2 KB.
+_QUERY_CACHE_SIZE = 1024
 
 
 @dataclass(frozen=True)

@@ -164,7 +164,7 @@ class AgentLoop:
                     "tools": [tool.name for tool in built.tool_definitions],
                 }
                 if built.lesson_ids:
-                    # Approved lessons appended to the latest user message.
+                    # Approved lessons appended to user messages in this request.
                     request_payload["lessons"] = list(built.lesson_ids)
                 emitter.emit("model.request.started", request_payload)
                 resp = self._stream_model_response(

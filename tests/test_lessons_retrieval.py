@@ -161,7 +161,7 @@ class ContextInjectionTests(unittest.TestCase):
             lesson_retriever=retriever,
         )
 
-    def test_block_goes_on_latest_user_message_before_the_time_stamp(self) -> None:
+    def test_each_user_message_gets_its_own_block_before_the_time_stamp(self) -> None:
         history = [
             MessageEvent.create(role="user", content="发送邮件给小王"),
             MessageEvent.create(role="assistant", content="好的"),
@@ -171,20 +171,41 @@ class ContextInjectionTests(unittest.TestCase):
         history[2].created_at = "2026-10-27T01:30:00Z"
         built = self._builder(self.retriever).build(history)
         file_id = next(item.id for item in self.store.list() if item.trigger == _FILE_TRIGGER)
-        self.assertEqual(built.lesson_ids, (file_id,))
+        mail_id = next(item.id for item in self.store.list() if item.trigger == _MAIL_TRIGGER)
+        # The latest message's lessons come first.
+        self.assertEqual(built.lesson_ids, (file_id, mail_id))
         latest = built.messages[-1].content
         self.assertTrue(latest.startswith("读取文件内容 a.txt\n\n[相关经验"))
         self.assertIn(f"- {file_id} 情境: {_FILE_TRIGGER}；做法: 先确认路径", latest)
+        self.assertNotIn(mail_id, latest)
         self.assertTrue(latest.endswith("[发送时间 2026-10-27 09:30 星期二 UTC+08:00]"))
         self.assertLess(latest.index("[相关经验"), latest.index("[发送时间"))
-        # Request-only: earlier turns get only their own send time, the system
-        # prompt and the session stay clean.
-        self.assertEqual(
-            built.messages[1].content,
-            "发送邮件给小王\n\n[发送时间 2026-10-27 09:20 星期二 UTC+08:00]",
-        )
+        # The earlier message keeps the lesson that matched it.
+        earlier = built.messages[1].content
+        self.assertTrue(earlier.startswith("发送邮件给小王\n\n[相关经验"))
+        self.assertIn(f"- {mail_id} 情境: {_MAIL_TRIGGER}；做法: 先确认收件人", earlier)
+        self.assertNotIn(file_id, earlier)
+        self.assertTrue(earlier.endswith("[发送时间 2026-10-27 09:20 星期二 UTC+08:00]"))
+        # Request-only: the system prompt and the session stay clean.
         self.assertNotIn("相关经验", built.messages[0].content)
+        self.assertEqual(history[0].content, "发送邮件给小王")
         self.assertEqual(history[-1].content, "读取文件内容 a.txt")
+
+    def test_a_new_turn_leaves_earlier_messages_unchanged(self) -> None:
+        # The provider's prompt cache matches a prefix. A block that moved
+        # with the latest message would change the previous user message on
+        # the next turn, and the cache would lose everything after it.
+        builder = self._builder(self.retriever)
+        history = [MessageEvent.create(role="user", content="读取文件内容 a.txt")]
+        first = builder.build(history).messages
+        self.assertIn("[相关经验", first[-1].content)
+        history.append(MessageEvent.create(role="assistant", content="内容是 hello"))
+        for follow_up in ("继续", "发送邮件给小王", "今天天气怎么样"):
+            with self.subTest(follow_up):
+                later = builder.build(
+                    [*history, MessageEvent.create(role="user", content=follow_up)]
+                ).messages
+                self.assertEqual(later[: len(first)], first)
 
     def test_skips_projected_summary(self) -> None:
         entries = [
@@ -236,8 +257,28 @@ class LoopPayloadTests(unittest.TestCase):
             # The exact request carries the block too, so traces show it.
             self.assertIn("[相关经验", started[0].payload["messages"][-1]["content"])
 
+            first_request = started[0].payload["messages"]
+
             events.clear()
             run_turn(loop, manager, "今天天气怎么样", events=events, run_id="r_2")
+            started = [e for e in events if e.type == "model.request.started"]
+            second_request = started[0].payload["messages"]
+            # The first turn is sent again exactly as before (the cacheable
+            # prefix); the new message matched nothing and has no block.
+            self.assertEqual(second_request[: len(first_request)], first_request)
+            self.assertNotIn("[相关经验", second_request[-1]["content"])
+            self.assertEqual(started[0].payload["lessons"], [store.list()[0].id])
+
+    def test_no_lesson_in_the_request_means_no_lessons_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            store = _approved_store(workspace / "lessons.json", (_FILE_TRIGGER, "先确认路径"))
+            loop, manager = build_loop(_FinalReply(), ToolRegistry(), workspace)
+            loop.context_builder.lesson_retriever = LessonRetriever(
+                store, HashEmbedder(), min_score=0.3
+            )
+            events: list[RuntimeEvent] = []
+            run_turn(loop, manager, "今天天气怎么样", events=events)
             started = [e for e in events if e.type == "model.request.started"]
             self.assertNotIn("lessons", started[0].payload)
 

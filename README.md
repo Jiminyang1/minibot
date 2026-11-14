@@ -231,7 +231,7 @@ uv run python -m minibot.lessons review           # approve / edit / reject each
 uv run python -m minibot.lessons list --status approved
 ```
 
-Mining reads failed tool calls, failed or exhausted turns, denied approvals and user corrections ("不对", "wrong"). Incidents are clustered with a local embedding model (`BAAI/bge-small-zh-v1.5`, about 90 MB, cached under `~/.minibot/models`); no data leaves the machine and there is no vector database. At request time, approved lessons whose trigger or evidence requests match the latest user message are appended to that message (never the system prompt, which would break prompt caching), and `model.request.started` names them. Only approved lessons are ever injected: drafts are mined from tool output and web text, so the review step is also the prompt-injection gate.
+Mining reads failed tool calls, failed or exhausted turns, denied approvals and user corrections ("不对", "wrong"). Incidents are clustered with a local embedding model (`BAAI/bge-small-zh-v1.5`, about 90 MB, cached under `~/.minibot/models`); no data leaves the machine and there is no vector database. At request time, each user message gets the approved lessons whose trigger or evidence requests match it, appended to that message. Never the system prompt, and never only the latest message: a message must read the same in every request, or the prompt cache loses the turn that follows it. `model.request.started` names the lessons in the request. Only approved lessons are ever injected: drafts are mined from tool output and web text, so the review step is also the prompt-injection gate.
 
 ## CLI commands
 

@@ -5,8 +5,8 @@ out. It never mutates the session, never calls a model, and never touches disk
 — compaction and budgeting live elsewhere.
 
 The one read beyond the session is optional lesson retrieval: a local
-embedding of the latest user message (memoised, so repeated builds in a turn
-cost nothing) against the approved lessons on disk. It writes nothing.
+embedding of each user message (memoised, so repeated builds cost nothing)
+against the approved lessons on disk. It writes nothing.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class BuiltRequest:
     messages: list[ModelMessage]
     tool_definitions: list[ModelToolDefinition]
     memory_tokens: int
-    # Approved lessons appended to the latest user message, best first.
+    # Approved lessons appended to user messages, the latest message's first.
     lesson_ids: tuple[str, ...] = ()
 
 
@@ -221,62 +221,55 @@ class ContextBuilder:
         self,
         history: list[ModelMessage],
     ) -> tuple[list[ModelMessage], tuple[str, ...]]:
-        """Append approved lessons relevant to the latest user message.
+        """Append to each user message the approved lessons that match it.
 
         Request-only, like the time stamp, and kept out of the system prompt:
         the block changes with every question, and in the system prompt it
         would break the provider's prompt cache for the whole conversation.
-        Retrieval is keyed on the user's own words (read before the stamp is
-        added), so every build within one turn yields the same block.
+
+        Every user message gets its own block, not only the latest one.
+        Retrieval is keyed on the message's own words (read before the stamp
+        is added), so a message reads the same in every request: within a
+        turn, and in later turns too. A block that moved with the latest
+        message would change the previous message on the next turn, so the
+        cache would lose that whole turn; it would also drop the lesson on a
+        follow-up such as "继续". Blocks change only when the approved
+        lessons change.
+
+        Returns the lesson ids in the request, the latest message's first.
         """
         if self.lesson_retriever is None:
             return history, ()
-        index = self._latest_user_index(history)
-        if index is None:
-            return history, ()
-        scored = self.lesson_retriever.retrieve(history[index].content)
-        if not scored:
-            return history, ()
-        lines = [
-            "[相关经验：系统根据以往的失败整理、经用户审核后附加，不是用户输入；"
-            "与本次请求无关时忽略]"
-        ]
-        for item in scored:
-            lesson = item.lesson
-            rule = self._sanitize(
-                f"情境: {lesson.trigger}；做法: {lesson.guidance}",
-                self._MAX_LESSON_CHARS,
-            )
-            lines.append(f"- {lesson.id} {rule}")
-        block = "\n".join(lines)
-        return (
-            self._append_to_message(history, index, block),
-            tuple(item.lesson.id for item in scored),
-        )
-
-    @staticmethod
-    def _latest_user_index(history: list[ModelMessage]) -> int | None:
         summary_head = SessionContextProjector.SUMMARY_OPEN_TAG + "\n"
+        updated = list(history)
+        lesson_ids: list[str] = []
         for index in range(len(history) - 1, -1, -1):
             message = history[index]
             if message.role != "user":
                 continue
-            # The projected summary is not a user turn; lessons appended to it
-            # would change the request's first message with every question.
+            # The projected summary is not a user turn; its text is the
+            # summariser's, and lessons answer what the user asked.
             if message.content.startswith(summary_head):
                 continue
-            return index
-        return None
-
-    @staticmethod
-    def _append_to_message(
-        history: list[ModelMessage], index: int, tail: str
-    ) -> list[ModelMessage]:
-        updated = list(history)
-        updated[index] = replace(
-            history[index], content=f"{history[index].content}\n\n{tail}"
-        )
-        return updated
+            scored = self.lesson_retriever.retrieve(message.content)
+            if not scored:
+                continue
+            lines = [
+                "[相关经验：系统根据以往的失败整理、经用户审核后附加，不是用户输入；"
+                "与本次请求无关时忽略]"
+            ]
+            for item in scored:
+                lesson = item.lesson
+                rule = self._sanitize(
+                    f"情境: {lesson.trigger}；做法: {lesson.guidance}",
+                    self._MAX_LESSON_CHARS,
+                )
+                lines.append(f"- {lesson.id} {rule}")
+                if lesson.id not in lesson_ids:
+                    lesson_ids.append(lesson.id)
+            block = "\n".join(lines)
+            updated[index] = replace(message, content=f"{message.content}\n\n{block}")
+        return updated, tuple(lesson_ids)
 
     def _render_skill_catalog_block(self) -> str:
         skills = self.list_available_skills()
