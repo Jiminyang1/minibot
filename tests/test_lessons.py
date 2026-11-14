@@ -507,5 +507,19 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(output, ["没有待审核的草稿。"])
 
 
+class CliHelpTests(unittest.TestCase):
+    def test_help_text_states_the_real_defaults(self) -> None:
+        # The CLI cannot import these modules at start-up (they need numpy),
+        # so its help text repeats the numbers; keep the two in step.
+        from minibot.lessons import __main__ as cli
+        from minibot.lessons.cluster import DEFAULT_CLUSTER_THRESHOLD
+        from minibot.lessons.pipeline import DEFAULT_MAX_CLUSTERS, DEFAULT_MIN_CLUSTER_SIZE
+
+        source = Path(cli.__file__).read_text(encoding="utf-8")
+        self.assertIn(f"聚类余弦阈值（默认 {DEFAULT_CLUSTER_THRESHOLD}）", source)
+        self.assertIn(f"起草所需的最小簇大小（默认 {DEFAULT_MIN_CLUSTER_SIZE}）", source)
+        self.assertIn(f"本次最多起草的簇数（默认 {DEFAULT_MAX_CLUSTERS}）", source)
+
+
 if __name__ == "__main__":
     unittest.main()
