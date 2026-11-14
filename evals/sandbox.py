@@ -11,7 +11,9 @@ side effects is swapped for a stand-in first:
   A case can script ``{"sequence": [...]}`` (later calls reuse the last entry;
   ``{"error": "..."}`` fails that call) to exercise error recovery;
 - ``exec``, ``web_search`` and ``fetch_url`` never run; they return canned
-  results, or look like a silent success / ordinary network failure. Stand-ins
+  results, or look like a silent success / ordinary network failure. ``exec``
+  takes ``{"stdout", "stderr", "exit_code"}`` (a non-zero code fails the call)
+  or a ``{"sequence": [...]}`` of them, like the macOS tools. Stand-ins
   never mention the sandbox: a model that knows it is being tested behaves
   differently.
 
@@ -119,6 +121,7 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
     order: list[str] = []
     model_calls = 0
     input_tokens = output_tokens = 0
+    lessons_used: list[str] = []
     for event in events:
         payload = event.payload
         call_id = str(payload.get("tool_call_id") or "")
@@ -135,6 +138,10 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
             calls[call_id].update(ok=payload.get("ok"), code=payload.get("code"))
         elif event.type == "approval.resolved" and call_id in calls:
             calls[call_id]["approved"] = payload.get("approved")
+        elif event.type == "model.request.started":
+            for lesson_id in payload.get("lessons") or []:
+                if lesson_id not in lessons_used:
+                    lessons_used.append(str(lesson_id))
         elif event.type in {"model.request.completed", "compaction.request.completed"}:
             model_calls += 1
             usage = payload.get("usage") or {}
@@ -151,6 +158,7 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
         "model_calls": model_calls,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "lessons_used": lessons_used,
     }
 
 
@@ -229,15 +237,22 @@ class _SandboxExec(ExecTool):
     def __init__(self, *, workspace: Path | None, results: ToolResults) -> None:
         super().__init__(workspace=workspace)
         self._results = results
+        self._calls = 0
 
     def execute(self, *, context: ToolExecutionContext, command: str, **kwargs: Any) -> ToolOutput:
         del context, kwargs
         canned = self._results.get(self.name)
+        if isinstance(canned, dict) and "sequence" in canned:
+            sequence = canned["sequence"]
+            canned = sequence[min(self._calls, len(sequence) - 1)]
+        self._calls += 1
         if isinstance(canned, dict):
-            return ToolOutput.success(
-                "命令已执行，退出码 0。",
-                data={"command": command, "exit_code": 0, **canned},
-            )
+            data = {"command": command, "exit_code": 0, **canned}
+            code = data["exit_code"]
+            if code != 0:
+                # Same summary as the real tool, so a replayed failure reads the same.
+                return ToolOutput.failure("error", f"命令执行失败，退出码 {code}。", data=data)
+            return ToolOutput.success(f"命令已执行，退出码 {code}。", data=data)
         # Like a command that succeeds silently (e.g. `open -a Reminders`).
         return ToolOutput.success(
             "命令已执行，退出码 0。",

@@ -11,6 +11,7 @@ the same scores are printed and saved under ``$MINIBOT_HOME/evals/``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 import json
 import os
@@ -23,24 +24,67 @@ from ..llm import LLMClient
 from ..llm_factory import build_llm_client_from_profile
 from ..llm_profile import build_llm_profile
 from .sandbox import run_case
-from .scoring import StageScore, end_to_end, judge_answer, score_deterministic
+from .scoring import StageScore, end_to_end, judge_answer, score_deterministic, stage_passed
 
 DATASET = "minibot-golden"
-_CASES_PATH = Path(__file__).resolve().parent / "cases.json"
-_STAGES = ("skill_selection", "tool_selection", "tool_args", "answer", "outcome", "end_to_end")
+CASES_PATH = Path(__file__).resolve().parent / "cases.json"
+STAGES = ("skill_selection", "tool_selection", "tool_args", "answer", "outcome", "end_to_end")
 
 
-def load_cases(case_ids: list[str] | None = None) -> list[dict[str, Any]]:
-    cases = json.loads(_CASES_PATH.read_text(encoding="utf-8"))
+def load_cases(
+    case_ids: list[str] | None = None,
+    *,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    cases = json.loads((path or CASES_PATH).read_text(encoding="utf-8"))
     ids = [case["id"] for case in cases]
     if len(ids) != len(set(ids)):
         raise ValueError("cases.json 里有重复的用例 id。")
-    if case_ids:
-        unknown = set(case_ids) - set(ids)
-        if unknown:
-            raise ValueError(f"未知用例: {sorted(unknown)}")
-        cases = [case for case in cases if case["id"] in case_ids]
-    return cases
+    return _select(cases, case_ids)
+
+
+def dataset_cases(langfuse: Any, case_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    """The live dataset items as cases, so a run replays what Langfuse holds."""
+    cases = []
+    for item in langfuse.get_dataset(DATASET).items:
+        if str(item.status).upper() == "ARCHIVED":
+            continue
+        meta = item.metadata if isinstance(item.metadata, dict) else {}
+        case_id = meta.get("case_id") or str(item.id).removeprefix(f"{DATASET}--")
+        cases.append(
+            {
+                "id": case_id,
+                "input": item.input or {},
+                "expected": item.expected_output or {},
+                "dataset_item_id": item.id,
+            }
+        )
+    return _select(cases, case_ids)
+
+
+def applicable_stages(expected: dict[str, Any]) -> list[str]:
+    """Stages this expectation scores, in pipeline order; mirrors the scorers."""
+    stages = []
+    if "skill" in expected:
+        stages.append("skill_selection")
+    if expected.get("tools_required") or expected.get("tools_forbidden"):
+        stages.append("tool_selection")
+    if expected.get("args"):
+        stages.append("tool_args")
+    if expected.get("answer_rubric"):
+        stages.append("answer")
+    if expected.get("files_after"):
+        stages.append("outcome")
+    return [*stages, "end_to_end"]
+
+
+def _select(cases: list[dict[str, Any]], case_ids: list[str] | None) -> list[dict[str, Any]]:
+    if not case_ids:
+        return cases
+    unknown = set(case_ids) - {case["id"] for case in cases}
+    if unknown:
+        raise ValueError(f"未知用例: {sorted(unknown)}")
+    return [case for case in cases if case["id"] in case_ids]
 
 
 def evaluate(
@@ -116,6 +160,8 @@ def sync_dataset(langfuse: Any, cases: list[dict[str, Any]]) -> int:
                 "case_id": case["id"],
                 "category": case.get("category"),
                 "description": case.get("description"),
+                # Promoted cases remember the trace they came from.
+                **({"source": case["source"]} if case.get("source") else {}),
             },
         )
     if dataset is not None:
@@ -168,14 +214,28 @@ def run_experiment(
     rows = []
     for item_result in result.item_results:
         meta = getattr(item_result.item, "metadata", None) or {}
+        # The experiment runs each item inside its own trace; the minibot
+        # turn is nested in it, so this is the trace to open on a failure.
+        trace_id = getattr(item_result, "trace_id", None)
         rows.append(
             {
                 "case": meta.get("case_id") or getattr(item_result.item, "id", "?"),
                 "output": item_result.output,
                 "scores": {e.name: (e.value, e.comment) for e in item_result.evaluations},
+                "trace_id": trace_id,
+                "trace_url": trace_url(langfuse, trace_id),
             }
         )
     return rows
+
+
+def trace_url(langfuse: Any, trace_id: str | None) -> str | None:
+    if not trace_id:
+        return None
+    try:
+        return langfuse.get_trace_url(trace_id=trace_id)
+    except Exception:  # Needs the project id from the API; a link is optional.
+        return None
 
 
 # ── local run ─────────────────────────────────────────────────────
@@ -201,6 +261,9 @@ def run_local(
                 "scores": {
                     s.name: (s.value, s.comment) for s in [*scores, *metric_scores(output)]
                 },
+                # Local runs are not linked to a Langfuse trace.
+                "trace_id": None,
+                "trace_url": None,
             }
         )
     out_dir = resolve_state_home() / "evals"
@@ -224,11 +287,11 @@ def run_local(
 def format_table(rows: list[dict[str, Any]]) -> str:
     header = ["case", "skill", "tools", "args", "answer", "outcome", "e2e", "calls", "tokens", "s"]
     lines = [header]
-    totals: dict[str, list[float]] = {stage: [] for stage in _STAGES}
+    totals: dict[str, list[float]] = {stage: [] for stage in STAGES}
     for row in rows:
         scores = row["scores"]
         cells = [row["case"]]
-        for stage in _STAGES:
+        for stage in STAGES:
             if stage in scores:
                 value = scores[stage][0]
                 totals[stage].append(value)
@@ -251,9 +314,7 @@ def format_table(rows: list[dict[str, Any]]) -> str:
         f"  {row['case']} · {stage}: {comment}"
         for row in rows
         for stage, (value, comment) in row["scores"].items()
-        if stage in _STAGES
-        and stage != "end_to_end"
-        and value < (0.5 if stage == "answer" else 1.0)
+        if stage in STAGES and stage != "end_to_end" and not stage_passed(stage, value)
     ]
     report = "\n".join(rendered)
     if failures:
@@ -265,8 +326,23 @@ def default_run_name(config: Config) -> str:
     return f"{config.model}-{datetime.now():%Y%m%d-%H%M}-{_git_revision()}"
 
 
+def with_lessons(config: Config, mode: str) -> Config:
+    """The eval config for one lessons mode.
+
+    Each case runs against a temporary state home, so "on" must point at the
+    user's real lesson store explicitly; "off" disables retrieval outright.
+    """
+    if mode == "off":
+        return replace(config, lessons_mode="off")
+    return replace(
+        config,
+        lessons_mode="on",
+        lessons_path=config.resolve_lessons_path(resolve_state_home()),
+    )
+
+
 def _run_metadata(config: Config) -> dict[str, str]:
-    return {"model": config.model, "git": _git_revision()}
+    return {"model": config.model, "git": _git_revision(), "lessons": config.lessons_mode}
 
 
 def _git_revision() -> str:
@@ -313,7 +389,11 @@ def langfuse_configured() -> bool:
 
 
 __all__ = [
+    "CASES_PATH",
     "DATASET",
+    "STAGES",
+    "applicable_stages",
+    "dataset_cases",
     "default_run_name",
     "evaluate",
     "format_table",
@@ -322,4 +402,5 @@ __all__ = [
     "run_experiment",
     "run_local",
     "sync_dataset",
+    "trace_url",
 ]

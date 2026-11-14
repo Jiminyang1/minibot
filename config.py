@@ -9,6 +9,7 @@ from typing import Literal, TypeAlias
 
 
 ApprovalMode: TypeAlias = Literal["ask", "always"]
+LessonsMode: TypeAlias = Literal["auto", "on", "off"]
 
 
 def resolve_state_home() -> Path:
@@ -54,6 +55,14 @@ class Config:
     compact_keep_recent_tokens: int = 16000
     llm_max_retries: int = 3
     fetch_via_jina: bool = False
+    # Approved lessons retrieved into the latest user message (minibot.lessons).
+    # auto: on when fastembed is installed and an approved lesson exists.
+    lessons_mode: LessonsMode = "auto"
+    lessons_top_k: int = 3
+    # Cosine floor for bge-small-zh-v1.5; see lessons/retrieve.py.
+    lessons_min_score: float = 0.55
+    # None: <state home>/lessons.json.
+    lessons_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.approval_mode not in {"ask", "always"}:
@@ -100,6 +109,12 @@ class Config:
             )
         if self.llm_max_retries < 0:
             raise ValueError("llm_max_retries 不能小于 0。")
+        if self.lessons_mode not in {"auto", "on", "off"}:
+            raise ValueError("lessons_mode 必须是 auto、on 或 off。")
+        if self.lessons_top_k <= 0:
+            raise ValueError("lessons_top_k 必须大于 0。")
+        if not -1.0 <= self.lessons_min_score <= 1.0:
+            raise ValueError("lessons_min_score 必须在 -1 到 1 之间。")
 
     @classmethod
     def from_env(cls) -> Config:
@@ -120,6 +135,15 @@ class Config:
                 return int(raw)
             except ValueError as exc:
                 raise ValueError(f"{name} 必须是整数。") from exc
+
+        def _get_float(name: str, default: float) -> float:
+            raw = os.environ.get(name)
+            if raw is None or not raw.strip():
+                return default
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} 必须是数字。") from exc
 
         approval_mode = _get_approval_mode()
         model = os.environ.get("MINIBOT_MODEL", cls.model)
@@ -160,7 +184,16 @@ class Config:
             ),
             llm_max_retries=_get_int("MINIBOT_LLM_MAX_RETRIES", cls.llm_max_retries),
             fetch_via_jina=_get_flag("MINIBOT_FETCH_VIA_JINA", cls.fetch_via_jina),
+            lessons_mode=_get_lessons_mode(),
+            lessons_top_k=_get_int("MINIBOT_LESSONS_TOP_K", cls.lessons_top_k),
+            lessons_min_score=_get_float(
+                "MINIBOT_LESSONS_MIN_SCORE", cls.lessons_min_score
+            ),
+            lessons_path=_get_optional_path("MINIBOT_LESSONS_PATH"),
         )
+
+    def resolve_lessons_path(self, state_home: Path) -> Path:
+        return self.lessons_path or state_home / "lessons.json"
 
 
 def _get_flag(name: str, default: bool) -> bool:
@@ -173,6 +206,21 @@ def _get_flag(name: str, default: bool) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} 必须是 1/0、true/false、yes/no 或 on/off。")
+
+
+def _get_lessons_mode() -> LessonsMode:
+    raw = os.environ.get("MINIBOT_LESSONS")
+    if raw is None or not raw.strip():
+        return "auto"
+    value = raw.strip().lower()
+    if value in {"auto", "on", "off"}:
+        return value  # type: ignore[return-value]
+    raise ValueError("MINIBOT_LESSONS 必须是 auto、on 或 off。")
+
+
+def _get_optional_path(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser().resolve() if raw else None
 
 
 def _get_approval_mode() -> ApprovalMode:

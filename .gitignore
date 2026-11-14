@@ -15,3 +15,5 @@ docs/*
 !docs/core-philosophy.md
 !docs/architecture.md
 examples/
+
+.pytest_cache/

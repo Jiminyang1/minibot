@@ -1,0 +1,58 @@
+{
+  "_about": "Hand-written, fabricated examples for re-measuring the lessons thresholds. Small on purpose; a starting point, not validation. Run: uv run python -m minibot.lessons.benchmark",
+  "retrieval": {
+    "lessons": [
+      {"trigger": "用户要求修改配置文件或代码文件时", "evidence": ["把 settings.json 里的超时改成 30 秒", "修改一下 app.py 的日志级别"]},
+      {"trigger": "用户要求设置提醒或在某个时间通知他时", "evidence": ["周一上午十点提醒我打电话", "一小时后提醒我喝水"]},
+      {"trigger": "用户给出一个网页链接并要求总结内容时", "evidence": ["帮我总结这个网页 https://news.example/a", "这个链接说了什么 https://x.y/z"]},
+      {"trigger": "用户要求查看或创建日历日程时", "evidence": ["我明天有哪些会议", "在下周二下午加个评审会"]},
+      {"trigger": "用户要求执行 shell 命令处理文件时", "evidence": ["用 shell 找出最大的五个文件", "把这个目录里的 .tmp 文件清掉"]}
+    ],
+    "relevant": [
+      [0, "帮我把 config.yaml 里的端口改成 8080"],
+      [0, "把 main.py 的函数名改一下"],
+      [1, "明天早上九点提醒我交报告"],
+      [1, "下午三点叫我开会"],
+      [2, "总结一下这个链接 https://example.com/post"],
+      [2, "看看这篇文章讲了什么 https://a.b/c"],
+      [3, "我下周三有什么安排"],
+      [3, "帮我在周五加一个会议"],
+      [4, "用命令把这个目录下的 log 文件都删掉"],
+      [4, "统计一下这个文件夹有多少行代码"]
+    ],
+    "unrelated": ["用一句话解释什么是闭包", "推荐几本历史书", "今天天气怎么样", "翻译成英文：我很高兴", "写一首关于秋天的诗", "Python 的 GIL 是什么", "帮我想个项目名字", "比较一下 TCP 和 UDP"],
+    "chitchat": ["你好呀", "谢谢", "哈哈", "你是谁", "晚安"]
+  },
+  "clustering": [
+    [
+      "edit_file 失败 (error): 未找到要替换的文本 | 请求: 把 config.yaml 里的 timeout 改成 30",
+      "edit_file 失败 (error): 未找到要替换的文本 | 请求: 帮我把 app.ini 的日志级别改成 debug",
+      "edit_file 失败 (error): 未找到要替换的文本 | 请求: 修改 settings.json 里的端口为 9000"
+    ],
+    [
+      "read_file 失败 (not_found): 文件不存在: notes.md | 请求: 看看我的笔记写了什么",
+      "read_file 失败 (not_found): 文件不存在: todo.txt | 请求: 读一下待办清单",
+      "read_file 失败 (not_found): 文件不存在: README | 请求: 这个项目的说明文档讲了什么"
+    ],
+    [
+      "回复: 好的，我会在那个时间提醒你。 | 用户纠正: 不对，你根本没有创建提醒 | 请求: 明天早上九点提醒我交周报",
+      "回复: 没问题，到时候提醒你。 | 用户纠正: 错了，提醒事项里什么都没有 | 请求: 下午三点提醒我给王老师打电话"
+    ],
+    [
+      "fetch_url 失败 (timeout): 抓取超时 | 请求: 总结一下这篇新闻",
+      "fetch_url 失败 (timeout): 抓取超时 | 请求: 这个网页讲了什么"
+    ]
+  ],
+  "dedupe": {
+    "same": [
+      ["用户要求修改配置文件或代码文件时", "用户让我改某个文件里的配置项或代码时"],
+      ["用户要求设置提醒时", "用户请求在指定时间提醒他时"],
+      ["用户给出链接并要求总结网页内容时", "用户提供 URL 并请我概括文章时"]
+    ],
+    "different": [
+      ["读取的文件不存在时", "要读取的文件路径在工作目录之外时"],
+      ["用户要求设置提醒时", "用户要求创建日历日程时"],
+      ["用户要求修改配置文件时", "用户要求删除文件时"]
+    ]
+  }
+}
