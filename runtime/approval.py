@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import uuid
 
 from ..config import ApprovalMode
-from ..tools.base import UntrustedExposure
+from ..tools.base import ShownText, UntrustedExposure, written_forms
 from ..tools.registry import PreparedToolCall, ToolRegistry
 from ..tools.result import ToolOutput
 from .cancel import RunCancelled
@@ -44,25 +44,43 @@ def untrusted_exposure(session: Session, registry: ToolRegistry) -> UntrustedExp
     Sticky by design: injected text may survive in a summary or act turns
     later, so once an untrusted tool has answered, the session stays tainted.
 
-    ``seen_text`` vouches for URLs, so it holds only text the model did not
-    write: user messages and successful results of untrusted tools, with the
-    call's own arguments cut out. Text the model wrote itself — summaries,
-    errors and denials that echo its arguments, a search query echoed back —
-    would otherwise launder a URL it built (the same rule as the
-    ``url_sources`` of Anthropic's web_fetch tool).
+    The exposure vouches for URLs, so it separates who wrote what. User
+    messages always vouch. A successful result of an untrusted tool vouches
+    only for text the model had not written before it arrived: a URL the
+    model put into an earlier reply, tool call or summary and then got back
+    — a search query echoed with its whitespace collapsed, a value stored in
+    one call and read in the next — is still a URL the model built (the same
+    idea as the ``url_sources`` of Anthropic's web_fetch tool). Failed
+    results never vouch: errors and denials repeat the call's arguments.
+
+    Residual: a tool that computes its output (joins non-adjacent strings,
+    decodes base64) can return a URL the model never wrote in one piece.
     """
     tainted = False
     seen: list[str] = []
-    call_args: dict[str, list[str]] = {}
+    shown: list[ShownText] = []
+    written: list[str] = []
+    written_length = 0
+
+    def wrote(text: str | None) -> None:
+        nonlocal written_length
+        for form in written_forms(text or ""):
+            written.append(form)
+            written_length += len(form)
+
     for entry in session.entries:
+        # A summary is the summariser model's text.
+        wrote(entry.summary)
         message = entry.message
         if message is None:
             continue
         if message.role == "user":
             seen.append(message.content)
         elif message.role == "assistant":
+            wrote(message.content)
             for call in message.tool_calls or []:
-                call_args[call.id] = _argument_strings(call.arguments)
+                for text in _argument_strings(call.arguments):
+                    wrote(text)
         elif message.role == "tool":
             tool = registry.get(message.name or "")
             if tool is None:
@@ -72,17 +90,19 @@ def untrusted_exposure(session: Session, registry: ToolRegistry) -> UntrustedExp
                 untrusted = tool.untrusted_output
             tainted = tainted or untrusted
             if untrusted and _succeeded(message.content):
-                content = message.content
-                for value in call_args.get(message.tool_call_id or "", []):
-                    # Results are JSON, so an echo may appear escaped.
-                    escaped = json.dumps(value, ensure_ascii=False)[1:-1]
-                    content = content.replace(value, "").replace(escaped, "")
-                seen.append(content)
-    return UntrustedExposure(tainted=tainted, seen_text="\n".join(seen))
+                shown.append(ShownText(message.content, written_length))
+    return UntrustedExposure(
+        tainted=tainted,
+        seen_text="\n".join(seen),
+        shown=tuple(shown),
+        # No separator: pieces the model wrote side by side also match a
+        # tool that joins them.
+        written="".join(written),
+    )
 
 
 def _argument_strings(arguments: str) -> list[str]:
-    """Every string value in a call's JSON arguments, longest first."""
+    """Every key and string value in a call's JSON arguments, in order."""
     try:
         parsed = json.loads(arguments or "{}")
     except json.JSONDecodeError:
@@ -91,18 +111,17 @@ def _argument_strings(arguments: str) -> list[str]:
 
     def walk(value: Any) -> None:
         if isinstance(value, str):
-            if value:
-                found.append(value)
+            found.append(value)
         elif isinstance(value, dict):
-            for item in value.values():
+            for key, item in value.items():
+                found.append(str(key))
                 walk(item)
         elif isinstance(value, list):
             for item in value:
                 walk(item)
 
     walk(parsed)
-    # Longest first, so a URL is cut before a substring of it.
-    return sorted(set(found), key=len, reverse=True)
+    return found
 
 
 def _succeeded(content: str) -> bool:
