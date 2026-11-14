@@ -14,20 +14,26 @@ concurrency:
 
 jobs:
   test:
-    name: lint and unit tests (${{ matrix.os }})
+    name: lint and unit tests (${{ matrix.os }}, ${{ matrix.install }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        # macOS is the target platform; Linux keeps the core portable.
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # A plain install is what the quick start gives a user. macOS is
+          # the target platform; Linux keeps the core portable.
+          - { os: macos-latest, install: plain, sync: "" }
+          - { os: ubuntu-latest, install: plain, sync: "" }
+          # Tests that need an optional extra skip without it, so one job
+          # installs them all.
+          - { os: ubuntu-latest, install: all extras, sync: "--all-extras" }
     steps:
       - uses: actions/checkout@v7
       # setup-uv publishes no moving major tag, so it is pinned by commit.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       # --locked fails when uv.lock is out of date with pyproject.toml.
-      - run: uv sync --locked
+      - run: uv sync --locked ${{ matrix.sync }}
       - run: uv run ruff check .
       # Unit tests only; they call no model and need no API key.
       - run: uv run python -m unittest discover -s tests
