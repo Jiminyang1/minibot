@@ -124,6 +124,10 @@ class UserMemoryStore:
             raw = self.memory_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return [], 1
+        if not raw.strip():
+            # What the old truncate-then-write save left behind after a crash.
+            # It holds nothing to protect, so it is an empty store.
+            return [], 1
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:

@@ -46,6 +46,15 @@ class UserMemoryDurabilityTests(unittest.TestCase):
             with self.assertRaises(MemoryFileDamaged):
                 store.add("新事实")
 
+    def test_an_empty_file_is_an_empty_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = UserMemoryStore(Path(tmpdir))
+            store.memory_path.write_text("", encoding="utf-8")
+
+            self.assertIsNone(store.read_error())
+            self.assertEqual(store.add("新事实").id, "mem_1")
+            self.assertEqual([item.content for item in store.list()], ["新事实"])
+
     def test_memory_tools_report_a_damaged_file_as_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = UserMemoryStore(Path(tmpdir))
