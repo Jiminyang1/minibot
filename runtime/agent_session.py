@@ -84,17 +84,10 @@ class AgentSession:
                 emitter=emitter,
                 cancel_event=cancel_event,
             )
-            emitter.emit(
-                "run.completed",
-                {
-                    "session_id": session.session_id,
-                    "reply": outcome.reply,
-                    "did_compact": outcome.did_compact,
-                    "compact_message": outcome.compact_message,
-                },
-            )
-            return outcome
-        except RunCancelled:
+        except (RunCancelled, KeyboardInterrupt):
+            # Ctrl+C that reaches here as an exception (no SIGINT handler
+            # turned it into abort()) ends the run the same way: the loop
+            # already wrote the cancelled-turn reply.
             emitter.emit("run.cancelled", {"session_id": session.session_id})
             raise
         except Exception as exc:
@@ -107,6 +100,19 @@ class AgentSession:
                 },
             )
             raise
+        else:
+            # Outside the try: a subscriber that raises on run.completed must
+            # not make the same run emit run.failed as a second terminal event.
+            emitter.emit(
+                "run.completed",
+                {
+                    "session_id": session.session_id,
+                    "reply": outcome.reply,
+                    "did_compact": outcome.did_compact,
+                    "compact_message": outcome.compact_message,
+                },
+            )
+            return outcome
         finally:
             session_lock.release()
             with self._cancel_lock:

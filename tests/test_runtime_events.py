@@ -189,6 +189,48 @@ class RuntimeEventTests(unittest.TestCase):
             self.assertFalse(agent_session.abort("r_abort"))
             self.assertFalse(agent_session.is_busy("s_test"))
 
+    def test_subscriber_error_on_run_completed_does_not_add_run_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            manager.create_session("s_test")
+            engine = _BlockingLoop()
+            engine.release.set()
+            agent_session = AgentSession(agent_loop=engine, session_manager=manager)
+            events: list[RuntimeEvent] = []
+
+            def subscriber(event: RuntimeEvent) -> None:
+                events.append(event)
+                if event.type == "run.completed":
+                    raise BrokenPipeError("terminal went away")
+
+            with self.assertRaises(BrokenPipeError):
+                agent_session.prompt("s_test", "hello", event_handler=subscriber)
+
+            terminal = [event.type for event in events if event.type.startswith("run.")]
+            self.assertEqual(terminal, ["run.started", "run.completed"])
+            self.assertFalse(agent_session.is_busy("s_test"))
+
+    def test_keyboard_interrupt_ends_the_run_with_run_cancelled(self) -> None:
+        class _InterruptedLoop(_BlockingLoop):
+            def run_turn(self, session, user_input, *, emitter, cancel_event=None):
+                raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir))
+            manager.create_session("s_test")
+            agent_session = AgentSession(
+                agent_loop=_InterruptedLoop(), session_manager=manager
+            )
+            events: list[RuntimeEvent] = []
+
+            with self.assertRaises(KeyboardInterrupt):
+                agent_session.prompt("s_test", "hello", event_handler=events.append)
+
+            self.assertEqual(
+                [event.type for event in events], ["run.started", "run.cancelled"]
+            )
+            self.assertFalse(agent_session.is_busy("s_test"))
+
 
 if __name__ == "__main__":
     unittest.main()
