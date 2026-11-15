@@ -208,7 +208,7 @@ uv run minibot-daemon    # resident process; single-instance lock
 
 ## Quality loop: evals and lessons
 
-Evals measure the agent. The lessons loop (**experimental**) turns past failures into rules that a human approves. `run --lessons compare` is how to check whether approved lessons help; with ten cases run once each, its result is a hint, not evidence (cases are not yet repeated, so one flip is ten points of noise).
+Evals measure the agent. The lessons loop (**experimental**) turns past failures into rules that a human approves. `run --lessons compare` is how to check whether approved lessons help. With ten cases run once each, one flip is ten points of noise, so add `--repeat N`: each case then has a pass count per mode, and the report separates cases that always pass, always fail, or pass only sometimes.
 
 **Golden evals** (`evals/`). Cases live in `evals/cases.json`, mirrored to the Langfuse dataset `minibot-golden`. Each case runs one sandboxed turn and is scored per stage: skill selection → tool selection → tool arguments → answer (LLM-as-judge) → outcome.
 
@@ -218,6 +218,7 @@ uv run python -m minibot.evals pytest -k tool_args    # pytest, one test per (ca
 uv run python -m minibot.evals traces --failed        # recent real runs that went wrong
 uv run python -m minibot.evals promote <trace_id>     # turn a real run into a case: recorded tool outputs replay in the sandbox
 uv run python -m minibot.evals run --lessons compare  # same cases with lessons off and on: pass rates, flips, calls/tokens/latency
+uv run python -m minibot.evals run --repeat 3         # the same cases three times: pass / flaky / fail per case, pass-rate range
 ```
 
 The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.

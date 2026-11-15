@@ -116,8 +116,8 @@ def compare_runs(
     drawn for without breaking others? A flip names the lessons the "on" run
     actually received, so a regression points at a specific lesson.
     """
-    off = {row["case"]: row for row in off_rows}
-    on = {row["case"]: row for row in on_rows}
+    off = _by_case(off_rows)
+    on = _by_case(on_rows)
     stages: dict[str, dict[str, float | None]] = {}
     for stage in (*PIPELINE, "end_to_end"):
         stages[stage] = {
@@ -126,15 +126,26 @@ def compare_runs(
         }
     flips = []
     for case in sorted(off.keys() & on.keys()):
-        before = _passed(off[case], "end_to_end")
-        after = _passed(on[case], "end_to_end")
-        if before is None or after is None or before == after:
+        before = _pass_count(off[case])
+        after = _pass_count(on[case])
+        if not before[1] or not after[1]:
             continue
+        # With repeats a case moves by a share of its runs, not all or nothing.
+        delta = after[0] / after[1] - before[0] / before[1]
+        if delta == 0:
+            continue
+        lessons: list[str] = []
+        for row in on[case]:
+            for lesson in (row.get("output") or {}).get("lessons_used") or []:
+                if lesson not in lessons:
+                    lessons.append(lesson)
         flips.append(
             {
                 "case": case,
-                "change": "fixed" if after else "broken",
-                "lessons": list((on[case].get("output") or {}).get("lessons_used") or []),
+                "change": "fixed" if delta > 0 else "broken",
+                "off": before,
+                "on": after,
+                "lessons": lessons,
             }
         )
     # Cost too: a lesson can leave correctness unchanged and still save
@@ -164,14 +175,77 @@ def format_comparison(comparison: dict[str, Any]) -> str:
             continue
         lines.append(f"  {metric:<16} {means['off']:g} → {means['on']:g}（平均）")
     lines.append(
-        f"  {comparison['cases_with_lessons']}/{comparison['total']} 个用例在 on 模式下收到了 lesson。"
+        f"  {comparison['cases_with_lessons']}/{comparison['total']} 次用例运行在 on 模式下收到了 lesson。"
     )
     if not comparison["flips"]:
         lines.append("  没有用例的端到端结果发生变化。")
     for flip in comparison["flips"]:
-        mark = "修好" if flip["change"] == "fixed" else "变坏"
         lessons = ", ".join(flip["lessons"]) or "无"
-        lines.append(f"  {mark}: {flip['case']}（用到的 lesson: {lessons}）")
+        if flip["off"][1] == 1 and flip["on"][1] == 1:
+            mark = "修好" if flip["change"] == "fixed" else "变坏"
+            moved = ""
+        else:
+            mark = "变好" if flip["change"] == "fixed" else "变坏"
+            moved = f" {_count(flip['off'])} → {_count(flip['on'])}"
+        lines.append(f"  {mark}: {flip['case']}{moved}（用到的 lesson: {lessons}）")
+    return "\n".join(lines)
+
+
+# ── the same cases, run several times ─────────────────────────────
+
+
+def stability_report(trials: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    """Which end-to-end results hold when the same cases run again?
+
+    One run of ten cases cannot tell a real change from the model's own
+    variance: one flip moves the pass rate by ten points. Repeats give each
+    case a pass count, so a case is ``pass`` (every run), ``fail`` (no run)
+    or ``flaky`` (some runs), and the pass rate gets a range.
+    """
+    grouped = _by_case([row for rows in trials for row in rows])
+    cases = []
+    for case, rows in grouped.items():
+        passes, runs = _pass_count(rows)
+        if not runs:
+            continue
+        verdict = "pass" if passes == runs else "fail" if passes == 0 else "flaky"
+        cases.append({"case": case, "passes": passes, "runs": runs, "verdict": verdict})
+    rates = [
+        rate
+        for rate in (_pass_rate(rows, "end_to_end") for rows in trials)
+        if rate is not None
+    ]
+    return {
+        "trials": len(trials),
+        "cases": cases,
+        "pass_rate": (
+            None
+            if not rates
+            else {"mean": sum(rates) / len(rates), "min": min(rates), "max": max(rates)}
+        ),
+        "verdicts": {
+            verdict: sum(1 for case in cases if case["verdict"] == verdict)
+            for verdict in ("pass", "flaky", "fail")
+        },
+    }
+
+
+def format_stability(report: dict[str, Any]) -> str:
+    lines = [f"重复 {report['trials']} 次的稳定性:"]
+    rate = report["pass_rate"]
+    if rate is not None:
+        lines.append(
+            f"  端到端通过率 平均 {rate['mean']:.0%}（各次 {rate['min']:.0%} – {rate['max']:.0%}）"
+        )
+    verdicts = report["verdicts"]
+    lines.append(
+        f"  每次都过 {verdicts['pass']} · 时过时不过 {verdicts['flaky']} · 每次都不过 {verdicts['fail']}"
+    )
+    for case in report["cases"]:
+        if case["verdict"] == "pass":
+            continue
+        label = "时过时不过" if case["verdict"] == "flaky" else "每次都不过"
+        lines.append(f"  {label}: {case['case']} {case['passes']}/{case['runs']}")
     return "\n".join(lines)
 
 
@@ -191,6 +265,23 @@ def _passed(row: dict[str, Any], stage: str) -> bool | None:
 def _pass_rate(rows: list[dict[str, Any]], stage: str) -> float | None:
     results = [p for p in (_passed(row, stage) for row in rows) if p is not None]
     return sum(results) / len(results) if results else None
+
+
+def _by_case(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row["case"], []).append(row)
+    return grouped
+
+
+def _pass_count(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    """(end-to-end passes, scored runs) for one case's rows."""
+    results = [p for p in (_passed(row, "end_to_end") for row in rows) if p is not None]
+    return sum(results), len(results)
+
+
+def _count(count: tuple[int, int]) -> str:
+    return f"{count[0]}/{count[1]}"
 
 
 def _rate(value: float | None) -> str:
