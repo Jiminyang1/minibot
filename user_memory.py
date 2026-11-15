@@ -8,7 +8,12 @@ operations; prompt rendering lives in :mod:`minibot.runtime.context_builder`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+import fcntl
 import json
+import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,8 +37,21 @@ class MemoryItem:
         )
 
 
+class MemoryFileDamaged(OSError):
+    """The memory file exists but cannot be parsed.
+
+    Writes stop here: saving over it would replace every stored fact with
+    the one being added.
+    """
+
+
 class UserMemoryStore:
-    """Load / save / mutate global user memory backed by a JSON file."""
+    """Load / save / mutate global user memory backed by a JSON file.
+
+    The CLI, the web server and the daemon can all hold a store on the same
+    file, so every change is one read-modify-write under a file lock, and the
+    file is replaced whole: a crash leaves the old file or the new one.
+    """
 
     def __init__(self, root: Path | None = None) -> None:
         if root is None:
@@ -42,85 +60,123 @@ class UserMemoryStore:
             root = resolve_state_home()
         self.state_dir = root.resolve()
         self.memory_path = self.state_dir / "user_memory.json"
+        self._lock_path = self.state_dir / "locks" / "user_memory.lock"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def list(self) -> list[MemoryItem]:
-        if not self.memory_path.exists():
-            return []
+        """Current facts; empty when the file is missing or unreadable.
+
+        Every request reads this, so a damaged file must not fail the turn.
+        ``read_error`` says whether "empty" really means empty.
+        """
         try:
-            data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            items, _ = self._read()
+        except OSError:
             return []
-        raw_items = data.get("memories", []) if isinstance(data, dict) else []
-        result: list[MemoryItem] = []
-        for raw in raw_items:
-            if isinstance(raw, dict) and "id" in raw and "content" in raw:
-                result.append(MemoryItem.from_dict(raw))
-        return result
+        return items
+
+    def read_error(self) -> str | None:
+        """Why the file cannot be read, or None when it can."""
+        try:
+            self._read()
+        except OSError as exc:
+            return str(exc)
+        return None
 
     def add(self, content: str) -> MemoryItem:
         content = content.strip()
         if not content:
             raise ValueError("记忆内容不能为空。")
-        items = self.list()
-        item = MemoryItem(
-            id=f"mem_{self._take_next_index(items)}",
-            content=content,
-            created_at=datetime.now().isoformat(timespec="seconds"),
-        )
-        items.append(item)
-        self._save(items)
+        with self._locked():
+            items, next_index = self._read()
+            item = MemoryItem(
+                id=f"mem_{next_index}",
+                content=content,
+                created_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            self._save([*items, item], next_index + 1)
         return item
 
     def delete(self, memory_id: str) -> bool:
-        items = self.list()
-        kept = [m for m in items if m.id != memory_id]
-        if len(kept) == len(items):
-            return False
-        self._save(kept)
+        with self._locked():
+            items, next_index = self._read()
+            kept = [m for m in items if m.id != memory_id]
+            if len(kept) == len(items):
+                return False
+            self._save(kept, next_index)
         return True
 
     def clear(self) -> int:
-        count = len(self.list())
-        self._save([])
-        return count
+        with self._locked():
+            items, next_index = self._read()
+            self._save([], next_index)
+        return len(items)
 
-    def _save(self, items: list[MemoryItem]) -> None:
+    def _read(self) -> tuple[list[MemoryItem], int]:
+        """Return the stored facts and the next unused index.
+
+        The index never goes back: a forgotten id must not come back pointing
+        at a different, newer fact (the model may still hold a stale
+        reference to it). It is read from the file each time, because another
+        process may have advanced it.
+        """
+        try:
+            raw = self.memory_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return [], 1
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise self._damaged(f"不是合法的 JSON（{exc.msg}，第 {exc.lineno} 行）") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("memories", []), list):
+            raise self._damaged("结构不是 {\"memories\": [...]}")
+        items = [
+            MemoryItem.from_dict(entry)
+            for entry in data.get("memories", [])
+            if isinstance(entry, dict) and "id" in entry and "content" in entry
+        ]
+        stored = data.get("next_index")
+        next_index = self._highest_item_index(items) + 1
+        if isinstance(stored, int) and not isinstance(stored, bool):
+            next_index = max(next_index, stored)
+        return items, next_index
+
+    def _damaged(self, reason: str) -> MemoryFileDamaged:
+        return MemoryFileDamaged(
+            f"长期记忆文件 {self.memory_path} 无法读取：{reason}。"
+            "为避免覆盖已有记忆，已停止写入；请修复或移走该文件。"
+        )
+
+    def _save(self, items: list[MemoryItem], next_index: int) -> None:
         payload = {
             "memories": [m.to_dict() for m in items],
-            "next_index": self._stored_next_index(),
+            "next_index": next_index,
         }
-        self.memory_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        temp_path = self.memory_path.with_name(
+            f".{self.memory_path.name}.{uuid.uuid4().hex}.tmp"
         )
+        try:
+            with temp_path.open("w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.memory_path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
 
-    def _take_next_index(self, existing: list[MemoryItem]) -> int:
-        """Return a never-reused index: a forgotten id must not come back
-        pointing at a different, newer fact (the model may still hold a
-        stale reference to it)."""
-        index = max(
-            self._stored_next_index(),
-            self._highest_item_index(existing) + 1,
-        )
-        self._next_index = index + 1
-        return index
-
-    def _stored_next_index(self) -> int:
-        cached = getattr(self, "_next_index", None)
-        if cached is not None:
-            return cached
-        if self.memory_path.exists():
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        # flock belongs to the open file, not the process, so two stores in
+        # one process exclude each other the same way two processes do.
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                data = {}
-            raw = data.get("next_index") if isinstance(data, dict) else None
-            if isinstance(raw, int) and raw > 0:
-                self._next_index = raw
-                return raw
-        self._next_index = self._highest_item_index(self.list()) + 1
-        return self._next_index
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _highest_item_index(items: list[MemoryItem]) -> int:
