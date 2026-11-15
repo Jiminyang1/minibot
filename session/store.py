@@ -188,6 +188,10 @@ class SessionManager:
             path = self._messages_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
+                if _ends_mid_line(path):
+                    # A crash cut the last append short. Close that line, or
+                    # this entry would share it and be unreadable too.
+                    f.write("\n")
                 for entry in entries:
                     f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
 
@@ -289,7 +293,14 @@ class SessionManager:
             for line in messages_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
-                record = json.loads(line)
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    # A line cut short by a crash in the middle of an append.
+                    # Its write was never acknowledged, so nothing recorded is
+                    # lost by skipping it; failing here would make the whole
+                    # session unreadable.
+                    continue
                 if isinstance(record, dict):
                     entries.append(SessionEntry.from_dict(record))
 
@@ -377,6 +388,19 @@ class SessionManager:
         temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temp_path.write_text(text, encoding="utf-8")
         os.replace(temp_path, path)
+
+
+def _ends_mid_line(path: Path) -> bool:
+    """True when a non-empty file does not end with a newline."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
 
 
 def _is_native_meta(meta: dict[str, object] | None) -> bool:

@@ -61,6 +61,40 @@ class SessionStoreTests(unittest.TestCase):
             self.assertEqual(reloaded.message_count, 1)
             self.assertEqual(reloaded.messages[0].content, "hello")
 
+    def test_line_cut_short_by_a_crash_does_not_make_the_session_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            manager = SessionManager(workspace)
+            session = manager.create_session("s_test")
+            for text in ("first", "second"):
+                manager.append_entries(
+                    session.session_id,
+                    [SessionEntry.from_message(MessageEvent.create(role="user", content=text))],
+                )
+            path = workspace / "sessions" / "s_test" / "messages.jsonl"
+            # A crash in the middle of an append: part of a line, no newline.
+            with path.open("a", encoding="utf-8") as f:
+                f.write('{"type": "message", "id": "m3", "mess')
+
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual([m.content for m in reloaded.messages], ["first", "second"])
+
+            # The next append must not share the cut line, or it is lost too.
+            manager.append_entries(
+                session.session_id,
+                [SessionEntry.from_message(MessageEvent.create(role="user", content="after"))],
+            )
+            reloaded = manager.load("s_test")
+            assert reloaded is not None
+            self.assertEqual(
+                [m.content for m in reloaded.messages], ["first", "second", "after"]
+            )
+            # Append-only still holds: the cut line stays where it was.
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[2], '{"type": "message", "id": "m3", "mess')
+            self.assertEqual(len(lines), 4)
+
     def test_sessions_written_by_minibot_ts_are_ignored_not_touched(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
