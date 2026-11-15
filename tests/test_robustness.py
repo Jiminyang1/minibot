@@ -6,6 +6,8 @@ import tempfile
 import threading
 import unittest
 
+import openai
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -374,7 +376,7 @@ class RetryOwnershipTests(unittest.TestCase):
                 with _AlwaysRateLimited() as server:
                     client = server.client(supports_streaming=supports_streaming)
 
-                    with self.assertRaises(Exception) as caught:
+                    with self.assertRaises(openai.RateLimitError) as caught:
                         list(client.chat_stream(self._MESSAGES))
 
                     self.assertTrue(is_retryable_llm_error(caught.exception))
@@ -386,7 +388,7 @@ class RetryOwnershipTests(unittest.TestCase):
                 server.client(), Path(tmpdir), max_retries=3
             )
 
-            with self.assertRaises(Exception):
+            with self.assertRaises(openai.RateLimitError):
                 run_turn(loop, manager, "hi")
 
             # 1 try + 3 retries. It was 12 while the SDK retried underneath.
@@ -396,7 +398,7 @@ class RetryOwnershipTests(unittest.TestCase):
         with _AlwaysRateLimited() as server:
             client = server.client()
 
-            with self.assertRaises(Exception):
+            with self.assertRaises(openai.RateLimitError):
                 client.chat(self._MESSAGES)
 
             self.assertEqual(server.requests, 3)
