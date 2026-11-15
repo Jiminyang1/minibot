@@ -309,3 +309,94 @@ class SchemaValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _AlwaysRateLimited:
+    """A local HTTP endpoint that answers every request with 429."""
+
+    def __enter__(self) -> "_AlwaysRateLimited":
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        owner = self
+        self.requests = 0
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                owner.requests += 1
+                body = b'{"error": {"message": "slow down", "type": "rate_limit"}}'
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                # The SDK waits this long between its own retries.
+                self.send_header("retry-after-ms", "1")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                del args
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
+
+    def client(self, *, supports_streaming: bool = True):
+        from minibot.llm_profile import LLMProfile, OpenAICompatibleCompat
+        from minibot.llm_providers.openai_compatible import OpenAICompatibleClient
+
+        host, port = self._server.server_address[:2]
+        return OpenAICompatibleClient(
+            LLMProfile(
+                provider="openai",
+                api="openai_chat_completions",
+                model="test-model",
+                base_url=f"http://{host}:{port}/v1",
+                api_key="sk-test",
+                compat=OpenAICompatibleCompat(supports_streaming=supports_streaming),
+            )
+        )
+
+
+class RetryOwnershipTests(unittest.TestCase):
+    """One layer retries each call: the loop for turns, the SDK for the rest."""
+
+    _MESSAGES = [ModelMessage.create(role="user", content="hi")]
+
+    def test_one_failed_stream_call_is_one_request(self) -> None:
+        for supports_streaming in (True, False):
+            with self.subTest(supports_streaming=supports_streaming):
+                with _AlwaysRateLimited() as server:
+                    client = server.client(supports_streaming=supports_streaming)
+
+                    with self.assertRaises(Exception) as caught:
+                        list(client.chat_stream(self._MESSAGES))
+
+                    self.assertTrue(is_retryable_llm_error(caught.exception))
+                    self.assertEqual(server.requests, 1)
+
+    def test_a_turn_sends_one_request_per_loop_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, _AlwaysRateLimited() as server:
+            loop, manager = _fast_retry_loop(
+                server.client(), Path(tmpdir), max_retries=3
+            )
+
+            with self.assertRaises(Exception):
+                run_turn(loop, manager, "hi")
+
+            # 1 try + 3 retries. It was 12 while the SDK retried underneath.
+            self.assertEqual(server.requests, 4)
+
+    def test_chat_keeps_the_sdk_retries_for_callers_without_their_own(self) -> None:
+        with _AlwaysRateLimited() as server:
+            client = server.client()
+
+            with self.assertRaises(Exception):
+                client.chat(self._MESSAGES)
+
+            self.assertEqual(server.requests, 3)
