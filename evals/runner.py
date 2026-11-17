@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -285,6 +286,38 @@ def _local_trace_url(trace_id: str | None) -> str | None:
 # ── saved runs ────────────────────────────────────────────────────
 
 
+def case_fingerprints(cases: list[dict[str, Any]]) -> dict[str, str]:
+    """Case id -> a short hash of what defines the case (input + expected).
+
+    Saved with every run, so a comparison can tell "the agent got worse"
+    from "someone changed what the case asks for".
+    """
+    return {
+        case["id"]: _short_hash(
+            json.dumps(
+                {"input": case.get("input"), "expected": case.get("expected")},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        for case in cases
+    }
+
+
+def scorer_version() -> str:
+    """A short hash of the scoring code, the judge prompt included.
+
+    Any edit changes it, comments too: a comparison across it only warns.
+    """
+    return _short_hash((Path(__file__).with_name("scoring.py")).read_text(encoding="utf-8"))
+
+
+def _short_hash(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+
+
 def runs_dir() -> Path:
     return resolve_state_home() / "evals"
 
@@ -442,6 +475,7 @@ __all__ = [
     "DATASET",
     "STAGES",
     "applicable_stages",
+    "case_fingerprints",
     "dataset_cases",
     "default_run_name",
     "evaluate",
@@ -453,6 +487,7 @@ __all__ = [
     "run_local",
     "runs_dir",
     "save_run",
+    "scorer_version",
     "sync_dataset",
     "trace_url",
 ]

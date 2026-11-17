@@ -53,11 +53,13 @@ from .runner import (
     default_run_name,
     format_table,
     langfuse_configured,
+    case_fingerprints,
     load_cases,
     load_run,
     run_experiment,
     run_local,
     save_run,
+    scorer_version,
     sync_dataset,
     trace_url,
     with_lessons,
@@ -175,7 +177,14 @@ def main(argv: list[str] | None = None) -> int:
             mode_name,
             pooled,
             config=with_lessons(config, lessons),
-            extra={"repeat": args.repeat, "mode": "local" if local else "langfuse"},
+            extra={
+                "repeat": args.repeat,
+                "mode": "local" if local else "langfuse",
+                # What each case asked for and how it was graded, so a
+                # later comparison can set aside cases whose definition moved.
+                "case_fingerprints": case_fingerprints(load_cases(args.cases)),
+                "scorer": scorer_version(),
+            },
         )
         print(f"结果已保存: {path}（可以用作 --baseline {mode_name}）")
         if baseline is not None:
