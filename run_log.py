@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -64,6 +64,10 @@ class RunLogRecord:
     error_type: str | None
     error_message_preview: str | None
     cached_input_tokens: int | None = None
+    # Approved lessons appended to any request in this run, in first-seen order.
+    lessons: list[str] = field(default_factory=list)
+    # The Langfuse trace of this run, when tracing is on.
+    trace_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
