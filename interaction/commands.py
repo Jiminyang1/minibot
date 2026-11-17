@@ -260,6 +260,14 @@ def _compact(context: CommandContext, current_session_id: str) -> CommandResult:
     )
 
 
+def _memory_unavailable(reason: str, current_session_id: str) -> CommandResult:
+    return CommandResult(
+        handled=True,
+        current_session_id=current_session_id,
+        notices=(_notice("error", "长期记忆不可用", reason),),
+    )
+
+
 def _memory(
     raw: str,
     context: CommandContext,
@@ -269,6 +277,9 @@ def _memory(
     sub = parts[1] if len(parts) >= 2 else ""
 
     if sub == "":
+        damage = context.memory_store.read_error()
+        if damage is not None:
+            return _memory_unavailable(damage, current_session_id)
         items = context.memory_store.list()
         if not items:
             return CommandResult(
@@ -283,7 +294,10 @@ def _memory(
             notices=(_notice("info", f"长期记忆 · {len(items)} 条", "\n".join(lines)),),
         )
     if sub == "clear":
-        count = context.memory_store.clear()
+        try:
+            count = context.memory_store.clear()
+        except OSError as exc:
+            return _memory_unavailable(str(exc), current_session_id)
         return CommandResult(
             handled=True,
             current_session_id=current_session_id,
@@ -293,7 +307,11 @@ def _memory(
         if len(parts) < 3 or not parts[2].strip():
             return _usage("用法: /memory forget <memory_id>", current_session_id)
         target = parts[2].strip()
-        if context.memory_store.delete(target):
+        try:
+            removed = context.memory_store.delete(target)
+        except OSError as exc:
+            return _memory_unavailable(str(exc), current_session_id)
+        if removed:
             notice = _notice("success", f"已删除记忆 {target}")
         else:
             notice = _notice("warning", f"未找到记忆 {target}")
