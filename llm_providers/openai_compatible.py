@@ -64,8 +64,17 @@ class OpenAICompatibleClient(LLMClient):
         tools: list[ModelToolDefinition] | None = None,
         model: str | None = None,
     ) -> LLMResponse:
+        return self._complete(self._client, messages, tools, model)
+
+    def _complete(
+        self,
+        client: Any,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None,
+        model: str | None,
+    ) -> LLMResponse:
         kwargs = self._request_kwargs(messages, tools, model)
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
 
         tool_calls: list[ToolCall] = []
@@ -97,8 +106,14 @@ class OpenAICompatibleClient(LLMClient):
         tools: list[ModelToolDefinition] | None = None,
         model: str | None = None,
     ) -> Iterator[LLMStreamEvent]:
+        # One attempt per call: the agent loop retries this call itself, with
+        # events and a cancellable wait. The SDK's own retries (2 by default)
+        # under the loop's would multiply: 3 x 4 = 12 requests for one call.
+        client = self._client.with_options(max_retries=0)
         if not self.compat.supports_streaming:
-            yield LLMStreamEvent.completed(self.chat(messages, tools, model))
+            yield LLMStreamEvent.completed(
+                self._complete(client, messages, tools, model)
+            )
             return
 
         kwargs = self._request_kwargs(messages, tools, model)
@@ -107,7 +122,7 @@ class OpenAICompatibleClient(LLMClient):
         # simply leave usage as None, which every consumer tolerates.
         kwargs["stream_options"] = {"include_usage": True}
 
-        stream = self._client.chat.completions.create(**kwargs)
+        stream = client.chat.completions.create(**kwargs)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_call_slots: dict[int, dict[str, str]] = {}

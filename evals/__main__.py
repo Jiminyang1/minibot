@@ -4,6 +4,9 @@
     run [--case ID ...]  run cases in the sandbox and score every stage
         [--name NAME]    experiment run name (default: model-time-gitsha)
         [--local]        skip Langfuse; save results under $MINIBOT_HOME/evals
+        [--repeat N]     run the cases N times (runs NAME-t1 … NAME-tN) and
+                         report which results hold: pass / flaky / fail per
+                         case, and the range of the pass rate
     pytest [ARGS ...]    the same cases as pytest, one test per (case, stage);
                          runs ``pytest evals -m golden ARGS`` (see test_golden.py)
     traces [--limit N] [--failed]
@@ -31,7 +34,9 @@ from .report import (
     failure_report,
     format_comparison,
     format_failure_report,
+    format_stability,
     save_failure_report,
+    stability_report,
 )
 from .runner import (
     CASES_PATH,
@@ -67,6 +72,13 @@ def main(argv: list[str] | None = None) -> int:
         default="off",
         help="是否注入已批准的 lesson；compare = 各跑一次并对比（默认 off）",
     )
+    run.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="同一批用例跑 N 次，报告哪些结果稳定（默认 1；费用和时间是 N 倍）",
+    )
     sub.add_parser("pytest", help="用 pytest 逐阶段断言（参数原样传给 pytest）")
     traces = sub.add_parser("traces", help="列出最近的 MiniBot trace")
     traces.add_argument("--limit", type=int, default=20, help="最多列出几条（默认 20）")
@@ -77,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
     promote.add_argument("--yes", action="store_true", help="不确认，直接写入")
     promote.add_argument("--cases", type=Path, default=CASES_PATH, help="写入哪个 cases.json")
     args = parser.parse_args(argv)
+
+    if args.command == "run" and args.repeat < 1:
+        parser.error("--repeat 必须大于等于 1。")
 
     load_env()
     config = Config.from_env()
@@ -102,12 +117,25 @@ def main(argv: list[str] | None = None) -> int:
     base_name = args.name or default_run_name(config)
     lesson_modes = ("off", "on") if args.lessons == "compare" else (args.lessons,)
     local = args.local or not langfuse_configured()
-    results = {}
+    results: dict[str, list[dict[str, Any]]] = {}
     for lessons in lesson_modes:
-        run_name = base_name if args.lessons == "off" else f"{base_name}-lessons-{lessons}"
-        results[lessons] = _run_once(
-            with_lessons(config, lessons), run_name=run_name, cases=args.cases, local=local
-        )
+        mode_name = base_name if args.lessons == "off" else f"{base_name}-lessons-{lessons}"
+        trials = []
+        for trial in range(1, args.repeat + 1):
+            run_name = mode_name if args.repeat == 1 else f"{mode_name}-t{trial}"
+            trials.append(
+                _run_once(
+                    with_lessons(config, lessons),
+                    run_name=run_name,
+                    cases=args.cases,
+                    local=local,
+                )
+            )
+        if args.repeat > 1:
+            print()
+            print(format_stability(stability_report(trials)))
+        # Later steps pool the trials: a rate over every run of every case.
+        results[lessons] = [row for rows in trials for row in rows]
     if args.lessons == "compare":
         print()
         print(format_comparison(compare_runs(results["off"], results["on"])))

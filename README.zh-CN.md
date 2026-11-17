@@ -208,7 +208,7 @@ uv run minibot-daemon    # 常驻进程;单实例锁,重复启动自动退出
 
 ## 质量闭环：评测与 lesson
 
-评测衡量 agent。lesson 闭环（**实验性**）把过去的失败整理成规则，由人批准。`run --lessons compare` 用来检查已批准的 lesson 有没有用；但 10 个用例各跑一次，结果只能当参考，不能当证据（用例还没有重复运行，一个用例翻转就是 10 个百分点的噪声）。
+评测衡量 agent。lesson 闭环（**实验性**）把过去的失败整理成规则，由人批准。`run --lessons compare` 用来检查已批准的 lesson 有没有用。10 个用例各跑一次时，一个用例翻转就是 10 个百分点的噪声，所以要加 `--repeat N`：每个用例在每种模式下有一个通过次数，报告会分出每次都过、每次都不过、时过时不过的用例。
 
 **黄金评测**（`evals/`）。用例在 `evals/cases.json`，同步到 Langfuse dataset `minibot-golden`。每个用例在沙箱里跑一轮，按阶段打分：skill 选择 → 工具选择 → 工具参数 → 回答（LLM-as-judge）→ 结果状态。
 
@@ -218,6 +218,7 @@ uv run python -m minibot.evals pytest -k tool_args    # pytest，每个（用例
 uv run python -m minibot.evals traces --failed        # 最近出问题的真实运行
 uv run python -m minibot.evals promote <trace_id>     # 把一次真实运行变成用例：记录下的工具输出在沙箱里回放
 uv run python -m minibot.evals run --lessons compare  # 同一批用例分别关、开 lesson：通过率、翻转、调用/token/耗时
+uv run python -m minibot.evals run --repeat 3         # 同一批用例跑三次：每个用例稳定通过/时过时不过/稳定失败，通过率的范围
 ```
 
 pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。

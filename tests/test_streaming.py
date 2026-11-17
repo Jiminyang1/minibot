@@ -47,6 +47,18 @@ def _delta_chunk(
     )
 
 
+def _fake_sdk(create) -> types.SimpleNamespace:
+    """Stand-in for the OpenAI client; ``with_options`` returns itself."""
+    sdk = _ns(chat=_ns(completions=_ns(create=create)), options=[])
+
+    def with_options(**options):
+        sdk.options.append(options)
+        return sdk
+
+    sdk.with_options = with_options
+    return sdk
+
+
 class _FakeStream:
     def __init__(self, chunks) -> None:
         self._chunks = list(chunks)
@@ -99,7 +111,7 @@ class ProviderStreamTests(unittest.TestCase):
                 usage=None,
             )
 
-        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+        client._client = _fake_sdk(_create)
 
         client.chat([ModelMessage.create(role="user", content="hi")])
 
@@ -124,7 +136,7 @@ class ProviderStreamTests(unittest.TestCase):
                 usage=None,
             )
 
-        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+        client._client = _fake_sdk(_create)
 
         client.chat([ModelMessage.create(role="user", content="hi")])
 
@@ -168,7 +180,7 @@ class ProviderStreamTests(unittest.TestCase):
             seen_kwargs.update(kwargs)
             return stream
 
-        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+        client._client = _fake_sdk(_create)
 
         events = list(
             client.chat_stream([ModelMessage.create(role="user", content="hi")])
@@ -211,7 +223,7 @@ class ProviderStreamTests(unittest.TestCase):
             calls.append(kwargs)
             return resp
 
-        client._client = _ns(chat=_ns(completions=_ns(create=_create)))
+        client._client = _fake_sdk(_create)
 
         events = list(
             client.chat_stream([ModelMessage.create(role="user", content="hi")])

@@ -123,5 +123,9 @@ class LLMClient(abc.ABC):
         The default wraps ``chat`` in a single terminal event, so providers
         (and test fakes) without native streaming keep working unchanged and
         callers never need a streaming/non-streaming branch.
+
+        Retries belong to the caller: an implementation makes one attempt per
+        call and raises. ``chat`` is for callers with no retry of their own
+        (the summariser, the eval judge), so it may retry inside.
         """
         yield LLMStreamEvent.completed(self.chat(messages, tools, model))

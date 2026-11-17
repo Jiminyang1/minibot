@@ -15,6 +15,7 @@ from minibot.interaction.commands import (
 from minibot.mcp_host.models import MCPHostSummary, MCPServerStatus
 from minibot.runtime.approval import ApprovalPolicy
 from minibot.session import SessionManager
+from minibot.user_memory import UserMemoryStore
 
 
 class _Memory:
@@ -24,6 +25,9 @@ class _Memory:
 
     def list(self):
         return list(self.items)
+
+    def read_error(self):
+        return None
 
     def clear(self):
         count = len(self.items)
@@ -149,6 +153,33 @@ class InteractionCommandTests(unittest.TestCase):
                 self.assertTrue(result.notices, command)
 
             self.assertEqual(ctx.approval_policy.mode, "always")
+
+    def test_memory_commands_report_a_damaged_file_and_leave_it_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = SessionManager(Path(tmpdir) / "sessions")
+            session = manager.create_session("s_test")
+            store = UserMemoryStore(Path(tmpdir) / "state")
+            store.add("用户叫小明")
+            damaged = store.memory_path.read_text(encoding="utf-8")[:20]
+            store.memory_path.write_text(damaged, encoding="utf-8")
+            base = self._context(manager)
+            ctx = CommandContext(
+                sessions=base.sessions,
+                compactor=base.compactor,
+                context_builder=base.context_builder,
+                memory_store=store,
+                approval_policy=base.approval_policy,
+                mcp_host=base.mcp_host,
+                config=base.config,
+            )
+
+            for command in ["/memory", "/memory clear", "/memory forget mem_1"]:
+                result = dispatch_command(command, session.session_id, ctx)
+                # Not "memory is empty" and not "deleted 0": the file is there.
+                self.assertEqual(result.notices[0].kind, "error", command)
+                self.assertIn(str(store.memory_path), result.notices[0].body)
+
+            self.assertEqual(store.memory_path.read_text(encoding="utf-8"), damaged)
 
     def test_config_reports_resolved_model_and_policy_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
