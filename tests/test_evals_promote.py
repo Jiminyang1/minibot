@@ -24,7 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from minibot.config import Config
 from minibot.evals import __main__ as cli
 from minibot.evals import sandbox
-from minibot.evals.promote import draft_case, format_traces, summarize_traces
+from minibot.evals.promote import (
+    draft_case,
+    fetch_observations,
+    format_traces,
+    list_traces,
+    summarize_traces,
+)
 from minibot.evals.runner import load_cases
 from minibot.evals.sandbox import run_case
 from minibot.evals.scoring import score_deterministic
@@ -309,6 +315,102 @@ class TraceListingTests(unittest.TestCase):
         self.assertIn("运行失败", text)
         self.assertIn("2 个工具失败", text)
         self.assertIn("…", text)
+
+
+def _page(data, cursor=None):
+    return SimpleNamespace(data=list(data), meta=SimpleNamespace(cursor=cursor))
+
+
+class _PagedObservations:
+    """A fake ``api.observations.get_many`` that serves scripted pages.
+
+    Pages are keyed by the query's ``type`` and served in order, one per
+    call. Since Langfuse's adaptive scan, an empty page can still carry a
+    cursor: it means "the time budget ran out, keep going", not "done".
+    """
+
+    def __init__(self, pages: dict[str | None, list[SimpleNamespace]]) -> None:
+        self.pages = {key: list(value) for key, value in pages.items()}
+        self.calls: list[dict] = []
+
+    def get_many(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) > 50:
+            raise AssertionError("paging did not stop")
+        queue = self.pages.get(kwargs.get("type"))
+        return queue.pop(0) if queue else _page([])
+
+    def client(self):
+        return SimpleNamespace(api=SimpleNamespace(observations=self))
+
+
+def _observation(obs_id, trace_id="t1", minutes=0, **extra):
+    return SimpleNamespace(
+        id=obs_id, trace_id=trace_id, start_time=T0 + timedelta(minutes=minutes), **extra
+    )
+
+
+class ObservationPagingTests(unittest.TestCase):
+    def test_fetch_follows_the_cursor_past_an_empty_page(self) -> None:
+        wanted = _observation("o1")
+        fake = _PagedObservations({None: [_page([], "c1"), _page([wanted])]})
+
+        observations = fetch_observations(fake.client(), "t1")
+
+        self.assertEqual(observations, [wanted])
+        self.assertEqual(fake.calls[1]["cursor"], "c1")
+
+    def test_fetch_drops_rows_repeated_across_pages(self) -> None:
+        first, second = _observation("o1"), _observation("o2")
+        fake = _PagedObservations({None: [_page([first], "c1"), _page([first, second])]})
+
+        observations = fetch_observations(fake.client(), "t1")
+
+        self.assertEqual([o.id for o in observations], ["o1", "o2"])
+
+    def test_a_repeated_cursor_ends_paging(self) -> None:
+        stuck = [_page([], "same") for _ in range(10)]
+        fake = _PagedObservations({None: stuck})
+
+        self.assertEqual(fetch_observations(fake.client(), "t1"), [])
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_every_request_waits_longer_than_the_server_scan(self) -> None:
+        fake = _PagedObservations({None: [_page([_observation("o1")])]})
+
+        fetch_observations(fake.client(), "t1")
+
+        # The server may scan for up to 45 s; the SDK's default is 5 s.
+        timeout = fake.calls[0]["request_options"]["timeout_in_seconds"]
+        self.assertGreater(timeout, 45)
+
+    def test_listing_reads_past_empty_agent_and_tool_pages(self) -> None:
+        agent = _observation("a1", trace_id="t1", level="DEFAULT", tags=["tui"], input="你好")
+        tool_error = _observation("x1", trace_id="t1")
+        fake = _PagedObservations(
+            {
+                "AGENT": [_page([], "c1"), _page([agent])],
+                "TOOL": [_page([], "d1"), _page([tool_error])],
+            }
+        )
+
+        rows = list_traces(fake.client(), limit=5)
+
+        self.assertEqual([r["trace_id"] for r in rows], ["t1"])
+        self.assertEqual(rows[0]["failed_tools"], 1)
+
+    def test_listing_fills_the_limit_from_short_pages(self) -> None:
+        def agent(n):
+            return _observation(f"a{n}", trace_id=f"t{n}", minutes=-n, level="DEFAULT",
+                                tags=["cli"], input="q")
+
+        fake = _PagedObservations(
+            {"AGENT": [_page([agent(1)], "c1"), _page([agent(2)], "c2"), _page([agent(3)])]}
+        )
+
+        rows = list_traces(fake.client(), limit=2)
+
+        self.assertEqual([r["trace_id"] for r in rows], ["t1", "t2"])
 
 
 class PromoteCommandTests(unittest.TestCase):

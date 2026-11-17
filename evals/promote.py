@@ -23,6 +23,7 @@ tested against a fabricated trace.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 import json
@@ -46,6 +47,10 @@ _LOCAL_DATE_RE = re.compile(r"(?:发送时间|当前本地时间)\D*(\d{4}-\d{2}
 _ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}):(\d{2}))?")
 _MAX_CONTAINS_CHARS = 40
 _NEVER = datetime.min.replace(tzinfo=UTC)
+# The server scans for up to 45 s per page before it answers.
+_PAGE_TIMEOUT_S = 60
+# ``traces`` is an interactive listing: bound how long it can page.
+_MAX_LISTING_PAGES = 10
 
 
 @dataclass
@@ -196,48 +201,84 @@ def append_case(path: Path, case: dict[str, Any]) -> None:
 # ── fetching from Langfuse ────────────────────────────────────────
 
 
+def observation_pages(
+    langfuse: Any, *, max_pages: int | None = None, **query: Any
+) -> Iterator[list[Any]]:
+    """Each page of a v2 observations query, until the server sends no cursor.
+
+    A page can be short or empty while more rows remain: the server stops a
+    scan when its time budget (about 45 s) runs out and still returns a
+    cursor. So only a missing cursor ends the query. A cursor the server
+    already sent also ends it, so a misbehaving server cannot loop forever.
+    The SDK's default timeout (5 s) is shorter than one scan, so every
+    request waits longer.
+    """
+    cursor = None
+    seen: set[str] = set()
+    pages = 0
+    while max_pages is None or pages < max_pages:
+        page = langfuse.api.observations.get_many(
+            **query,
+            cursor=cursor,
+            request_options={"timeout_in_seconds": _PAGE_TIMEOUT_S},
+        )
+        pages += 1
+        yield list(page.data or [])
+        cursor = getattr(page.meta, "cursor", None)
+        if not cursor or cursor in seen:
+            return
+        seen.add(cursor)
+
+
 def fetch_observations(langfuse: Any, trace_id: str) -> list[Any]:
     """Every observation of one trace, via the v2 observations API."""
-    observations: list[Any] = []
-    cursor = None
-    while True:
-        page = langfuse.api.observations.get_many(
-            trace_id=trace_id,
-            fields="core,basic,io,metadata",
-            limit=1000,
-            cursor=cursor,
-        )
-        observations.extend(page.data)
-        cursor = getattr(page.meta, "cursor", None)
-        if not cursor or not page.data:
-            return observations
+    pages = observation_pages(
+        langfuse, trace_id=trace_id, fields="core,basic,io,metadata", limit=1000
+    )
+    return _unique(obs for page in pages for obs in page)
 
 
 def list_traces(langfuse: Any, *, limit: int = 20, failed: bool = False) -> list[dict[str, Any]]:
     """Recent MiniBot turns, newest first; with *failed*, only problem runs."""
     rows: list[dict[str, Any]] = []
-    cursor = None
-    for _ in range(10):  # at most 10 pages when filtering for failures
-        page = langfuse.api.observations.get_many(
-            name=TRACE_NAME,
-            type="AGENT",
-            fields="core,basic,io,trace_context",
-            limit=min(max(limit, 1) * (3 if failed else 1), 100),
-            cursor=cursor,
+    agents = observation_pages(
+        langfuse,
+        max_pages=_MAX_LISTING_PAGES,
+        name=TRACE_NAME,
+        type="AGENT",
+        fields="core,basic,io,trace_context",
+        limit=min(max(limit, 1) * (3 if failed else 1), 100),
+    )
+    seen: set[Any] = set()
+    for page in agents:
+        page = [o for o in page if _attr(o, "id") not in seen]
+        if not page:
+            continue
+        seen.update(_attr(o, "id") for o in page)
+        oldest = min(_start(o) for o in page)
+        tool_pages = observation_pages(
+            langfuse, type="TOOL", level="ERROR", from_start_time=oldest, fields="core", limit=1000
         )
-        if not page.data:
-            break
-        oldest = min(_start(o) for o in page.data)
-        tool_errors = langfuse.api.observations.get_many(
-            type="TOOL", level="ERROR", from_start_time=oldest, fields="core", limit=1000
-        ).data
-        rows.extend(summarize_traces(page.data, tool_errors))
+        tool_errors = _unique(obs for tools in tool_pages for obs in tools)
+        rows.extend(summarize_traces(page, tool_errors))
         if failed:
             rows = [row for row in rows if row["run_failed"] or row["failed_tools"]]
-        cursor = getattr(page.meta, "cursor", None)
-        if len(rows) >= limit or not cursor or not failed:
+        if len(rows) >= limit:
             break
     return rows[:limit]
+
+
+def _unique(observations: Iterable[Any]) -> list[Any]:
+    """Drop rows the server repeated across pages (it does not dedupe)."""
+    seen: set[Any] = set()
+    unique = []
+    for obs in observations:
+        key = _attr(obs, "id")
+        if key is not None and key in seen:
+            continue
+        seen.add(key)
+        unique.append(obs)
+    return unique
 
 
 def summarize_traces(agents: list[Any], tool_errors: list[Any]) -> list[dict[str, Any]]:
