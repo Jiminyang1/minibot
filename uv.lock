@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -493,7 +493,7 @@ wheels = [
 
 [[package]]
 name = "langfuse"
-version = "4.16.0"
+version = "5.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backoff" },
@@ -506,9 +506,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/97/cd74695a112e68afcfdabe11ad1a61fe4cd65ddf46fa0fd4dc62a7de46ec/langfuse-4.16.0.tar.gz", hash = "sha256:cf6908af52a0a43345bcbe4a34fe7d5f07cbaa959439dfec694ab7f5bb00353b", size = 393515, upload-time = "2026-09-30T09:55:56.083Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/b3/65dbc94d809676053b65e89fda729ef7d8a1d13bbb89f2ab407639f631f2/langfuse-5.2.0.tar.gz", hash = "sha256:8cde9e91b44b53444906af9b37efa9c29c647a9f45f9f8435a638026cb3d4693", size = 383092, upload-time = "2026-11-05T09:53:48.439Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/22/214b2af3d3b9523e222112425f94618b377a476e8b916ea27a7a74488cbe/langfuse-4.16.0-py3-none-any.whl", hash = "sha256:60de8ea29230f8550694b53e6c0e238e90c6657e59ffbc9ea390b0894d828697", size = 707377, upload-time = "2026-09-30T09:55:54.423Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/48/715e2b612d5d20989e4a338c27d78bef43de327f2192c9b20421f5648868/langfuse-5.2.0-py3-none-any.whl", hash = "sha256:4763cbad358960f1036078a4c6e9f86f04690ea566541709c2c40aa1998e2b0f", size = 660151, upload-time = "2026-11-05T09:53:49.817Z" },
 ]
 
 [[package]]
@@ -664,7 +664,7 @@ requires-dist = [
     { name = "fastembed", marker = "extra == 'lessons'", specifier = ">=0.7" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.20" },
-    { name = "langfuse", specifier = ">=4.16,<5" },
+    { name = "langfuse", specifier = ">=5.2,<6" },
     { name = "matplotlib", marker = "extra == 'data'", specifier = ">=3.10.9" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "openai", specifier = ">=1.0" },
