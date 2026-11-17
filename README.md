@@ -219,7 +219,11 @@ uv run python -m minibot.evals traces --failed        # recent real runs that we
 uv run python -m minibot.evals promote <trace_id>     # turn a real run into a case: recorded tool outputs replay in the sandbox
 uv run python -m minibot.evals run --lessons compare  # same cases with lessons off and on: pass rates, flips, calls/tokens/latency
 uv run python -m minibot.evals run --repeat 3         # the same cases three times: pass / flaky / fail per case, pass-rate range
+uv run python -m minibot.evals run --repeat 3 --baseline <run>  # also compare with a saved run: stage rates, cost, cases that got worse + trace
+uv run python -m minibot.evals compare <base> <new>   # the same comparison between two saved runs
 ```
+
+Every `run` saves its scored rows (repeats pooled) as `$MINIBOT_HOME/evals/<run>.json`; that run name is what `--baseline` and `compare` take. Only cases present in both runs are compared. Each row of `runs.jsonl` also records the lessons its requests carried and, with Langfuse on, its trace id.
 
 The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.
 

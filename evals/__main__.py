@@ -7,6 +7,10 @@
         [--repeat N]     run the cases N times (runs NAME-t1 … NAME-tN) and
                          report which results hold: pass / flaky / fail per
                          case, and the range of the pass rate
+        [--baseline REF] compare with a saved run (name or path): per-stage
+                         pass rates, cost, and the cases that got worse
+                         with their first failing stage and trace
+    compare BASE NEW     the same comparison between two saved runs
     pytest [ARGS ...]    the same cases as pytest, one test per (case, stage);
                          runs ``pytest evals -m golden ARGS`` (see test_golden.py)
     traces [--limit N] [--failed]
@@ -17,6 +21,9 @@
 
 ``run`` ends with a failure-localization report (first failing stage per
 case, with its trace) saved as ``<run>.failures.json`` next to the results.
+Every run's scored rows (all repeats pooled) are saved as
+``$MINIBOT_HOME/evals/<run>.json``; that name is what ``--baseline`` and
+``compare`` take.
 Each run calls the configured model for real (cost: a few cents per run).
 """
 
@@ -34,7 +41,9 @@ from .report import (
     failure_report,
     format_comparison,
     format_failure_report,
+    format_regression,
     format_stability,
+    regression_report,
     save_failure_report,
     stability_report,
 )
@@ -45,8 +54,10 @@ from .runner import (
     format_table,
     langfuse_configured,
     load_cases,
+    load_run,
     run_experiment,
     run_local,
+    save_run,
     sync_dataset,
     trace_url,
     with_lessons,
@@ -79,6 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="同一批用例跑 N 次，报告哪些结果稳定（默认 1；费用和时间是 N 倍）",
     )
+    run.add_argument(
+        "--baseline",
+        metavar="REF",
+        help="和保存过的一次运行对比（运行名，或 .json 路径）",
+    )
+    compare = sub.add_parser("compare", help="对比两次保存过的运行（基线 → 本次）")
+    compare.add_argument("base", help="基线：运行名，或 .json 路径")
+    compare.add_argument("new", help="本次：运行名，或 .json 路径")
     sub.add_parser("pytest", help="用 pytest 逐阶段断言（参数原样传给 pytest）")
     traces = sub.add_parser("traces", help="列出最近的 MiniBot trace")
     traces.add_argument("--limit", type=int, default=20, help="最多列出几条（默认 20）")
@@ -92,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run" and args.repeat < 1:
         parser.error("--repeat 必须大于等于 1。")
+    if args.command == "run" and args.baseline and args.lessons == "compare":
+        parser.error("--baseline 和 --lessons compare 不能一起用：先选一种 lesson 模式。")
+    if args.command == "compare":
+        return _compare(args.base, args.new)
 
     load_env()
     config = Config.from_env()
@@ -114,6 +137,13 @@ def main(argv: list[str] | None = None) -> int:
             return _traces(get_client(), limit=args.limit, failed=args.failed)
         return _promote(get_client(), config, args)
 
+    baseline = None
+    if args.baseline:
+        # Fail before the run spends anything on a typo.
+        try:
+            baseline = load_run(args.baseline)
+        except ValueError as exc:
+            parser.error(str(exc))
     base_name = args.name or default_run_name(config)
     lesson_modes = ("off", "on") if args.lessons == "compare" else (args.lessons,)
     local = args.local or not langfuse_configured()
@@ -135,10 +165,35 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print(format_stability(stability_report(trials)))
         # Later steps pool the trials: a rate over every run of every case.
-        results[lessons] = [row for rows in trials for row in rows]
+        pooled = [
+            {**row, "trial": trial}
+            for trial, rows in enumerate(trials, start=1)
+            for row in rows
+        ]
+        results[lessons] = pooled
+        path = save_run(
+            mode_name,
+            pooled,
+            config=with_lessons(config, lessons),
+            extra={"repeat": args.repeat, "mode": "local" if local else "langfuse"},
+        )
+        print(f"结果已保存: {path}（可以用作 --baseline {mode_name}）")
+        if baseline is not None:
+            print()
+            print(format_regression(regression_report(baseline, load_run(str(path)))))
     if args.lessons == "compare":
         print()
         print(format_comparison(compare_runs(results["off"], results["on"])))
+    return 0
+
+
+def _compare(base_ref: str, new_ref: str) -> int:
+    try:
+        base, new = load_run(base_ref), load_run(new_ref)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    print(format_regression(regression_report(base, new)))
     return 0
 
 
@@ -160,7 +215,7 @@ def _run_once(
         langfuse = get_client()
         sync_dataset(langfuse, load_cases())
         rows = run_experiment(langfuse, config=config, case_ids=cases, run_name=run_name)
-        print("Langfuse: Datasets → minibot-golden → Runs 里可对比各次运行。")
+        print("Langfuse: 在 minibot-golden 的 experiments 里可以对比各次运行。")
     print()
     print(format_table(rows))
     report = failure_report(rows, run_name=run_name, mode=mode)

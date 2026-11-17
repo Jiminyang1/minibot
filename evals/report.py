@@ -77,7 +77,7 @@ def format_failure_report(report: dict[str, Any]) -> str:
     failures = report["failures"]
     if not failures:
         return f"失败定位: {report['total']} 个用例全部端到端通过。"
-    no_trace = "无（本地模式不关联 Langfuse trace）" if report["mode"] == "local" else "无"
+    no_trace = "无（本地模式下只有配置了 Langfuse 才有 trace）" if report["mode"] == "local" else "无"
     lines = [f"失败定位（{len(failures)}/{report['total']} 个用例未通过，按首个失败阶段）:"]
     for failure in failures:
         lines.append(f"  {failure['case']} → {failure['stage']}: {failure['comment']}")
@@ -100,7 +100,14 @@ def save_failure_report(report: dict[str, Any], *, out_dir: Path | None = None) 
     return path
 
 
-__all__ = ["PIPELINE", "failure_report", "format_failure_report", "save_failure_report"]
+__all__ = [
+    "PIPELINE",
+    "failure_report",
+    "format_failure_report",
+    "format_regression",
+    "regression_report",
+    "save_failure_report",
+]
 
 
 # ── lessons on vs off ─────────────────────────────────────────────
@@ -189,6 +196,147 @@ def format_comparison(comparison: dict[str, Any]) -> str:
             moved = f" {_count(flip['off'])} → {_count(flip['on'])}"
         lines.append(f"  {mark}: {flip['case']}{moved}（用到的 lesson: {lessons}）")
     return "\n".join(lines)
+
+
+# ── this run against a saved baseline ────────────────────────────
+
+
+def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """What changed between two saved runs (``runner.load_run``) of the cases.
+
+    Only cases present in both runs are compared, so adding a case does not
+    move the rates. A case changed when its share of passing runs moved
+    (with repeats, 3/3 → 1/3); each case that got worse brings the failing
+    runs of the new side, first failing stage and trace, so the next step is
+    to open that trace. Cost moves too: a prompt that grew is a regression
+    even when every case still passes.
+    """
+    base_rows = base.get("results") or []
+    new_rows = new.get("results") or []
+    base_cases = _by_case(base_rows)
+    new_cases = _by_case(new_rows)
+    common = base_cases.keys() & new_cases.keys()
+    comparison = compare_runs(
+        [row for row in base_rows if row["case"] in common],
+        [row for row in new_rows if row["case"] in common],
+    )
+    broken = {flip["case"] for flip in comparison["flips"] if flip["change"] == "broken"}
+    evidence = failure_report(
+        [row for row in new_rows if row["case"] in broken],
+        run_name=str(new.get("run")),
+        mode=str((new.get("metadata") or {}).get("mode") or "local"),
+    )["failures"]
+    return {
+        "base": _run_summary(base, base_cases),
+        "new": _run_summary(new, new_cases),
+        "cases": len(common),
+        "stages": comparison["stages"],
+        "metrics": comparison["metrics"],
+        "flips": comparison["flips"],
+        "evidence": evidence,
+        "unchanged": len(common) - len(comparison["flips"]),
+        "only_base": sorted(base_cases.keys() - new_cases.keys()),
+        "only_new": sorted(new_cases.keys() - base_cases.keys()),
+        "warnings": _regression_warnings(
+            base, new, base_cases, new_cases, {flip["case"] for flip in comparison["flips"]}
+        ),
+    }
+
+
+def format_regression(report: dict[str, Any]) -> str:
+    base, new = report["base"], report["new"]
+    lines = [f"回归对比: 基线 {base['run']} → 本次 {new['run']}"]
+    for label, side in (("基线", base), ("本次", new)):
+        lines.append(
+            f"  {label}: 模型 {side['model'] or '?'} · git {side['git'] or '?'} · "
+            f"每个用例 {side['runs_per_case']} 次"
+        )
+    for warning in report["warnings"]:
+        lines.append(f"  注意: {warning}")
+    if not report["cases"]:
+        lines.append("  两次运行没有共同的用例，没有可比的东西。")
+        return "\n".join(lines)
+    lines.append(f"  各阶段通过率（{report['cases']} 个共同用例）:")
+    for stage, rates in report["stages"].items():
+        if rates["off"] is None and rates["on"] is None:
+            continue
+        lines.append(f"    {stage:<16} {_rate(rates['off'])} → {_rate(rates['on'])}")
+    costs = [
+        (metric, means)
+        for metric, means in report["metrics"].items()
+        if means["off"] is not None and means["on"] is not None
+    ]
+    if costs:
+        lines.append("  成本（每次运行的平均值）:")
+        for metric, means in costs:
+            lines.append(
+                f"    {metric:<16} {means['off']:g} → {means['on']:g}{_change(means['off'], means['on'])}"
+            )
+    evidence: dict[str, list[dict[str, Any]]] = {}
+    for failure in report["evidence"]:
+        evidence.setdefault(failure["case"], []).append(failure)
+    for flip in sorted(report["flips"], key=lambda f: (f["change"] != "broken", f["case"])):
+        mark = "变坏" if flip["change"] == "broken" else "变好"
+        lines.append(f"  {mark}: {flip['case']} {_count(flip['off'])} → {_count(flip['on'])}")
+        for failure in evidence.get(flip["case"], []):
+            lines.append(f"      → {failure['stage']}: {failure['comment']}")
+            if failure["trace_url"] or failure["trace_id"]:
+                lines.append(f"        trace: {failure['trace_url'] or failure['trace_id']}")
+    if not report["flips"]:
+        lines.append("  没有用例的端到端结果发生变化。")
+    else:
+        lines.append(f"  其余 {report['unchanged']} 个用例结果没变。")
+    if report["only_base"]:
+        lines.append(f"  只在基线里（没有比较）: {', '.join(report['only_base'])}")
+    if report["only_new"]:
+        lines.append(f"  只在本次里（没有比较）: {', '.join(report['only_new'])}")
+    return "\n".join(lines)
+
+
+def _run_summary(run: dict[str, Any], cases: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    metadata = run.get("metadata") or {}
+    counts = {len(rows) for rows in cases.values()}
+    return {
+        "run": run.get("run"),
+        "model": metadata.get("model"),
+        "git": metadata.get("git"),
+        "lessons": metadata.get("lessons"),
+        "runs_per_case": "/".join(str(c) for c in sorted(counts)) or "0",
+        "min_runs": min(counts) if counts else 0,
+    }
+
+
+def _regression_warnings(
+    base: dict[str, Any],
+    new: dict[str, Any],
+    base_cases: dict[str, list[dict[str, Any]]],
+    new_cases: dict[str, list[dict[str, Any]]],
+    changed: set[str],
+) -> list[str]:
+    warnings = []
+    base_meta, new_meta = base.get("metadata") or {}, new.get("metadata") or {}
+    for key, label in (("model", "模型"), ("lessons", "lesson 模式")):
+        if base_meta.get(key) and new_meta.get(key) and base_meta[key] != new_meta[key]:
+            warnings.append(
+                f"两边的{label}不同（{base_meta[key]} → {new_meta[key]}），变化不全是代码造成的。"
+            )
+    # Only a change needs the caution: one run cannot tell it from variance.
+    single = [
+        case for case in sorted(changed) if len(base_cases[case]) == 1 or len(new_cases[case]) == 1
+    ]
+    if single:
+        warnings.append(
+            f"有 {len(single)} 个变化的用例在某一边只跑了 1 次，这个变化可能只是模型的随机性；"
+            "用 --repeat 3 或更多再跑一次再下结论。"
+        )
+    return warnings
+
+
+def _change(before: float, after: float) -> str:
+    if before == 0:
+        return ""
+    percent = (after - before) / before * 100
+    return f"（{percent:+.0f}%）" if round(percent) else ""
 
 
 # ── the same cases, run several times ─────────────────────────────
