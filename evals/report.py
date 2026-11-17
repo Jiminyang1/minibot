@@ -255,6 +255,11 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
     }
 
 
+def _judge_of(metadata: dict[str, Any]) -> str | None:
+    """Runs saved before the judge was configurable were graded by the tested model."""
+    return metadata.get("judge_model") or metadata.get("model")
+
+
 def _fingerprints(run: dict[str, Any]) -> dict[str, str]:
     prints = (run.get("metadata") or {}).get("case_fingerprints")
     return prints if isinstance(prints, dict) else {}
@@ -265,8 +270,8 @@ def format_regression(report: dict[str, Any]) -> str:
     lines = [f"回归对比: 基线 {base['run']} → 本次 {new['run']}"]
     for label, side in (("基线", base), ("本次", new)):
         lines.append(
-            f"  {label}: 模型 {side['model'] or '?'} · git {side['git'] or '?'} · "
-            f"每个用例 {side['runs_per_case']} 次"
+            f"  {label}: 模型 {side['model'] or '?'} · 评审 {side['judge'] or '?'} · "
+            f"git {side['git'] or '?'} · 每个用例 {side['runs_per_case']} 次"
         )
     for warning in report["warnings"]:
         lines.append(f"  注意: {warning}")
@@ -274,10 +279,12 @@ def format_regression(report: dict[str, Any]) -> str:
         lines.append("  两次运行没有共同的用例，没有可比的东西。")
         return "\n".join(lines)
     lines.append(f"  各阶段通过率（{report['cases']} 个共同用例）:")
+    judge_changed = base["judge"] != new["judge"]
     for stage, rates in report["stages"].items():
         if rates["off"] is None and rates["on"] is None:
             continue
-        lines.append(f"    {stage:<16} {_rate(rates['off'])} → {_rate(rates['on'])}")
+        note = "（评审不同，不能直接比）" if stage == "answer" and judge_changed else ""
+        lines.append(f"    {stage:<16} {_rate(rates['off'])} → {_rate(rates['on'])}{note}")
     costs = [
         (metric, means)
         for metric, means in report["metrics"].items()
@@ -318,6 +325,7 @@ def _run_summary(run: dict[str, Any], cases: dict[str, list[dict[str, Any]]]) ->
     return {
         "run": run.get("run"),
         "model": metadata.get("model"),
+        "judge": _judge_of(metadata),
         "git": metadata.get("git"),
         "lessons": metadata.get("lessons"),
         "runs_per_case": "/".join(str(c) for c in sorted(counts)) or "0",
@@ -334,11 +342,17 @@ def _regression_warnings(
 ) -> list[str]:
     warnings = []
     base_meta, new_meta = base.get("metadata") or {}, new.get("metadata") or {}
-    for key, label in (("model", "模型"), ("lessons", "lesson 模式")):
+    for key, label in (("model", "被测模型"), ("lessons", "lesson 模式")):
         if base_meta.get(key) and new_meta.get(key) and base_meta[key] != new_meta[key]:
             warnings.append(
                 f"两边的{label}不同（{base_meta[key]} → {new_meta[key]}），变化不全是代码造成的。"
             )
+    base_judge, new_judge = _judge_of(base_meta), _judge_of(new_meta)
+    if base_judge and new_judge and base_judge != new_judge:
+        warnings.append(
+            f"两边的评审模型不同（{base_judge} → {new_judge}），回答阶段的分数不能直接比；"
+            "比较模型时用 MINIBOT_EVAL_JUDGE_MODEL 把评审固定住。"
+        )
     old_format = [
         label
         for label, run in (("基线", base), ("本次", new))

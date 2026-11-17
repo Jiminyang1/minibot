@@ -52,6 +52,7 @@ from .runner import (
     build_judge,
     default_run_name,
     format_table,
+    judge_model,
     langfuse_configured,
     case_fingerprints,
     load_cases,
@@ -213,7 +214,10 @@ def _run_once(
     cases: list[str] | None,
     local: bool,
 ) -> list[dict[str, Any]]:
-    print(f"评测 {run_name}（模型 {config.model}，lesson {config.lessons_mode}）")
+    print(
+        f"评测 {run_name}（模型 {config.model}，评审 {judge_model(config)}，"
+        f"lesson {config.lessons_mode}）"
+    )
     if local:
         mode = "local"
         rows = run_local(config=config, case_ids=cases, run_name=run_name)

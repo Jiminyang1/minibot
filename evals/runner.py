@@ -126,14 +126,36 @@ def metric_scores(output: dict[str, Any]) -> list[StageScore]:
     ]
 
 
+def judge_model(config: Config) -> str:
+    """The model that grades answers: ``MINIBOT_EVAL_JUDGE_MODEL``, else the tested model.
+
+    Set it when comparing models. Otherwise switching ``MINIBOT_MODEL``
+    switches the grader too, and the answer stage of the two runs is graded
+    by different judges.
+    """
+    return os.environ.get("MINIBOT_EVAL_JUDGE_MODEL", "").strip() or config.model
+
+
 def build_judge(config: Config) -> LLMClient:
-    profile = build_llm_profile(
-        model=config.model,
-        context_window_tokens=config.context_window_tokens,
-        model_max_input_tokens=config.model_max_input_tokens,
-        model_max_output_tokens=config.model_max_output_tokens,
-        request_max_output_tokens=config.max_output_tokens,
-    )
+    model = judge_model(config)
+    if model == config.model:
+        # The tested model's own limit overrides apply to it.
+        profile = build_llm_profile(
+            model=config.model,
+            context_window_tokens=config.context_window_tokens,
+            model_max_input_tokens=config.model_max_input_tokens,
+            model_max_output_tokens=config.model_max_output_tokens,
+            request_max_output_tokens=config.max_output_tokens,
+        )
+    else:
+        # A separate judge uses the built-in catalog: the MINIBOT_* limit
+        # overrides describe the tested model, not this one.
+        try:
+            profile = build_llm_profile(model=model, request_max_output_tokens=config.max_output_tokens)
+        except ValueError as exc:
+            raise ValueError(
+                f"评审模型 {model!r} 用不了: {exc}（MINIBOT_EVAL_JUDGE_MODEL 要用模型目录里的模型）"
+            ) from exc
     return build_llm_client_from_profile(profile)
 
 
@@ -424,7 +446,12 @@ def with_lessons(config: Config, mode: str) -> Config:
 
 
 def _run_metadata(config: Config) -> dict[str, str]:
-    return {"model": config.model, "git": _git_revision(), "lessons": config.lessons_mode}
+    return {
+        "model": config.model,
+        "judge_model": judge_model(config),
+        "git": _git_revision(),
+        "lessons": config.lessons_mode,
+    }
 
 
 def _git_revision() -> str:
@@ -480,6 +507,7 @@ __all__ = [
     "default_run_name",
     "evaluate",
     "format_table",
+    "judge_model",
     "langfuse_configured",
     "load_cases",
     "load_run",

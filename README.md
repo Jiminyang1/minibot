@@ -161,6 +161,7 @@ Deep dives: **[docs/architecture.md](docs/architecture.md)** — layering rules,
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | max retries for transient LLM errors (429/5xx/connection) |
 | `MINIBOT_LESSONS` | `auto` | `auto` (on when fastembed is installed and a lesson is approved) / `on` / `off` |
 | `MINIBOT_LESSONS_TOP_K` / `MINIBOT_LESSONS_MIN_SCORE` | `3` / `0.55` | most lessons per request / cosine floor |
+| `MINIBOT_EVAL_JUDGE_MODEL` | the tested model | model that grades the eval answer stage; pin it when comparing models |
 | `MINIBOT_FETCH_VIA_JINA` | `0` | `1` lets `fetch_url` try the Jina reader (`r.jina.ai`) first; better text extraction, but every fetched URL goes to that third party |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | setting both enables Langfuse tracing (one trace per turn: full requests, tools, approvals, compaction) |
 | `LANGFUSE_BASE_URL` | EU cloud | Langfuse endpoint: your signup region, or a self-hosted URL |
@@ -223,7 +224,7 @@ uv run python -m minibot.evals run --repeat 3 --baseline <run>  # also compare w
 uv run python -m minibot.evals compare <base> <new>   # the same comparison between two saved runs
 ```
 
-Every `run` saves its scored rows (repeats pooled) as `$MINIBOT_HOME/evals/<run>.json`; that run name is what `--baseline` and `compare` take. Only cases present in both runs, with the same definition, are compared; a case whose input or expectations changed in between is listed instead, and a change in the scoring code is flagged. Each row of `runs.jsonl` also records the lessons its requests carried and, with Langfuse on, its trace id.
+Every `run` saves its scored rows (repeats pooled) as `$MINIBOT_HOME/evals/<run>.json`; that run name is what `--baseline` and `compare` take. Only cases present in both runs, with the same definition, are compared; a case whose input or expectations changed in between is listed instead, and a change in the scoring code is flagged. So is a change of judge: the answer stage is graded by `MINIBOT_EVAL_JUDGE_MODEL` (default: the tested model), so pin it before comparing two models. Each row of `runs.jsonl` also records the lessons its requests carried and, with Langfuse on, its trace id.
 
 The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.
 
