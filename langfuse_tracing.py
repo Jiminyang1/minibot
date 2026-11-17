@@ -11,10 +11,11 @@ instead of a ``runs.jsonl`` row:
     tool_call.started → .completed/.failed       → ``tool``
     approvals, compaction, retries               → ``event`` markers
 
-Langfuse v4 reads trace attributes (session id, trace name, tags) from the
-OpenTelemetry context when a span starts, and a child created outside that
-context does not inherit them. So every observation is started inside its own
-short ``propagate_attributes`` block rather than one block spanning the run.
+The Langfuse SDK (v4 and later) reads trace attributes (session id, trace
+name, tags) from the OpenTelemetry context when a span starts, and a child
+created outside that context does not inherit them. So every observation is
+started inside its own short ``propagate_attributes`` block rather than one
+block spanning the run.
 
 Tracing is best effort: a failure here is swallowed and never reaches the run.
 """

@@ -212,6 +212,9 @@ def observation_pages(
     already sent also ends it, so a misbehaving server cannot loop forever.
     The SDK's default timeout (5 s) is shorter than one scan, so every
     request waits longer.
+
+    SDK 5.2's ``iter_observation_pages`` has the same stop rule and timeout,
+    but it has no repeated-cursor guard and no page bound, so it is not used.
     """
     cursor = None
     seen: set[str] = set()
