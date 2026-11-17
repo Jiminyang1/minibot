@@ -7,6 +7,7 @@ Nothing in the loop knows run logging exists.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import threading
 import time
@@ -41,6 +42,7 @@ class _RunAccumulator:
     mcp_error_count: int = 0
     did_compact: bool = False
     compact_messages: list[str] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
 
 
 class RunLogFold:
@@ -53,9 +55,13 @@ class RunLogFold:
         store: RunLogStore,
         *,
         tool_registry: ToolRegistry | None = None,
+        trace_id_for: Callable[[str], str | None] | None = None,
     ) -> None:
         self.store = store
         self.tool_registry = tool_registry
+        # run_id -> Langfuse trace id (``LangfuseFold.trace_id_of``), so a
+        # summary row links to its trace. None when tracing is off.
+        self.trace_id_for = trace_id_for
         self._active: dict[str, _RunAccumulator] = {}
         self._lock = threading.Lock()
 
@@ -78,8 +84,12 @@ class RunLogFold:
         if acc is None:
             return
 
+        if event.type == "model.request.started":
+            for lesson_id in payload.get("lessons") or ():
+                if str(lesson_id) not in acc.lessons:
+                    acc.lessons.append(str(lesson_id))
         # Summary calls made during compaction cost tokens too.
-        if event.type in {"model.request.completed", "compaction.request.completed"}:
+        elif event.type in {"model.request.completed", "compaction.request.completed"}:
             acc.llm_call_count += 1
             self._add_usage(acc, payload.get("usage"))
         elif event.type in {"tool_call.completed", "tool_call.failed"}:
@@ -174,8 +184,18 @@ class RunLogFold:
             error_message_preview=(
                 None if error_message is None else preview_text(error_message, 200)
             ),
+            lessons=list(acc.lessons),
+            trace_id=self._trace_id(event.run_id),
         )
         self.store.append(record)
+
+    def _trace_id(self, run_id: str) -> str | None:
+        if self.trace_id_for is None:
+            return None
+        try:
+            return self.trace_id_for(run_id)
+        except Exception:
+            return None
 
     @staticmethod
     def _add_usage(acc: _RunAccumulator, usage: Any) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import sys
@@ -291,6 +292,77 @@ class LangfuseFoldTests(unittest.TestCase):
         self.assertNotIn("messages", wire.payload)
         self.assertEqual(wire.payload["iteration"], 1)
         self.assertIn("messages", event.payload)
+
+
+def _tracing_client() -> _FakeLangfuse:
+    """A fake whose root observations carry a trace id, like the SDK's."""
+    client = _FakeLangfuse()
+    record = client._record
+
+    def with_trace_id(*, parent, **kwargs):
+        observation = record(parent=parent, **kwargs)
+        observation.trace_id = parent.trace_id if parent else f"tr-{len(client.observations)}"
+        return observation
+
+    client._record = with_trace_id
+    return client
+
+
+def _one_run(handler, run_id: str, *, lessons_per_request=()) -> None:
+    emitter = RuntimeEventEmitter(run_id=run_id, session_id="s1", handler=handler)
+    emitter.emit("run.started", {"model": "m", "turn_index": 1, "input_preview": "hi"})
+    for iteration, lessons in enumerate(lessons_per_request, start=1):
+        emitter.emit("model.request.started", {"iteration": iteration, "lessons": list(lessons)})
+        emitter.emit("model.request.completed", {"iteration": iteration})
+    emitter.emit("run.completed", {"reply": "ok"})
+
+
+class TraceLinkTests(unittest.TestCase):
+    def test_trace_id_outlives_the_run_and_is_bounded(self) -> None:
+        client = _tracing_client()
+        fold = LangfuseFold(client, propagate_attributes=client.propagate_attributes)
+
+        _one_run(fold, "r1")
+
+        self.assertEqual(fold.trace_id_of("r1"), "tr-1")
+        self.assertIsNone(fold.trace_id_of("never-ran"))
+        for index in range(300):
+            _one_run(fold, f"later-{index}")
+        # Only the most recent runs are remembered.
+        self.assertIsNone(fold.trace_id_of("r1"))
+        self.assertIsNotNone(fold.trace_id_of("later-299"))
+
+    def test_runs_jsonl_row_names_its_trace_and_lessons_in_either_order(self) -> None:
+        from minibot.run_log import RunLogStore
+        from minibot.runtime.events import fanout
+        from minibot.runtime.run_log_fold import RunLogFold
+
+        for langfuse_first in (True, False):
+            with self.subTest(langfuse_first=langfuse_first), tempfile.TemporaryDirectory() as tmp:
+                client = _tracing_client()
+                fold = LangfuseFold(client, propagate_attributes=client.propagate_attributes)
+                run_log = RunLogFold(RunLogStore(Path(tmp)), trace_id_for=fold.trace_id_of)
+                handler = fanout(fold, run_log) if langfuse_first else fanout(run_log, fold)
+
+                _one_run(handler, "r1", lessons_per_request=[["les_2", "les_1"], ["les_1"]])
+
+                row = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertEqual(row["trace_id"], "tr-1")
+                self.assertEqual(row["lessons"], ["les_2", "les_1"])
+
+    def test_runs_jsonl_row_without_tracing_or_with_a_broken_lookup(self) -> None:
+        from minibot.run_log import RunLogStore
+        from minibot.runtime.run_log_fold import RunLogFold
+
+        def broken(run_id: str) -> str:
+            raise RuntimeError(run_id)
+
+        for lookup in (None, broken):
+            with self.subTest(lookup=lookup), tempfile.TemporaryDirectory() as tmp:
+                _one_run(RunLogFold(RunLogStore(Path(tmp)), trace_id_for=lookup), "r1")
+                row = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8"))
+                self.assertIsNone(row["trace_id"])
+                self.assertEqual(row["lessons"], [])
 
 
 if __name__ == "__main__":

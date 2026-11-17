@@ -219,7 +219,11 @@ uv run python -m minibot.evals traces --failed        # 最近出问题的真实
 uv run python -m minibot.evals promote <trace_id>     # 把一次真实运行变成用例：记录下的工具输出在沙箱里回放
 uv run python -m minibot.evals run --lessons compare  # 同一批用例分别关、开 lesson：通过率、翻转、调用/token/耗时
 uv run python -m minibot.evals run --repeat 3         # 同一批用例跑三次：每个用例稳定通过/时过时不过/稳定失败，通过率的范围
+uv run python -m minibot.evals run --repeat 3 --baseline <run>  # 同时和保存过的一次运行对比：各阶段通过率、成本、变坏的用例和它的 trace
+uv run python -m minibot.evals compare <基线> <本次>   # 对比两次保存过的运行
 ```
+
+每次 `run` 都把打过分的结果（重复运行合在一起）存成 `$MINIBOT_HOME/evals/<运行名>.json`，`--baseline` 和 `compare` 用的就是这个运行名。只比较两边都有的用例。`runs.jsonl` 的每一行也会记下请求里带了哪些 lesson，开了 Langfuse 时还有 trace id。
 
 pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。
 

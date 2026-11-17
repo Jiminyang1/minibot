@@ -248,12 +248,16 @@ def run_local(
     run_name: str,
     log: Callable[[str], None] = print,
 ) -> list[dict[str, Any]]:
+    del run_name  # The caller names and saves the run (``save_run``).
     judge = build_judge(config)
     rows = []
     for case in load_cases(case_ids):
         log(f"… {case['id']}")
         output = run_case(case["input"], config=config)
         scores = evaluate(output, case["input"], case["expected"], judge=judge)
+        # No experiment here, but when Langfuse keys are set the turn is
+        # still traced: link it.
+        trace_id = output.get("trace_id")
         rows.append(
             {
                 "case": case["id"],
@@ -261,24 +265,69 @@ def run_local(
                 "scores": {
                     s.name: (s.value, s.comment) for s in [*scores, *metric_scores(output)]
                 },
-                # Local runs are not linked to a Langfuse trace.
-                "trace_id": None,
-                "trace_url": None,
+                "trace_id": trace_id,
+                "trace_url": _local_trace_url(trace_id),
             }
         )
-    out_dir = resolve_state_home() / "evals"
+    return rows
+
+
+def _local_trace_url(trace_id: str | None) -> str | None:
+    if not trace_id or not langfuse_configured():
+        return None
+    try:
+        from langfuse import get_client
+    except ImportError:
+        return None
+    return trace_url(get_client(), trace_id)
+
+
+# ── saved runs ────────────────────────────────────────────────────
+
+
+def runs_dir() -> Path:
+    return resolve_state_home() / "evals"
+
+
+def save_run(
+    name: str,
+    rows: list[dict[str, Any]],
+    *,
+    config: Config,
+    extra: dict[str, Any] | None = None,
+) -> Path:
+    """Write ``<state home>/evals/<name>.json``; a later run can compare to it."""
+    out_dir = runs_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{run_name}.json"
+    path = out_dir / f"{name}.json"
+    metadata = {
+        **_run_metadata(config),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        **(extra or {}),
+    }
     path.write_text(
-        json.dumps(
-            {"run": run_name, "metadata": _run_metadata(config), "results": rows},
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps({"run": name, "metadata": metadata, "results": rows}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    log(f"结果已保存: {path}")
-    return rows
+    return path
+
+
+def load_run(ref: str) -> dict[str, Any]:
+    """A saved run by name (under ``runs_dir()``) or by path to its ``.json``."""
+    path = Path(ref).expanduser()
+    if path.suffix != ".json":
+        path = runs_dir() / f"{ref}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"找不到运行结果 {ref}（找的是 {path}）。") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"读不了运行结果 {path}: {exc}") from None
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise ValueError(f"{path} 不是 evals 保存的运行结果。")
+    data.setdefault("run", path.stem)
+    data.setdefault("metadata", {})
+    return data
 
 
 # ── reporting ─────────────────────────────────────────────────────
@@ -399,8 +448,11 @@ __all__ = [
     "format_table",
     "langfuse_configured",
     "load_cases",
+    "load_run",
     "run_experiment",
     "run_local",
+    "runs_dir",
+    "save_run",
     "sync_dataset",
     "trace_url",
 ]

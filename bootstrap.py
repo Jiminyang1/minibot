@@ -213,7 +213,11 @@ def build_runtime(
         # runs.jsonl and Langfuse traces are folds over the same event stream
         # the UIs subscribe to.
         base_event_handler=fanout(
-            RunLogFold(run_log_store, tool_registry=tool_registry),
+            RunLogFold(
+                run_log_store,
+                tool_registry=tool_registry,
+                trace_id_for=langfuse.trace_id_of if langfuse is not None else None,
+            ),
             langfuse,
             run_event_handler,
         ),

@@ -106,12 +106,20 @@ def run_case(
             # client, which the experiment runner still needs.
             runtime.mcp_host.close()
 
+        run_id = events[0].run_id if events else None
+        trace_id = None
+        if run_id and runtime.langfuse is not None:
+            # The real trace: inside an experiment or a pytest span the turn
+            # joins the trace that is already open.
+            trace_id = runtime.langfuse.trace_id_of(run_id)
         return {
             "reply": reply,
             "error": error,
             "elapsed_s": round(time.perf_counter() - started, 2),
             **summarize_events(events),
             "files": _snapshot_files(workspace),
+            "run_id": run_id,
+            "trace_id": trace_id,
         }
 
 

@@ -22,6 +22,7 @@ Tracing is best effort: a failure here is swallowed and never reaches the run.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from .runtime.events import RuntimeEvent
 _TRACE_NAME = "minibot.turn"
 _DEFAULT_MAX_INPUT_MESSAGES = 50
 _DISABLED_VALUES = {"0", "false", "no", "off"}
+_MAX_REMEMBERED_TRACES = 256
 
 
 @dataclass
@@ -64,6 +66,9 @@ class LangfuseFold:
         self._propagate_attributes = propagate_attributes
         self._log = log
         self._runs: dict[str, _RunTrace] = {}
+        # run_id -> trace id, kept after a run ends so a subscriber that
+        # handles the terminal event after this one can still look it up.
+        self._trace_ids: OrderedDict[str, str] = OrderedDict()
         self._lock = threading.Lock()
         self._warned = False
 
@@ -74,6 +79,15 @@ class LangfuseFold:
             if not self._warned and self._log is not None:
                 self._warned = True
                 self._log(f"Langfuse 追踪出错，已忽略（后续不再提示）: {exc!r}")
+
+    def trace_id_of(self, run_id: str) -> str | None:
+        """The Langfuse trace a run's observations went to, if traced.
+
+        The real id, not one derived from *run_id*: inside an eval experiment
+        or a pytest span the run joins the trace that is already open.
+        """
+        with self._lock:
+            return self._trace_ids.get(run_id)
 
     def shutdown(self) -> None:
         """Flush buffered observations; call once at process exit."""
@@ -247,8 +261,13 @@ class LangfuseFold:
                 "source": source,
             },
         )
+        trace_id = getattr(run.root, "trace_id", None)
         with self._lock:
             self._runs[event.run_id] = run
+            if isinstance(trace_id, str) and trace_id:
+                self._trace_ids[event.run_id] = trace_id
+                while len(self._trace_ids) > _MAX_REMEMBERED_TRACES:
+                    self._trace_ids.popitem(last=False)
 
     def _finish(self, run_id: str) -> None:
         with self._lock:
