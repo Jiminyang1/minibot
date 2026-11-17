@@ -146,6 +146,63 @@ class RegressionReportTests(unittest.TestCase):
         self.assertIn("没有共同的用例", text)
 
 
+class JudgeModelTests(unittest.TestCase):
+    _ENV = {"DEEPSEEK_API_KEY": "test-key", "OPENAI_BASE_URL": "", "MINIBOT_LLM_PROVIDER": ""}
+
+    def test_judge_is_the_tested_model_unless_pinned(self) -> None:
+        config = Config(model="deepseek-v4-pro")
+        with mock.patch.dict(os.environ, {"MINIBOT_EVAL_JUDGE_MODEL": ""}):
+            self.assertEqual(runner.judge_model(config), "deepseek-v4-pro")
+        with mock.patch.dict(os.environ, {"MINIBOT_EVAL_JUDGE_MODEL": " deepseek-v4-flash "}):
+            self.assertEqual(runner.judge_model(config), "deepseek-v4-flash")
+
+    def test_a_pinned_judge_ignores_the_tested_models_limit_overrides(self) -> None:
+        # A context window that would be wrong for the judge's own catalog entry.
+        config = Config(model="deepseek-v4-pro", context_window_tokens=500_000)
+        with mock.patch.dict(os.environ, {**self._ENV, "MINIBOT_EVAL_JUDGE_MODEL": "deepseek-v4-flash"}):
+            judge = runner.build_judge(config)
+        self.assertEqual(judge.model, "deepseek-v4-flash")
+        self.assertEqual(judge.profile.capabilities.context_window_tokens, 1_048_576)
+
+        with mock.patch.dict(os.environ, {**self._ENV, "MINIBOT_EVAL_JUDGE_MODEL": ""}):
+            same = runner.build_judge(config)
+        self.assertEqual((same.model, same.profile.capabilities.context_window_tokens), ("deepseek-v4-pro", 500_000))
+
+    def test_an_unknown_judge_fails_with_its_own_message(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {**self._ENV, "MINIBOT_EVAL_JUDGE_MODEL": "no-such-model"}),
+            self.assertRaisesRegex(ValueError, "评审模型 'no-such-model' 用不了"),
+        ):
+            runner.build_judge(Config(model="deepseek-v4-pro"))
+
+    def test_saved_runs_record_the_judge(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"MINIBOT_HOME": tmp, "MINIBOT_EVAL_JUDGE_MODEL": "deepseek-v4-flash"}),
+        ):
+            save_run("r", [_row("a", True)], config=Config(model="deepseek-v4-pro"))
+            metadata = load_run("r")["metadata"]
+        self.assertEqual((metadata["model"], metadata["judge_model"]), ("deepseek-v4-pro", "deepseek-v4-flash"))
+
+    def test_comparing_models_with_and_without_a_pinned_judge(self) -> None:
+        pinned = regression_report(
+            _run("old", [_row("a", True)], model="m1", judge_model="j"),
+            _run("new", [_row("a", True)], model="m2", judge_model="j"),
+        )
+        self.assertIn("被测模型不同（m1 → m2）", "\n".join(pinned["warnings"]))
+        self.assertNotIn("评审模型不同", "\n".join(pinned["warnings"]))
+
+        # A run saved before the setting existed was graded by its tested model.
+        unpinned = format_regression(
+            regression_report(
+                {"run": "old", "metadata": {"model": "m1"}, "results": [_row("a", True)]},
+                _run("new", [_row("a", True)], model="m2", judge_model="m2"),
+            )
+        )
+        self.assertIn("评审模型不同（m1 → m2），回答阶段的分数不能直接比", unpinned)
+        self.assertIn("评审 m1", unpinned)
+
+
 class SavedRunTests(unittest.TestCase):
     def test_save_then_load_by_name_or_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MINIBOT_HOME": tmp}):

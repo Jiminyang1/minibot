@@ -161,6 +161,7 @@ flowchart TB
 | `MINIBOT_LLM_MAX_RETRIES` | `3` | LLM 瞬时错误（429/5xx/连接）的最大重试次数 |
 | `MINIBOT_LESSONS` | `auto` | `auto`（装了 fastembed 且有已批准的 lesson 时开启）/ `on` / `off` |
 | `MINIBOT_LESSONS_TOP_K` / `MINIBOT_LESSONS_MIN_SCORE` | `3` / `0.55` | 每次请求最多几条 / 余弦相似度下限 |
+| `MINIBOT_EVAL_JUDGE_MODEL` | 被测模型 | 评测里给回答阶段打分的模型；比较模型时把它固定住 |
 | `MINIBOT_FETCH_VIA_JINA` | `0` | 设为 `1` 时 `fetch_url` 先走 Jina 阅读器（`r.jina.ai`），正文抽取更好，但每个抓取的 URL 都会发给这个第三方 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | 两个都设置即开启 Langfuse 追踪（每个 turn 一条 trace，含完整请求、工具、审批、压缩） |
 | `LANGFUSE_BASE_URL` | EU 云 | Langfuse 地址：按注册区域填，或自部署地址 |
@@ -223,7 +224,7 @@ uv run python -m minibot.evals run --repeat 3 --baseline <run>  # 同时和保�
 uv run python -m minibot.evals compare <基线> <本次>   # 对比两次保存过的运行
 ```
 
-每次 `run` 都把打过分的结果（重复运行合在一起）存成 `$MINIBOT_HOME/evals/<运行名>.json`，`--baseline` 和 `compare` 用的就是这个运行名。只比较两边都有、并且定义没改过的用例；两次之间改过输入或期望的用例单独列出，打分代码变了也会提醒。`runs.jsonl` 的每一行也会记下请求里带了哪些 lesson，开了 Langfuse 时还有 trace id。
+每次 `run` 都把打过分的结果（重复运行合在一起）存成 `$MINIBOT_HOME/evals/<运行名>.json`，`--baseline` 和 `compare` 用的就是这个运行名。只比较两边都有、并且定义没改过的用例；两次之间改过输入或期望的用例单独列出，打分代码变了也会提醒。评审模型变了同样会提醒：回答阶段由 `MINIBOT_EVAL_JUDGE_MODEL` 打分（默认是被测模型），比较两个模型之前要先把它固定住。`runs.jsonl` 的每一行也会记下请求里带了哪些 lesson，开了 Langfuse 时还有 trace id。
 
 pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。
 
