@@ -204,8 +204,11 @@ def format_comparison(comparison: dict[str, Any]) -> str:
 def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """What changed between two saved runs (``runner.load_run``) of the cases.
 
-    Only cases present in both runs are compared, so adding a case does not
-    move the rates. A case changed when its share of passing runs moved
+    Only cases present in both runs, with the same definition, are
+    compared: adding a case does not move the rates, and a case whose input
+    or expectations were edited in between is listed, not scored as a
+    change. Runs saved before fingerprints existed cannot be checked; the
+    report says so. A case changed when its share of passing runs moved
     (with repeats, 3/3 → 1/3); each case that got worse brings the failing
     runs of the new side, first failing stage and trace, so the next step is
     to open that trace. Cost moves too: a prompt that grew is a regression
@@ -215,7 +218,15 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
     new_rows = new.get("results") or []
     base_cases = _by_case(base_rows)
     new_cases = _by_case(new_rows)
-    common = base_cases.keys() & new_cases.keys()
+    shared = base_cases.keys() & new_cases.keys()
+    base_prints = _fingerprints(base)
+    new_prints = _fingerprints(new)
+    redefined = sorted(
+        case
+        for case in shared
+        if case in base_prints and case in new_prints and base_prints[case] != new_prints[case]
+    )
+    common = shared - set(redefined)
     comparison = compare_runs(
         [row for row in base_rows if row["case"] in common],
         [row for row in new_rows if row["case"] in common],
@@ -237,10 +248,16 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
         "unchanged": len(common) - len(comparison["flips"]),
         "only_base": sorted(base_cases.keys() - new_cases.keys()),
         "only_new": sorted(new_cases.keys() - base_cases.keys()),
+        "redefined": redefined,
         "warnings": _regression_warnings(
             base, new, base_cases, new_cases, {flip["case"] for flip in comparison["flips"]}
         ),
     }
+
+
+def _fingerprints(run: dict[str, Any]) -> dict[str, str]:
+    prints = (run.get("metadata") or {}).get("case_fingerprints")
+    return prints if isinstance(prints, dict) else {}
 
 
 def format_regression(report: dict[str, Any]) -> str:
@@ -290,6 +307,8 @@ def format_regression(report: dict[str, Any]) -> str:
         lines.append(f"  只在基线里（没有比较）: {', '.join(report['only_base'])}")
     if report["only_new"]:
         lines.append(f"  只在本次里（没有比较）: {', '.join(report['only_new'])}")
+    if report["redefined"]:
+        lines.append(f"  两次之间改过定义（没有比较）: {', '.join(report['redefined'])}")
     return "\n".join(lines)
 
 
@@ -320,6 +339,21 @@ def _regression_warnings(
             warnings.append(
                 f"两边的{label}不同（{base_meta[key]} → {new_meta[key]}），变化不全是代码造成的。"
             )
+    old_format = [
+        label
+        for label, run in (("基线", base), ("本次", new))
+        if not _fingerprints(run)
+    ]
+    if old_format:
+        warnings.append(
+            f"{'、'.join(old_format)}没有记录用例定义（旧格式的运行），"
+            "两次之间改过的用例分不出来。"
+        )
+    base_scorer, new_scorer = base_meta.get("scorer"), new_meta.get("scorer")
+    if base_scorer and new_scorer and base_scorer != new_scorer:
+        warnings.append(
+            f"打分代码不同（{base_scorer} → {new_scorer}），变化可能来自打分方式，不是 agent。"
+        )
     # Only a change needs the caution: one run cannot tell it from variance.
     single = [
         case for case in sorted(changed) if len(base_cases[case]) == 1 or len(new_cases[case]) == 1

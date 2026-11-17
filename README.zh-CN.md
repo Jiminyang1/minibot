@@ -223,7 +223,7 @@ uv run python -m minibot.evals run --repeat 3 --baseline <run>  # 同时和保�
 uv run python -m minibot.evals compare <基线> <本次>   # 对比两次保存过的运行
 ```
 
-每次 `run` 都把打过分的结果（重复运行合在一起）存成 `$MINIBOT_HOME/evals/<运行名>.json`，`--baseline` 和 `compare` 用的就是这个运行名。只比较两边都有的用例。`runs.jsonl` 的每一行也会记下请求里带了哪些 lesson，开了 Langfuse 时还有 trace id。
+每次 `run` 都把打过分的结果（重复运行合在一起）存成 `$MINIBOT_HOME/evals/<运行名>.json`，`--baseline` 和 `compare` 用的就是这个运行名。只比较两边都有、并且定义没改过的用例；两次之间改过输入或期望的用例单独列出，打分代码变了也会提醒。`runs.jsonl` 的每一行也会记下请求里带了哪些 lesson，开了 Langfuse 时还有 trace id。
 
 pytest 套件会调用真实模型，所以只有加 `-m golden` 才会跑（`pytest` 子命令会自动加上）；直接 `pytest` 只收集单元测试。
 

@@ -312,7 +312,7 @@ MiniBot 在用户自己的权限下运行,没有沙箱。下面几条边界防�
 **评测**(`evals/`):
 - 用例是 git 里的 `cases.json`,同步成 Langfuse dataset。每个用例在沙箱里跑一轮(临时 state home、沙箱化的工具、审批由用例决定),按 skill → 工具 → 参数 → 回答(LLM 判分)→ 结果状态逐阶段打分。阶段顺序就是一轮对话展开的顺序,所以"第一个失败的阶段"就是读 trace 的起点;后面的失败常常只是连锁反应。
 - pytest 套件把每个(用例,阶段)做成一个测试,用例只跑一次、按阶段断言;只在 `-m golden` 时运行。
-- 每次 `run` 把打过分的结果(重复运行合在一起)存成 `$MINIBOT_HOME/evals/<运行名>.json`。`--baseline <运行名>` 和 `compare <基线> <本次>` 只比较两边都有的用例:各阶段通过率、平均成本(调用次数、token、耗时)、通过比例变了的用例;变坏的用例带上本次失败的那几次运行的首个失败阶段和 trace。哪一边只跑了一次、或者两边模型不同,报告会提醒。
+- 每次 `run` 把打过分的结果(重复运行合在一起)存成 `$MINIBOT_HOME/evals/<运行名>.json`。`--baseline <运行名>` 和 `compare <基线> <本次>` 只比较两边都有的用例:各阶段通过率、平均成本(调用次数、token、耗时)、通过比例变了的用例;变坏的用例带上本次失败的那几次运行的首个失败阶段和 trace。哪一边只跑了一次、或者两边模型不同,报告会提醒。每次运行还记下每个用例定义(输入加期望)的指纹和打分代码的哈希:两次之间改过定义的用例单独列出、不算变化;打分代码不同时报告提醒。
 - `runs.jsonl` 每一行记下这个 run 的请求里带过哪些 lesson,开了 Langfuse 时还有 trace id。trace id 是 `LangfuseFold` 记下的真实值,不是从 run_id 推出来的:在 experiment 或 pytest 的 span 里,这一轮会并入已经打开的 trace。`LangfuseFold` 在 run 结束后还保留最近 256 个 run 的 trace id,所以订阅者谁先处理结束事件都不影响。
 - `promote` 把一条真实 trace 变成用例:记录下的工具输出写进 `tool_results`,在沙箱里原样回放;期望值由规则和 LLM 起草,人确认后才写入。Langfuse 的旧版 trace API 对这个组织已返回 410,用的是 v2 observations API。
 

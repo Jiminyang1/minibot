@@ -40,7 +40,14 @@ def _row(case: str, passed: bool, *, calls: float = 2, tokens: float = 1000, tra
 
 
 def _run(name: str, rows: list[dict], **metadata) -> dict:
-    return {"run": name, "metadata": {"model": "m", "git": "abc", **metadata}, "results": rows}
+    # Same case definitions and scorer on both sides unless a test says otherwise.
+    defaults = {
+        "model": "m",
+        "git": "abc",
+        "scorer": "s1",
+        "case_fingerprints": {row["case"]: f"fp-{row['case']}" for row in rows},
+    }
+    return {"run": name, "metadata": {**defaults, **metadata}, "results": rows}
 
 
 def _printed(calls: list[str]):
@@ -107,6 +114,33 @@ class RegressionReportTests(unittest.TestCase):
         self.assertIn("1 个变化的用例在某一边只跑了 1 次", text)
         self.assertIn("变坏: a 1/1 → 0/1", text)
 
+    def test_a_case_redefined_in_between_is_listed_not_scored(self) -> None:
+        base = _run("base", [_row("a", True), _row("b", True)])
+        new = _run(
+            "new",
+            [_row("a", False), _row("b", True)],
+            case_fingerprints={"a": "fp-a-edited", "b": "fp-b"},
+        )
+
+        report = regression_report(base, new)
+
+        # "a" fails now, but its expectations changed: not a regression.
+        self.assertEqual(report["flips"], [])
+        self.assertEqual((report["cases"], report["redefined"]), (1, ["a"]))
+        self.assertIn("两次之间改过定义（没有比较）: a", format_regression(report))
+
+    def test_warns_about_a_scorer_change_and_old_format_runs(self) -> None:
+        text = format_regression(
+            regression_report(_run("b", [_row("a", True)]), _run("n", [_row("a", True)], scorer="s2"))
+        )
+        self.assertIn("打分代码不同（s1 → s2）", text)
+
+        old = {"run": "old", "metadata": {"model": "m"}, "results": [_row("a", True)]}
+        report = regression_report(old, _run("n", [_row("a", False)]))
+        # Without fingerprints the case is still compared, with a caution.
+        self.assertEqual([flip["case"] for flip in report["flips"]], ["a"])
+        self.assertIn("基线没有记录用例定义（旧格式的运行）", format_regression(report))
+
     def test_no_shared_cases(self) -> None:
         text = format_regression(regression_report(_run("b", [_row("a", True)]), _run("n", [_row("z", True)])))
         self.assertIn("没有共同的用例", text)
@@ -124,6 +158,16 @@ class SavedRunTests(unittest.TestCase):
         self.assertEqual(by_name["run"], "r1")
         self.assertEqual((by_name["metadata"]["model"], by_name["metadata"]["repeat"]), ("m", 1))
         self.assertEqual(by_name["results"][0]["case"], "a")
+
+    def test_fingerprint_follows_input_and_expected_only(self) -> None:
+        case = {"id": "a", "category": "x", "input": {"prompt": "p"}, "expected": {"skill": None, "tools_required": ["t"]}}
+        reordered = {"expected": {"tools_required": ["t"], "skill": None}, "input": {"prompt": "p"}, "id": "a", "category": "y"}
+        edited = {**case, "expected": {"skill": None, "tools_required": ["u"]}}
+
+        same, again, changed = (runner.case_fingerprints([c])["a"] for c in (case, reordered, edited))
+
+        self.assertEqual(same, again)  # key order and other fields do not count
+        self.assertNotEqual(same, changed)
 
     def test_missing_or_foreign_files_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MINIBOT_HOME": tmp}):
@@ -162,6 +206,11 @@ class BaselineCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual([(r["case"], r["trial"]) for r in saved["results"]], [("a", 1), ("a", 2)])
         self.assertEqual((saved["metadata"]["repeat"], saved["metadata"]["mode"]), (2, "local"))
+        # Every case definition and the scorer are fingerprinted with the run.
+        self.assertEqual(
+            set(saved["metadata"]["case_fingerprints"]), {c["id"] for c in runner.load_cases()}
+        )
+        self.assertEqual(saved["metadata"]["scorer"], runner.scorer_version())
         output = "\n".join(printed)
         self.assertIn("可以用作 --baseline br", output)
         self.assertIn("回归对比: 基线 main → 本次 br", output)
