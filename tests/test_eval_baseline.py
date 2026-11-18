@@ -16,13 +16,25 @@ from minibot.evals import __main__ as cli
 from minibot.evals import runner
 from minibot.evals.report import format_regression, regression_report
 from minibot.evals.runner import load_run, save_run
-from minibot.evals.sandbox import run_case
+from minibot.evals.sandbox import model_facing_parts, parts_touched, run_case, summarize_events
 from minibot.llm import LLMClient, LLMResponse
+from minibot.prompts import SYSTEM_PROMPT
+from minibot.runtime.events import RuntimeEvent
 from minibot.runtime.messages import ModelMessage
 from minibot.tools.definitions import ModelToolDefinition
 
 
-def _row(case: str, passed: bool, *, calls: float = 2, tokens: float = 1000, trace=None) -> dict:
+def _row(
+    case: str,
+    passed: bool,
+    *,
+    calls: float = 2,
+    tokens: float = 1000,
+    trace=None,
+    skills=(),
+    tools=(),
+    compactions: int = 0,
+) -> dict:
     scores = {
         "tool_selection": (1.0 if passed else 0.0, "" if passed else "缺少 ['read_file']"),
         "end_to_end": (1.0 if passed else 0.0, ""),
@@ -32,7 +44,13 @@ def _row(case: str, passed: bool, *, calls: float = 2, tokens: float = 1000, tra
     }
     return {
         "case": case,
-        "output": {"reply": "x", "error": None},
+        "output": {
+            "reply": "x",
+            "error": None,
+            "skills_read": list(skills),
+            "tool_calls": [{"name": name} for name in tools],
+            "compactions": compactions,
+        },
         "scores": scores,
         "trace_id": trace,
         "trace_url": f"https://lf/{trace}" if trace else None,
@@ -46,8 +64,20 @@ def _run(name: str, rows: list[dict], **metadata) -> dict:
         "git": "abc",
         "scorer": "s1",
         "case_fingerprints": {row["case"]: f"fp-{row['case']}" for row in rows},
+        "components": dict(_PARTS),
     }
     return {"run": name, "metadata": {**defaults, **metadata}, "results": rows}
+
+
+_PARTS = {
+    "prompt:system": "p1",
+    "prompt:memory": "m1",
+    "prompt:summary": "s1",
+    "skill:calendar": "c1",
+    "skill:mail": "ma1",
+    "tool:exec": "e1",
+    "tool:read_file": "r1",
+}
 
 
 def _printed(calls: list[str]):
@@ -144,6 +174,135 @@ class RegressionReportTests(unittest.TestCase):
     def test_no_shared_cases(self) -> None:
         text = format_regression(regression_report(_run("b", [_row("a", True)]), _run("n", [_row("z", True)])))
         self.assertIn("没有共同的用例", text)
+
+
+class ComponentChangeTests(unittest.TestCase):
+    def test_changed_parts_and_where_each_worse_case_should_look_first(self) -> None:
+        moved = {
+            **_PARTS,
+            "prompt:summary": "s2",
+            "skill:calendar": "c2",
+            "tool:read_file": "r2",
+            "tool:grep": "g1",
+        }
+        del moved["skill:mail"]
+        # "a" read the calendar skill before; now it skips it and fails.
+        # "b" only ever ran exec, which did not change.
+        base = _run(
+            "base",
+            [_row("a", True, skills=["calendar"], tools=["read_skill"]), _row("b", True, tools=["exec"])],
+        )
+        new = _run("new", [_row("a", False), _row("b", False, tools=["exec"])], components=moved)
+
+        report = regression_report(base, new)
+
+        self.assertEqual(
+            report["components"],
+            {
+                "changed": ["prompt:summary", "skill:calendar", "tool:read_file"],
+                "added": ["tool:grep"],
+                "removed": ["skill:mail"],
+            },
+        )
+        # The summary prompt moved too, but neither case was compacted.
+        self.assertEqual(report["suspects"], {"a": ["skill:calendar"], "b": []})
+        text = format_regression(report)
+        self.assertIn(
+            "改过的部件: prompt:summary、skill:calendar、tool:read_file、tool:grep（新增）、skill:mail（去掉）",
+            text,
+        )
+        self.assertIn("先查: skill:calendar（这个用例用到、又改过的部件）", text)
+        self.assertIn("它用到的部件都没改", text)
+
+    def test_the_system_prompt_goes_with_every_case_the_summary_prompt_after_compaction(self) -> None:
+        moved = {**_PARTS, "prompt:system": "p2", "prompt:summary": "s2"}
+        base = _run("base", [_row("a", True), _row("b", True)])
+        new = _run("new", [_row("a", False, compactions=1), _row("b", False)], components=moved)
+
+        report = regression_report(base, new)
+
+        self.assertEqual(
+            report["suspects"], {"a": ["prompt:summary", "prompt:system"], "b": ["prompt:system"]}
+        )
+
+    def test_nothing_recorded_moved_but_the_code_did(self) -> None:
+        base = _run("base", [_row("a", True)])
+        new = _run("new", [_row("a", False)], git="def")
+
+        report = regression_report(base, new)
+
+        self.assertEqual(report["suspects"], {"a": []})
+        text = format_regression(report)
+        self.assertIn("改过的部件: 无（prompt、skill、工具定义都和基线一样）；git 不同（abc → def）", text)
+        self.assertNotIn("先查", text)
+        self.assertNotIn("它用到的部件都没改", text)
+
+    def test_runs_saved_without_parts_get_a_caution(self) -> None:
+        report = regression_report(
+            _run("base", [_row("a", True)], components=None), _run("new", [_row("a", False)])
+        )
+
+        self.assertIsNone(report["components"])
+        self.assertEqual(report["suspects"], {})
+        text = format_regression(report)
+        self.assertIn("基线没有记录部件版本", text)
+        self.assertNotIn("改过的部件", text)
+
+
+class ModelFacingPartsTests(unittest.TestCase):
+    def test_prompts_skills_and_tools_are_read_without_a_model_key(self) -> None:
+        with mock.patch.dict(os.environ, {"MINIBOT_LANGFUSE": "0"}):
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+            parts = model_facing_parts(Config(model=_MODEL))
+            versions = runner.component_versions(Config(model=_MODEL))
+            again = runner.component_versions(Config(model=_MODEL))
+
+        self.assertLessEqual(
+            {
+                "prompt:system",
+                "prompt:memory",
+                "prompt:summary",
+                "skill:calendar",
+                "tool:read_file",
+                # The macOS stand-ins carry the real server's definitions.
+                "tool:mcp__macos_system__calendar_create_event",
+            },
+            set(parts),
+        )
+        self.assertEqual(parts["prompt:system"], SYSTEM_PROMPT)
+        # Nothing from the temp sandbox (paths, times) leaks into a hash.
+        self.assertEqual(versions, again)
+        self.assertEqual(set(versions), set(parts))
+
+    def test_editing_the_system_prompt_moves_only_its_hash(self) -> None:
+        with mock.patch.dict(os.environ, {"MINIBOT_LANGFUSE": "0"}):
+            before = runner.component_versions(Config(model=_MODEL))
+            with mock.patch("minibot.bootstrap.SYSTEM_PROMPT", SYSTEM_PROMPT + "多一句。"):
+                after = runner.component_versions(Config(model=_MODEL))
+
+        self.assertEqual([name for name in before if before[name] != after[name]], ["prompt:system"])
+
+    def test_a_run_touches_the_always_sent_prompts_and_what_it_used(self) -> None:
+        output = {"skills_read": ["mail"], "tool_calls": [{"name": "read_skill"}, {"name": "exec"}]}
+
+        self.assertEqual(
+            parts_touched(output),
+            {"prompt:system", "prompt:memory", "skill:mail", "tool:read_skill", "tool:exec"},
+        )
+        self.assertIn("prompt:summary", parts_touched({**output, "compactions": 1}))
+
+    def test_compactions_are_counted(self) -> None:
+        events = [
+            RuntimeEvent(
+                id=f"r:{seq}", run_id="r", session_id="s", seq=seq, type=type_, created_at="t", payload={}
+            )
+            for seq, type_ in enumerate(["model.request.completed", "compaction.request.completed"])
+        ]
+
+        summary = summarize_events(events)
+
+        self.assertEqual((summary["model_calls"], summary["compactions"]), (2, 1))
 
 
 class JudgeModelTests(unittest.TestCase):
@@ -268,6 +427,8 @@ class BaselineCommandTests(unittest.TestCase):
             set(saved["metadata"]["case_fingerprints"]), {c["id"] for c in runner.load_cases()}
         )
         self.assertEqual(saved["metadata"]["scorer"], runner.scorer_version())
+        # So are the prompts, skills and tool definitions the cases were shown.
+        self.assertLessEqual({"prompt:system", "skill:calendar"}, set(saved["metadata"]["components"]))
         output = "\n".join(printed)
         self.assertIn("可以用作 --baseline br", output)
         self.assertIn("回归对比: 基线 main → 本次 br", output)

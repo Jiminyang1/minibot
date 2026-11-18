@@ -224,7 +224,7 @@ uv run python -m minibot.evals run --repeat 3 --baseline <run>  # also compare w
 uv run python -m minibot.evals compare <base> <new>   # the same comparison between two saved runs
 ```
 
-Every `run` saves its scored rows (repeats pooled) as `$MINIBOT_HOME/evals/<run>.json`; that run name is what `--baseline` and `compare` take. Only cases present in both runs, with the same definition, are compared; a case whose input or expectations changed in between is listed instead, and a change in the scoring code is flagged. So is a change of judge: the answer stage is graded by `MINIBOT_EVAL_JUDGE_MODEL` (default: the tested model), so pin it before comparing two models. Each row of `runs.jsonl` also records the lessons its requests carried and, with Langfuse on, its trace id.
+Every `run` saves its scored rows (repeats pooled) as `$MINIBOT_HOME/evals/<run>.json`; that run name is what `--baseline` and `compare` take. Only cases present in both runs, with the same definition, are compared; a case whose input or expectations changed in between is listed instead, and a change in the scoring code is flagged. Each run also records a hash of every prompt, skill and tool definition the model is shown, so the report lists the parts whose text changed and, for each case that got worse, the changed parts it used (the place to look first). A change of judge is flagged too: the answer stage is graded by `MINIBOT_EVAL_JUDGE_MODEL` (default: the tested model), so pin it before comparing two models. Each row of `runs.jsonl` also records the lessons its requests carried and, with Langfuse on, its trace id.
 
 The pytest suite calls the real model, so it only runs with `-m golden` (the `pytest` subcommand adds it); plain `pytest` collects unit tests only.
 

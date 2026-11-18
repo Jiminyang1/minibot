@@ -24,7 +24,7 @@ from ..config import Config, resolve_state_home
 from ..llm import LLMClient
 from ..llm_factory import build_llm_client_from_profile
 from ..llm_profile import build_llm_profile
-from .sandbox import run_case
+from .sandbox import model_facing_parts, run_case
 from .scoring import StageScore, end_to_end, judge_answer, score_deterministic, stage_passed
 
 DATASET = "minibot-golden"
@@ -334,10 +334,19 @@ def scorer_version() -> str:
     return _short_hash((Path(__file__).with_name("scoring.py")).read_text(encoding="utf-8"))
 
 
+def component_versions(config: Config) -> dict[str, str]:
+    """Part name -> a short hash of what the model is shown for it.
+
+    The parts are the prompts, every skill and every tool definition (see
+    ``sandbox.model_facing_parts``). Saved with every run, so a comparison
+    can name the parts that changed in between, and for each case that got
+    worse, the changed parts it used.
+    """
+    return {name: _short_hash(text) for name, text in sorted(model_facing_parts(config).items())}
+
+
 def _short_hash(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()[:12]
-
-
 
 
 def runs_dir() -> Path:
