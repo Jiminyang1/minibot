@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import resolve_state_home
+from .sandbox import parts_touched
 from .scoring import stage_passed
 
 PIPELINE = ("skill_selection", "tool_selection", "tool_args", "answer", "outcome")
@@ -213,6 +214,14 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
     runs of the new side, first failing stage and trace, so the next step is
     to open that trace. Cost moves too: a prompt that grew is a regression
     even when every case still passes.
+
+    When both runs recorded their parts (``runner.component_versions``),
+    the report names the prompts, skills and tool definitions whose text
+    changed, and for each case that got worse, the changed parts that case
+    used in either run (``sandbox.parts_touched``): a skill the base run
+    read and the new run skipped counts. That is where to look first, not a
+    verdict: every skill description and tool definition is in every
+    request, so a part a case never used can still move it.
     """
     base_rows = base.get("results") or []
     new_rows = new.get("results") or []
@@ -232,6 +241,7 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
         [row for row in new_rows if row["case"] in common],
     )
     broken = {flip["case"] for flip in comparison["flips"] if flip["change"] == "broken"}
+    changes = _component_changes(base, new)
     evidence = failure_report(
         [row for row in new_rows if row["case"] in broken],
         run_name=str(new.get("run")),
@@ -249,6 +259,15 @@ def regression_report(base: dict[str, Any], new: dict[str, Any]) -> dict[str, An
         "only_base": sorted(base_cases.keys() - new_cases.keys()),
         "only_new": sorted(new_cases.keys() - base_cases.keys()),
         "redefined": redefined,
+        "components": changes,
+        "suspects": (
+            {
+                case: _suspects(changes, [*base_cases.get(case, []), *new_cases.get(case, [])])
+                for case in sorted(broken)
+            }
+            if changes is not None
+            else {}
+        ),
         "warnings": _regression_warnings(
             base, new, base_cases, new_cases, {flip["case"] for flip in comparison["flips"]}
         ),
@@ -265,6 +284,49 @@ def _fingerprints(run: dict[str, Any]) -> dict[str, str]:
     return prints if isinstance(prints, dict) else {}
 
 
+def _components(run: dict[str, Any]) -> dict[str, str]:
+    parts = (run.get("metadata") or {}).get("components")
+    return parts if isinstance(parts, dict) else {}
+
+
+def _component_changes(base: dict[str, Any], new: dict[str, Any]) -> dict[str, list[str]] | None:
+    """Parts whose text moved; ``None`` when a side did not record its parts."""
+    before, after = _components(base), _components(new)
+    if not before or not after:
+        return None
+    return {
+        "changed": sorted(name for name in before.keys() & after.keys() if before[name] != after[name]),
+        "added": sorted(after.keys() - before.keys()),
+        "removed": sorted(before.keys() - after.keys()),
+    }
+
+
+def _suspects(changes: dict[str, list[str]], rows: list[dict[str, Any]]) -> list[str]:
+    """The moved parts that any of these runs of one case used."""
+    touched: set[str] = set()
+    for row in rows:
+        touched |= parts_touched(row.get("output") or {})
+    moved = [*changes["changed"], *changes["added"], *changes["removed"]]
+    return [name for name in moved if name in touched]
+
+
+def _format_changes(changes: dict[str, list[str]], base_git: str | None, new_git: str | None) -> str:
+    named = [
+        *changes["changed"],
+        *(f"{name}（新增）" for name in changes["added"]),
+        *(f"{name}（去掉）" for name in changes["removed"]),
+    ]
+    if named:
+        return f"  改过的部件: {'、'.join(named)}"
+    line = "  改过的部件: 无（prompt、skill、工具定义都和基线一样）"
+    if base_git and new_git and base_git != new_git:
+        line += (
+            f"；git 不同（{base_git} → {new_git}），变化可能来自代码，"
+            "包括 ContextBuilder 写的段落标题"
+        )
+    return line
+
+
 def format_regression(report: dict[str, Any]) -> str:
     base, new = report["base"], report["new"]
     lines = [f"回归对比: 基线 {base['run']} → 本次 {new['run']}"]
@@ -275,6 +337,9 @@ def format_regression(report: dict[str, Any]) -> str:
         )
     for warning in report["warnings"]:
         lines.append(f"  注意: {warning}")
+    changes = report["components"]
+    if changes is not None:
+        lines.append(_format_changes(changes, base["git"], new["git"]))
     if not report["cases"]:
         lines.append("  两次运行没有共同的用例，没有可比的东西。")
         return "\n".join(lines)
@@ -306,6 +371,11 @@ def format_regression(report: dict[str, Any]) -> str:
             lines.append(f"      → {failure['stage']}: {failure['comment']}")
             if failure["trace_url"] or failure["trace_id"]:
                 lines.append(f"        trace: {failure['trace_url'] or failure['trace_id']}")
+        suspects = report["suspects"].get(flip["case"]) if flip["change"] == "broken" else None
+        if suspects:
+            lines.append(f"      先查: {'、'.join(suspects)}（这个用例用到、又改过的部件）")
+        elif suspects is not None and changes is not None and any(changes.values()):
+            lines.append("      它用到的部件都没改；没用到的部件也在每次请求里，仍可能有影响。")
     if not report["flips"]:
         lines.append("  没有用例的端到端结果发生变化。")
     else:
@@ -362,6 +432,12 @@ def _regression_warnings(
         warnings.append(
             f"{'、'.join(old_format)}没有记录用例定义（旧格式的运行），"
             "两次之间改过的用例分不出来。"
+        )
+    no_parts = [label for label, run in (("基线", base), ("本次", new)) if not _components(run)]
+    if no_parts:
+        warnings.append(
+            f"{'、'.join(no_parts)}没有记录部件版本（这个功能加上之前保存的运行），"
+            "分不出改了哪个 prompt、skill 或工具定义。"
         )
     base_scorer, new_scorer = base_meta.get("scorer"), new_meta.get("scorer")
     if base_scorer and new_scorer and base_scorer != new_scorer:

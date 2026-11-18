@@ -45,6 +45,7 @@ from .user_memory import UserMemoryStore
 
 if TYPE_CHECKING:
     from .lessons.retrieve import LessonRetriever
+    from .llm import LLMClient
 
 _GLOBAL_MCP_CONFIG_ENV = "MINIBOT_MCP_CONFIG_PATH"
 
@@ -86,11 +87,13 @@ def build_runtime(
     approval_broker: ApprovalBroker | None = None,
     state_home: Path | None = None,
     enable_mcp: bool = True,
+    llm: LLMClient | None = None,
 ) -> MiniBotRuntime:
     """Assemble a runtime.
 
-    *state_home* overrides ``MINIBOT_HOME`` and *enable_mcp* skips connecting
-    MCP servers; both exist so evals can run against an isolated sandbox.
+    *state_home* overrides ``MINIBOT_HOME``, *enable_mcp* skips connecting
+    MCP servers and *llm* replaces the client built for ``config.model``;
+    they exist so evals can run against an isolated sandbox.
     """
     package_dir = Path(__file__).resolve().parent
     resolved_workspace = (workspace or Path.cwd()).resolve()
@@ -112,7 +115,8 @@ def build_runtime(
         model_max_output_tokens=config.model_max_output_tokens,
         request_max_output_tokens=config.max_output_tokens,
     )
-    llm = build_llm_client_from_profile(llm_profile)
+    if llm is None:
+        llm = build_llm_client_from_profile(llm_profile)
     skill_registry = SkillRegistry.from_directory(package_dir / "skills")
 
     tool_registry = ToolRegistry()

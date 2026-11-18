@@ -55,6 +55,7 @@ from .runner import (
     judge_model,
     langfuse_configured,
     case_fingerprints,
+    component_versions,
     load_cases,
     load_run,
     run_experiment,
@@ -147,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
             baseline = load_run(args.baseline)
         except ValueError as exc:
             parser.error(str(exc))
+    # Read before anything runs: the prompts, skills and tool definitions
+    # this run's cases are shown.
+    components = component_versions(config)
     base_name = args.name or default_run_name(config)
     lesson_modes = ("off", "on") if args.lessons == "compare" else (args.lessons,)
     local = args.local or not langfuse_configured()
@@ -185,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                 # later comparison can set aside cases whose definition moved.
                 "case_fingerprints": case_fingerprints(load_cases(args.cases)),
                 "scorer": scorer_version(),
+                "components": components,
             },
         )
         print(f"结果已保存: {path}（可以用作 --baseline {mode_name}）")

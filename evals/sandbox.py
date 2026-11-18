@@ -35,12 +35,15 @@ from typing import Any
 
 from mcp.types import CallToolResult, TextContent
 
-from ..bootstrap import build_runtime
+from ..bootstrap import MiniBotRuntime, build_runtime
 from ..config import Config
-from ..llm import LLMClient
+from ..llm import LLMClient, LLMResponse
 from ..mcp_host.models import MCPToolSpec
 from ..mcp_host.provider import MCPToolProxy, _result_to_tool_output
+from ..prompts import MEMORY_INSTRUCTIONS, SUMMARY_SYSTEM_PROMPT
 from ..runtime.events import RuntimeEvent
+from ..runtime.messages import ModelMessage
+from ..tools.definitions import ModelToolDefinition
 from ..tools.base import ToolExecutionContext
 from ..tools.exec_cmd import ExecTool
 from ..tools.fetch_url import FetchUrlTool
@@ -71,19 +74,12 @@ def run_case(
         for fact in case_input.get("memory") or []:
             memory.add(fact)
 
-        approve = case_input.get("approval", "approve") == "approve"
-        runtime = build_runtime(
-            # Evals decide approvals themselves; never inherit "always".
-            config=replace(config, approval_mode="ask"),
+        runtime = _sandbox_runtime(
+            config,
             workspace=workspace,
-            state_home=home,
-            enable_mcp=False,
-            approval_handler=lambda request, cancel_event: approve,
-        )
-        if llm is not None:
-            runtime.agent_loop.llm = llm
-        install_sandbox_tools(
-            runtime.tool_registry,
+            home=home,
+            approve=case_input.get("approval", "approve") == "approve",
+            llm=llm,
             tool_results=case_input.get("tool_results") or {},
         )
 
@@ -123,11 +119,119 @@ def run_case(
         }
 
 
+def _sandbox_runtime(
+    config: Config,
+    *,
+    workspace: Path,
+    home: Path,
+    approve: bool,
+    llm: LLMClient | None,
+    tool_results: ToolResults,
+) -> MiniBotRuntime:
+    runtime = build_runtime(
+        # Evals decide approvals themselves; never inherit "always".
+        config=replace(config, approval_mode="ask"),
+        workspace=workspace,
+        state_home=home,
+        enable_mcp=False,
+        approval_handler=lambda request, cancel_event: approve,
+        llm=llm,
+    )
+    install_sandbox_tools(runtime.tool_registry, tool_results=tool_results)
+    return runtime
+
+
+# ── what the model is shown, part by part ─────────────────────────
+
+# Sent with every request; the summary prompt only when the history is compacted.
+ALWAYS_SENT = ("prompt:system", "prompt:memory")
+SUMMARY_PROMPT = "prompt:summary"
+
+
+def model_facing_parts(config: Config) -> dict[str, str]:
+    """Part name -> the text the model is shown for it.
+
+    Parts are the prompts (``prompt:system``, ``prompt:memory``,
+    ``prompt:summary``), every skill (``skill:<name>``: description, tools
+    and body) and every tool definition (``tool:<name>``: description and
+    parameters). They are read from a sandbox runtime built the way
+    ``run_case`` builds one, so the tools are the ones a case sees. No model
+    is called, and no API key is needed.
+
+    Not a part: the section headings ``ContextBuilder`` writes around them.
+    A change there shows only as a different git revision.
+    """
+    with tempfile.TemporaryDirectory(prefix="minibot-eval-") as tmp:
+        workspace = Path(tmp) / "workspace"
+        workspace.mkdir()
+        runtime = _sandbox_runtime(
+            # Lessons are recorded per run already, and loading them is slow.
+            replace(config, lessons_mode="off"),
+            workspace=workspace,
+            home=Path(tmp) / "home",
+            approve=False,
+            llm=_NoModel(),
+            tool_results={},
+        )
+        try:
+            parts = {
+                "prompt:system": runtime.context_builder.base_system_prompt,
+                "prompt:memory": MEMORY_INSTRUCTIONS,
+                SUMMARY_PROMPT: SUMMARY_SYSTEM_PROMPT,
+            }
+            for skill in runtime.skill_registry.list():
+                parts[f"skill:{skill.name}"] = _canonical(
+                    {"description": skill.description, "tools": list(skill.tools), "body": skill.body}
+                )
+            for definition in runtime.tool_registry.get_definitions():
+                parts[f"tool:{definition.name}"] = _canonical(
+                    {"description": definition.description, "parameters": definition.parameters}
+                )
+        finally:
+            runtime.mcp_host.close()
+    return parts
+
+
+def parts_touched(output: dict[str, Any]) -> set[str]:
+    """The parts one run's output shows the model used.
+
+    The prompts that go with every request, plus the skills it read, the
+    tools it called, and the summary prompt if the history was compacted.
+    Every skill description and tool definition is in every request, so
+    this is where to look first, not everything that could matter.
+    """
+    touched = set(ALWAYS_SENT)
+    if output.get("compactions"):
+        touched.add(SUMMARY_PROMPT)
+    touched.update(f"skill:{name}" for name in output.get("skills_read") or [])
+    touched.update(
+        f"tool:{call.get('name')}" for call in output.get("tool_calls") or [] if call.get("name")
+    )
+    return touched
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+class _NoModel(LLMClient):
+    """Fills the runtime's model slot when only its text is read."""
+
+    def chat(
+        self,
+        messages: list[ModelMessage],
+        tools: list[ModelToolDefinition] | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        raise RuntimeError("这个 runtime 只用来读提示和工具定义，不调用模型。")
+
+
 def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
     """Reduce a run's events to what the scorers need."""
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     model_calls = 0
+    compactions = 0
     input_tokens = output_tokens = 0
     lessons_used: list[str] = []
     for event in events:
@@ -152,6 +256,8 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
                     lessons_used.append(str(lesson_id))
         elif event.type in {"model.request.completed", "compaction.request.completed"}:
             model_calls += 1
+            if event.type == "compaction.request.completed":
+                compactions += 1
             usage = payload.get("usage") or {}
             input_tokens += usage.get("input_tokens") or 0
             output_tokens += usage.get("output_tokens") or 0
@@ -164,6 +270,7 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
             if call["name"] == "read_skill"
         ],
         "model_calls": model_calls,
+        "compactions": compactions,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "lessons_used": lessons_used,
